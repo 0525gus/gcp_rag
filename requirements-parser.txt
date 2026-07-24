@@ -1,0 +1,11 @@
+fastapi>=0.115.0,<0.116
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0,<3
+google-cloud-storage>=2.18.0
+google-cloud-documentai>=3.0.0
+google-cloud-firestore>=2.19.0
+httpx>=0.27.0
+# HWP/HWPX → Markdown
+# 0.8.x manylinux 휠은 Debian libfreetype 과 FT_Palette_Data_Get 심볼 불일치로
+# Cloud Run(slim) 에서 import 실패 → 파싱에 충분한 0.5.1 고정
+rhwp-python==0.5.1

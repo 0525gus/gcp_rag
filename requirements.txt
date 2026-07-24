@@ -1,0 +1,4 @@
+# 로컬 개발·테스트용 통합 의존성 (Docker/Cloud Run은 서비스별 requirements 사용)
+# 단위 테스트만: pytest
+pytest>=8.3.0
+ruff>=0.7.0

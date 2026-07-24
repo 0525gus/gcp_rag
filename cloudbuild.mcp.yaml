@@ -1,0 +1,15 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_IMAGE}
+      - -f
+      - services/mcp_server/Dockerfile
+      - .
+images:
+  - ${_IMAGE}
+substitutions:
+  _IMAGE: mcp:latest
+options:
+  logging: CLOUD_LOGGING_ONLY

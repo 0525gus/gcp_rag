@@ -1,0 +1,14 @@
+[project]
+name = "gcp-rag-mcp"
+version = "1.0.0"
+description = "Google Drive → Vertex AI RAG Engine → MCP search backend"
+requires-python = ">=3.11"
+readme = "README.md"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

@@ -1,0 +1,462 @@
+# =============================================================================
+# Cloud Workflows — 일일 Drive → GCS → RAG 동기화 (v2)
+# HWP/HWPX: Parser(rhwp-python) → GCS MD → RAG import
+# 기타: export/copy → GCS → RAG import (Drive 네이티브 커넥터 미사용)
+# QG_MODE=log 기본 — 품질 게이트는 파서 로그, 배치 중단 없음
+# Scheduler: 0 0 * * * Asia/Seoul
+# =============================================================================
+#
+#   Scheduler / 수동 실행
+#     → for each driveId
+#         → backfill=true 이면 /sync/backfill (초기 전체)
+#            아니면 /sync/changes (델타; 최초 토큰 없으면 backfill 스냅샷)
+#         → for each change → ingest|delete
+#         → /sync/index-gcs → reconcile → commit-token
+#
+
+main:
+  params: [args]
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - region: "asia-northeast3"
+          - sync_url: ${default(map.get(args, "syncUrl"), "https://SYNC_SERVICE_URL")}
+          - parser_url: ${default(map.get(args, "parserUrl"), "https://PARSER_SERVICE_URL")}
+          - drive_ids: ${default(map.get(args, "driveIds"), [])}
+          - index_batch_size: ${default(map.get(args, "indexBatchSize"), 10)}
+          - do_backfill: ${default(map.get(args, "backfill"), false)}
+          - totals:
+              listed: 0
+              gcsUploaded: 0
+              indexed: 0
+              failed: 0
+              skipped: 0
+              deleted: 0
+              unchanged: 0
+              dlq: 0
+              splitQueued: 0
+
+    - for_each_drive:
+        for:
+          value: drive_id
+          in: ${drive_ids}
+          steps:
+            - reset_drive_accumulators:
+                assign:
+                  - change_list: []
+                  - pending_page_token: ""
+                  - pending_uris: []
+                  - pending_file_ids: []
+                  - drive_listed: 0
+                  - drive_gcs: 0
+                  - drive_indexed: 0
+                  - drive_failed: 0
+                  - drive_skipped: 0
+                  - drive_deleted: 0
+                  - drive_unchanged: 0
+                  - drive_dlq: 0
+                  - drive_split: 0
+
+            # ----- 1) 초기 backfill-run 또는 Changes 델타 -----
+            - fetch_source:
+                switch:
+                  - condition: ${do_backfill == true}
+                    steps:
+                      - run_backfill:
+                          try:
+                            call: http.post
+                            args:
+                              url: ${sync_url + "/sync/backfill-run"}
+                              auth:
+                                type: OIDC
+                              body:
+                                driveId: ${drive_id}
+                                parserUrl: ${parser_url}
+                                indexBatchSize: ${index_batch_size}
+                              timeout: 1800
+                            result: backfill_resp
+                          retry:
+                            predicate: ${http.default_retry_predicate}
+                            max_retries: 2
+                            backoff:
+                              initial_delay: 5
+                              max_delay: 60
+                              multiplier: 2
+                      - apply_backfill_totals:
+                          assign:
+                            - drive_listed: ${default(backfill_resp.body.totals.listed, 0)}
+                            - drive_gcs: ${default(backfill_resp.body.totals.gcsUploaded, 0)}
+                            - drive_indexed: ${default(backfill_resp.body.totals.indexed, 0)}
+                            - drive_failed: ${default(backfill_resp.body.totals.failed, 0)}
+                            - drive_skipped: ${default(backfill_resp.body.totals.skipped, 0)}
+                            - drive_unchanged: ${default(backfill_resp.body.totals.unchanged, 0)}
+                            - drive_dlq: ${default(backfill_resp.body.totals.dlq, 0)}
+                            - drive_split: ${default(backfill_resp.body.totals.splitQueued, 0)}
+                            - pending_page_token: ${default(backfill_resp.body.pendingPageToken, "")}
+                            - pending_uris: []
+                            - pending_file_ids: []
+                            - change_list: []
+                            - totals.listed: ${totals.listed + default(backfill_resp.body.totals.listed, 0)}
+                            - totals.gcsUploaded: ${totals.gcsUploaded + default(backfill_resp.body.totals.gcsUploaded, 0)}
+                            - totals.indexed: ${totals.indexed + default(backfill_resp.body.totals.indexed, 0)}
+                            - totals.failed: ${totals.failed + default(backfill_resp.body.totals.failed, 0)}
+                            - totals.skipped: ${totals.skipped + default(backfill_resp.body.totals.skipped, 0)}
+                            - totals.unchanged: ${totals.unchanged + default(backfill_resp.body.totals.unchanged, 0)}
+                            - totals.dlq: ${totals.dlq + default(backfill_resp.body.totals.dlq, 0)}
+                            - totals.splitQueued: ${totals.splitQueued + default(backfill_resp.body.totals.splitQueued, 0)}
+                      - log_backfill:
+                          call: sys.log
+                          args:
+                            severity: "INFO"
+                            text: ${"backfill-run drive=" + drive_id + " " + json.encode_to_string(backfill_resp.body.totals)}
+                      - skip_to_reconcile:
+                          next: reconcile_drive
+                  - condition: true
+                    steps:
+                      - fetch_changes:
+                          try:
+                            call: http.post
+                            args:
+                              url: ${sync_url + "/sync/changes"}
+                              auth:
+                                type: OIDC
+                              body:
+                                driveId: ${drive_id}
+                              timeout: 300
+                            result: changes_resp
+                          retry:
+                            predicate: ${http.default_retry_predicate}
+                            max_retries: 5
+                            backoff:
+                              initial_delay: 2
+                              max_delay: 60
+                              multiplier: 2
+
+            - assign_changes:
+                assign:
+                  - change_list: ${default(changes_resp.body.changes, [])}
+                  - pending_page_token: ${changes_resp.body.pendingPageToken}
+                  - drive_listed: ${len(change_list)}
+                  - totals.listed: ${totals.listed + len(change_list)}
+
+            - log_delta:
+                call: sys.log
+                args:
+                  severity: "INFO"
+                  text: ${"drive=" + drive_id + " mode=" + default(changes_resp.body.mode, "delta") + " changes=" + string(len(change_list))}
+
+            # ----- 2) 문서 단위 MIME 분기 (부분 실패 격리) -----
+            - process_each:
+                for:
+                  value: change
+                  in: ${change_list}
+                  steps:
+                    - route_switch:
+                        switch:
+                          # === 삭제 ===
+                          - condition: ${change.route == "DELETE" or change.removed == true}
+                            steps:
+                              - do_delete:
+                                  try:
+                                    call: http.post
+                                    args:
+                                      url: ${sync_url + "/sync/delete"}
+                                      auth:
+                                        type: OIDC
+                                      body:
+                                        fileId: ${change.fileId}
+                                        driveId: ${change.driveId}
+                                      timeout: 300
+                                    result: del_resp
+                                  retry:
+                                    predicate: ${http.default_retry_predicate}
+                                    max_retries: 3
+                                    backoff:
+                                      initial_delay: 2
+                                      max_delay: 30
+                                      multiplier: 2
+                                  except:
+                                    as: del_err
+                                    steps:
+                                      - del_fail:
+                                          assign:
+                                            - drive_failed: ${drive_failed + 1}
+                                            - totals.failed: ${totals.failed + 1}
+                                      - del_log:
+                                          call: sys.log
+                                          args:
+                                            severity: "ERROR"
+                                            text: ${"delete failed fileId=" + change.fileId + " " + json.encode_to_string(del_err)}
+                                      - del_continue:
+                                          next: process_each_end
+                              - del_ok:
+                                  assign:
+                                    - drive_deleted: ${drive_deleted + 1}
+                                    - totals.deleted: ${totals.deleted + 1}
+
+                          # === 미지원 스킵 ===
+                          - condition: ${change.route == "SKIP"}
+                            steps:
+                              - do_skip:
+                                  try:
+                                    call: http.post
+                                    args:
+                                      url: ${sync_url + "/sync/ingest"}
+                                      auth:
+                                        type: OIDC
+                                      body:
+                                        fileId: ${change.fileId}
+                                        driveId: ${change.driveId}
+                                        name: ${change.name}
+                                        mimeType: ${change.mimeType}
+                                        modifiedTime: ${change.modifiedTime}
+                                        removed: false
+                                        webViewLink: ${change.webViewLink}
+                                        route: "SKIP"
+                                        parserUrl: ${parser_url}
+                                      timeout: 120
+                                    result: skip_resp
+                                  except:
+                                    as: skip_err
+                                    steps:
+                                      - skip_fail:
+                                          assign:
+                                            - drive_failed: ${drive_failed + 1}
+                                            - totals.failed: ${totals.failed + 1}
+                                      - skip_continue:
+                                          next: process_each_end
+                              - skip_ok:
+                                  assign:
+                                    - drive_skipped: ${drive_skipped + 1}
+                                    - totals.skipped: ${totals.skipped + 1}
+
+                          # === HWP/HWPX · Google export · 원본 복사 → GCS ===
+                          - condition: ${change.route == "HWP_PARSE" or change.route == "GOOGLE_EXPORT" or change.route == "FILE_COPY"}
+                            steps:
+                              - do_ingest:
+                                  try:
+                                    call: http.post
+                                    args:
+                                      url: ${sync_url + "/sync/ingest"}
+                                      auth:
+                                        type: OIDC
+                                      body:
+                                        fileId: ${change.fileId}
+                                        driveId: ${change.driveId}
+                                        name: ${change.name}
+                                        mimeType: ${change.mimeType}
+                                        modifiedTime: ${change.modifiedTime}
+                                        removed: false
+                                        webViewLink: ${change.webViewLink}
+                                        route: ${change.route}
+                                        parserUrl: ${parser_url}
+                                      timeout: 900
+                                    result: ingest_resp
+                                  retry:
+                                    predicate: ${http.default_retry_predicate}
+                                    max_retries: 3
+                                    backoff:
+                                      initial_delay: 2
+                                      max_delay: 60
+                                      multiplier: 2
+                                  except:
+                                    as: ingest_err
+                                    steps:
+                                      - ingest_fail:
+                                          assign:
+                                            - drive_failed: ${drive_failed + 1}
+                                            - drive_dlq: ${drive_dlq + 1}
+                                            - totals.failed: ${totals.failed + 1}
+                                            - totals.dlq: ${totals.dlq + 1}
+                                      - ingest_log:
+                                          call: sys.log
+                                          args:
+                                            severity: "ERROR"
+                                            text: ${"ingest failed fileId=" + change.fileId + " route=" + change.route + " " + json.encode_to_string(ingest_err)}
+                                      - ingest_continue:
+                                          next: process_each_end
+
+                              - tally_ingest:
+                                  switch:
+                                    - condition: ${ingest_resp.body.status == "GCS_READY"}
+                                      steps:
+                                        - collect_uri:
+                                            assign:
+                                              - pending_uris: ${list.concat(pending_uris, ingest_resp.body.gcsUris)}
+                                              - pending_file_ids: ${list.concat(pending_file_ids, [change.fileId])}
+                                              - drive_gcs: ${drive_gcs + 1}
+                                              - totals.gcsUploaded: ${totals.gcsUploaded + 1}
+                                    - condition: ${ingest_resp.body.status == "UNCHANGED" or ingest_resp.body.status == "HASH_UNCHANGED"}
+                                      steps:
+                                        - tally_unchanged:
+                                            assign:
+                                              - drive_unchanged: ${drive_unchanged + 1}
+                                              - totals.unchanged: ${totals.unchanged + 1}
+                                    - condition: ${ingest_resp.body.status == "SKIPPED"}
+                                      steps:
+                                        - tally_skip2:
+                                            assign:
+                                              - drive_skipped: ${drive_skipped + 1}
+                                              - totals.skipped: ${totals.skipped + 1}
+                                    - condition: ${ingest_resp.body.status == "DLQ"}
+                                      steps:
+                                        - tally_dlq:
+                                            assign:
+                                              - drive_dlq: ${drive_dlq + 1}
+                                              - drive_failed: ${drive_failed + 1}
+                                              - totals.dlq: ${totals.dlq + 1}
+                                              - totals.failed: ${totals.failed + 1}
+                                    - condition: ${ingest_resp.body.status == "SPLIT_QUEUED"}
+                                      steps:
+                                        - tally_split:
+                                            assign:
+                                              - drive_split: ${drive_split + 1}
+                                              - drive_failed: ${drive_failed + 1}
+                                              - totals.splitQueued: ${totals.splitQueued + 1}
+                                              - totals.failed: ${totals.failed + 1}
+                                    - condition: true
+                                      steps:
+                                        - tally_unknown:
+                                            assign:
+                                              - drive_failed: ${drive_failed + 1}
+                                              - totals.failed: ${totals.failed + 1}
+                                        - unknown_log:
+                                            call: sys.log
+                                            args:
+                                              severity: "WARNING"
+                                              text: ${"unexpected ingest status fileId=" + change.fileId + " status=" + default(ingest_resp.body.status, "null")}
+
+                          # === 알 수 없는 route ===
+                          - condition: true
+                            steps:
+                              - unknown_route:
+                                  assign:
+                                    - drive_failed: ${drive_failed + 1}
+                                    - totals.failed: ${totals.failed + 1}
+                              - unknown_route_log:
+                                  call: sys.log
+                                  args:
+                                    severity: "WARNING"
+                                    text: ${"unknown route fileId=" + change.fileId + " route=" + default(change.route, "null")}
+
+                    - process_each_end:
+                        assign:
+                          - _: null
+
+            # ----- 3) GCS → RAG Engine 증분 import (배치 throttle) -----
+            - index_if_needed:
+                switch:
+                  - condition: ${len(pending_uris) > 0}
+                    steps:
+                      - index_batch:
+                          try:
+                            call: http.post
+                            args:
+                              url: ${sync_url + "/sync/index-gcs"}
+                              auth:
+                                type: OIDC
+                              body:
+                                gcsUris: ${pending_uris}
+                                fileIds: ${pending_file_ids}
+                              timeout: 900
+                            result: index_resp
+                          retry:
+                            predicate: ${http.default_retry_predicate}
+                            max_retries: 5
+                            backoff:
+                              initial_delay: 5
+                              max_delay: 120
+                              multiplier: 2
+                          except:
+                            as: index_err
+                            steps:
+                              - index_fail:
+                                  assign:
+                                    - drive_failed: ${drive_failed + len(pending_uris)}
+                                    - totals.failed: ${totals.failed + len(pending_uris)}
+                              - index_log:
+                                  call: sys.log
+                                  args:
+                                    severity: "ERROR"
+                                    text: ${"index-gcs failed drive=" + drive_id + " uris=" + string(len(pending_uris)) + " " + json.encode_to_string(index_err)}
+                              # 색인 실패 시 pageToken 미커밋 → 다음 배치에서 재시도
+                              - skip_commit_on_index_fail:
+                                  next: reconcile_drive
+                      - index_ok:
+                          assign:
+                            - drive_indexed: ${default(index_resp.body.count, len(pending_uris))}
+                            - totals.indexed: ${totals.indexed + default(index_resp.body.count, len(pending_uris))}
+                  - condition: true
+                    steps:
+                      - no_index:
+                          assign:
+                            - _: null
+
+            # ----- 4) 정합성 검증 (Drive 조회 vs GCS 업로드·색인) -----
+            - reconcile_drive:
+                try:
+                  call: http.post
+                  args:
+                    url: ${sync_url + "/sync/reconcile"}
+                    auth:
+                      type: OIDC
+                    body:
+                      driveId: ${drive_id}
+                      listed: ${drive_listed}
+                      gcsUploaded: ${drive_gcs}
+                      indexed: ${drive_indexed}
+                      failed: ${drive_failed}
+                      skipped: ${drive_skipped}
+                      deleted: ${drive_deleted}
+                      unchanged: ${drive_unchanged}
+                      dlq: ${drive_dlq}
+                      splitQueued: ${drive_split}
+                    timeout: 60
+                  result: recon_resp
+                except:
+                  as: recon_err
+                  steps:
+                    - recon_log:
+                        call: sys.log
+                        args:
+                          severity: "ERROR"
+                          text: ${"reconcile failed drive=" + drive_id + " " + json.encode_to_string(recon_err)}
+
+            # ----- 5) pageToken 커밋 (색인 하드 실패 시에는 위에서 스킵됨) -----
+            - commit_token:
+                switch:
+                  - condition: ${pending_page_token != "" and drive_indexed == drive_gcs}
+                    steps:
+                      - do_commit:
+                          try:
+                            call: http.post
+                            args:
+                              url: ${sync_url + "/sync/commit-token"}
+                              auth:
+                                type: OIDC
+                              body:
+                                driveId: ${drive_id}
+                                pageToken: ${pending_page_token}
+                              timeout: 60
+                            result: commit_resp
+                          retry:
+                            predicate: ${http.default_retry_predicate}
+                            max_retries: 3
+                            backoff:
+                              initial_delay: 1
+                              max_delay: 10
+                              multiplier: 2
+                  - condition: true
+                    steps:
+                      - defer_commit:
+                          call: sys.log
+                          args:
+                            severity: "WARNING"
+                            text: ${"pageToken NOT committed drive=" + drive_id + " gcs=" + string(drive_gcs) + " indexed=" + string(drive_indexed)}
+
+    - return_summary:
+        return:
+          totals: ${totals}
+          region: ${region}
+          projectId: ${project_id}

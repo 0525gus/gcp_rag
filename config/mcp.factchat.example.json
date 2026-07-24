@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "rag-search": {
+      "url": "https://rag-mcp-XXXXXXXX-an.a.run.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_API_KEY}"
+      }
+    }
+  }
+}
