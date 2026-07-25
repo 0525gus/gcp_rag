@@ -1,0 +1,12 @@
+# 저장소 전체를 LF 로 통일한다.
+# 에디터가 CRLF 로 바꿔 두면 내용이 같은데도 전 파일이 변경으로 잡혀
+# 실제 diff 가 줄바꿈 노이즈에 묻힌다.
+* text=auto eol=lf
+
+# 바이너리 (혹시 추가될 경우 손대지 않도록)
+*.png binary
+*.jpg binary
+*.pdf binary
+*.hwp binary
+*.hwpx binary
+*.ico binary
