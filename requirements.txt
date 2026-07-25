@@ -2,3 +2,5 @@
 # 단위 테스트만: pytest
 pytest>=8.3.0
 ruff>=0.7.0
+# workflows/daily_sync.yaml 파싱 테스트용 (전이 의존성에 기대지 않도록 명시)
+PyYAML>=6.0

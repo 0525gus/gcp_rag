@@ -26,4 +26,3 @@ service-account*.json
 .terraform/
 *.tfstate*
 .gcloud/
-tests/*
