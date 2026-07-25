@@ -5,7 +5,19 @@ google-cloud-storage>=2.18.0
 google-cloud-documentai>=3.0.0
 google-cloud-firestore>=2.19.0
 httpx>=0.27.0
-# HWP/HWPX → Markdown
-# 0.8.x manylinux 휠은 Debian libfreetype 과 FT_Palette_Data_Get 심볼 불일치로
-# Cloud Run(slim) 에서 import 실패 → 파싱에 충분한 0.5.1 고정
+# HWP(구형 바이너리) → Markdown
+#
+# 0.8.x 고정 해제 금지 — 휠 자체 결함이며 런타임 환경 탓이 아니다.
+#   _rhwp.abi3.so 는 FT_Palette_Data_Get(FreeType 2.10+ CPAL API)을 요구하는데,
+#   같은 휠이 동봉한 rhwp_python.libs/libfreetype-<hash>.so.6 이 그 심볼을 export
+#   하지 않는다(Rust 본체는 신버전으로 링크, auditwheel 은 구버전을 번들).
+#   → import 시 "undefined symbol: FT_Palette_Data_Get". Debian slim 뿐 아니라
+#     Ubuntu/WSL 등 어디서든 재현되므로 베이스 이미지를 바꿔도 해결되지 않는다.
+#
+# 우회 가능하나(시스템 libfreetype 을 LD_PRELOAD 하거나 동봉 파일을 심볼릭 링크로
+# 교체) 휠 내부 해시 파일명에 의존해 재빌드 때마다 깨진다. HWPX 는 python-hwpx 로
+# 분리했으므로 rhwp 는 .hwp 전용 — 0.5.1 로 충분하다.
 rhwp-python==0.5.1
+# HWPX(ZIP+XML) → Markdown. py3-none-any 순수 파이썬이라 네이티브 ABI 문제 없음.
+# rhwp 도 HWPX 를 읽지만 네이티브 확장이라 위 심볼 문제에 함께 묶인다.
+python-hwpx>=4.2,<5

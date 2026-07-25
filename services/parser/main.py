@@ -34,13 +34,19 @@ from shared.mime_types import is_hwpx  # noqa: E402
 from shared.models import ParseResult, ParseRoute  # noqa: E402
 
 from services.parser.cleanup import cleanup_markdown  # noqa: E402
+from services.parser.engine import (  # noqa: E402
+    can_parse,
+    engine_status,
+    is_hwpx_filename,
+    parse_document_bytes,
+)
+from services.parser.hwpx_parser import ENGINE as HWPX_ENGINE  # noqa: E402
 from services.parser.quality_gate import evaluate_quality  # noqa: E402
-from services.parser.rhwp_parser import parse_hwp_bytes, rhwp_available  # noqa: E402
 
 setup_logging()
 logger = logging.getLogger("parser_service")
 
-app = FastAPI(title="HWP/HWPX Parser (rhwp)", version="4.0.0")
+app = FastAPI(title="HWP/HWPX Parser", version="4.1.0")
 
 
 class ParseRequestBody(BaseModel):
@@ -54,10 +60,10 @@ class ParseRequestBody(BaseModel):
 @app.get("/health")
 def health() -> dict[str, str]:
     settings = get_settings()
+    engines = engine_status()
     return {
-        "status": "ok" if rhwp_available() else "degraded",
-        "engine": "rhwp",
-        "rhwp": "ok" if rhwp_available() else "missing",
+        "status": "ok" if all(v == "ok" for v in engines.values()) else "degraded",
+        **engines,
         "qgMode": settings.qg_mode,
     }
 
@@ -67,8 +73,15 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
     settings = get_settings()
     gcs = GcsClient(settings)
 
-    if not rhwp_available():
-        raise HTTPException(status_code=503, detail="rhwp-python is not installed")
+    filename = (
+        f"{req.file_id}.hwpx"
+        if is_hwpx(req.mime_type, req.gcs_uri)
+        else f"{req.file_id}.hwp"
+    )
+
+    if not can_parse(filename):
+        engine_name = "python-hwpx/rhwp" if is_hwpx_filename(filename) else "rhwp-python"
+        raise HTTPException(status_code=503, detail=f"{engine_name} is not installed")
 
     try:
         raw = gcs.download_bytes(req.gcs_uri)
@@ -76,25 +89,20 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
         logger.exception("GCS download failed: %s", req.gcs_uri)
         raise HTTPException(status_code=400, detail=f"GCS download failed: {exc}") from exc
 
-    filename = (
-        f"{req.file_id}.hwpx"
-        if is_hwpx(req.mime_type, req.gcs_uri)
-        else f"{req.file_id}.hwp"
-    )
-
     try:
-        parsed = parse_hwp_bytes(raw, filename=filename)
+        parsed = parse_document_bytes(raw, filename=filename)
         markdown = cleanup_markdown(parsed.markdown)
         parsed.metrics.text_length = len(markdown)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("rhwp parse failed for %s", req.file_id)
+        logger.exception("parse failed for %s", req.file_id)
         raise HTTPException(
             status_code=422,
             detail={"error": "PARSE_FAILED", "message": str(exc), "fileId": req.file_id},
         ) from exc
 
     warnings = list(parsed.metrics.warnings)
-    route = ParseRoute.RHWP
+    engine = parsed.engine
+    route = ParseRoute.HWPX if engine == HWPX_ENGINE else ParseRoute.RHWP
     table_count = parsed.metrics.table_count
     gate_status = "pass"
 
@@ -115,7 +123,7 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
                 detail={
                     "error": "EMPTY_TEXT",
                     "reasons": gate.reasons,
-                    "engine": "rhwp",
+                    "engine": engine,
                     "fileId": req.file_id,
                 },
             )
@@ -142,7 +150,7 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
                 detail={
                     "error": "QUALITY_GATE",
                     "reasons": gate.reasons,
-                    "engine": "rhwp",
+                    "engine": engine,
                     "fileId": req.file_id,
                     "qgMode": mode,
                 },
@@ -168,6 +176,7 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
                     )
                     markdown = cleanup_markdown(fb_md)
                     route = ParseRoute.PDF_DOCAI
+                    engine = "docai"
                     table_count = fb_metrics.table_count
                     warnings.extend(fb_metrics.warnings)
                     gate_status = "fallback_ok"
@@ -189,15 +198,16 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
         text_length=len(markdown),
     )
     payload = result.to_dict()
-    payload["engine"] = "rhwp"
+    payload["engine"] = engine
     payload["qualityGate"] = {
         "mode": settings.qg_mode,
         "status": gate_status,
         "reasons": gate.reasons if gate.triggered else [],
     }
     logger.info(
-        "Parsed %s engine=rhwp route=%s gate=%s hash=%s len=%s",
+        "Parsed %s engine=%s route=%s gate=%s hash=%s len=%s",
         req.file_id,
+        engine,
         route.value,
         gate_status,
         content_hash,

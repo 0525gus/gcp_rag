@@ -10,7 +10,8 @@ RUN apt-get update \
 
 COPY requirements-parser.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt \
-    && python -c "import rhwp; print('rhwp', getattr(rhwp, 'version', lambda: '?')())"
+    && python -c "import rhwp; print('rhwp', getattr(rhwp, 'version', lambda: '?')())" \
+    && python -c "import hwpx; print('python-hwpx ok')"
 
 COPY shared /app/shared
 COPY services /app/services

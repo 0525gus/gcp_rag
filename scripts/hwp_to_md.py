@@ -16,29 +16,32 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from services.parser.cleanup import cleanup_markdown
-from services.parser.rhwp_parser import parse_hwp_bytes, rhwp_available
+from services.parser.engine import can_parse, parse_document_bytes
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Convert HWP/HWPX to Markdown via rhwp-python"
+        description="Convert HWP/HWPX to Markdown (.hwpx=python-hwpx, .hwp=rhwp)"
     )
     parser.add_argument("input", type=Path, help="Path to .hwp or .hwpx")
     parser.add_argument("-o", "--output", type=Path, default=None, help="Output .md path")
     args = parser.parse_args()
-
-    if not rhwp_available():
-        print("rhwp-python is not installed. pip install rhwp-python", file=sys.stderr)
-        return 2
 
     src: Path = args.input
     if not src.exists():
         print(f"not found: {src}", file=sys.stderr)
         return 1
 
+    if not can_parse(src.name):
+        print(
+            "parser engine missing. pip install -r requirements-parser.txt",
+            file=sys.stderr,
+        )
+        return 2
+
     data = src.read_bytes()
     out = args.output or src.with_suffix(".md")
-    result = parse_hwp_bytes(data, filename=src.name)
+    result = parse_document_bytes(data, filename=src.name)
     md = cleanup_markdown(result.markdown)
     out.write_text(md, encoding="utf-8")
     print(f"engine={result.engine} wrote {out} ({len(md)} chars)")

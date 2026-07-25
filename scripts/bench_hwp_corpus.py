@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 
 from services.parser.cleanup import cleanup_markdown
 from services.parser.quality_gate import ParseMetrics, evaluate_quality
-from services.parser.rhwp_parser import parse_hwp_bytes, rhwp_available
+from services.parser.engine import can_parse, parse_document_bytes
 from shared.config import Settings
 
 
@@ -67,10 +67,6 @@ def main() -> int:
     out_dir = ROOT / "tests" / "_bench_out"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if not rhwp_available():
-        print("rhwp-python unavailable")
-        return 2
-
     files = iter_files(root)
     limit = int(sys.argv[2]) if len(sys.argv) > 2 else 0
     if limit > 0:
@@ -86,16 +82,21 @@ def main() -> int:
             name=path.name,
             ext=path.suffix.lower(),
             size_bytes=len(data),
-            engine="rhwp",
+            engine="?",
             ok=False,
             ms=0.0,
         )
+        if not can_parse(path.name):
+            row.error = "ENGINE_MISSING"
+            rows.append(row)
+            continue
         t0 = time.perf_counter()
         try:
-            out = parse_hwp_bytes(data, filename=path.name)
+            out = parse_document_bytes(data, filename=path.name)
             md = cleanup_markdown(out.markdown)
             row.ms = (time.perf_counter() - t0) * 1000
             row.md_chars = len(md)
+            row.engine = out.engine
             row.table_count = out.metrics.table_count
             row.ok = True
             out.metrics.text_length = len(md)
