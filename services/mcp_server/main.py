@@ -121,8 +121,11 @@ def search(
         results.append(
             {
                 "text": hit.text,
+                # Vertex 원값. 거리/유사도 여부가 확정되지 않아 정규화하지 않는다.
+                # 관련도 순위는 배열 순서(rank)가 기준.
                 "score": round(hit.score, 6),
-                "scoreType": "relevance",
+                "scoreType": "vertex_raw",
+                "rank": len(results) + 1,
                 "source": source,
             }
         )

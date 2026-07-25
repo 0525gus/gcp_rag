@@ -30,20 +30,28 @@ class RagEngineClient:
         self,
         gcs_uris: list[str],
         *,
-        chunk_size: int = 512,
-        chunk_overlap: int = 100,
+        chunk_size: int | None = None,
+        chunk_overlap: int | None = None,
         max_retries: int = 5,
     ) -> list[str]:
-        """GCS 마크다운을 코퍼스로 증분 import. RPM 제한 대비 재시도."""
+        """GCS 마크다운을 코퍼스로 증분 import. RPM 제한 대비 재시도.
+
+        청킹 값은 RAG_CHUNK_SIZE / RAG_CHUNK_OVERLAP 로 조정한다(인자 우선).
+        """
         if not gcs_uris:
             return []
 
+        size = chunk_size if chunk_size is not None else self.settings.rag_chunk_size
+        overlap = (
+            chunk_overlap if chunk_overlap is not None else self.settings.rag_chunk_overlap
+        )
         transformation = rag.TransformationConfig(
             chunking_config=rag.ChunkingConfig(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
+                chunk_size=size,
+                chunk_overlap=overlap,
             )
         )
+        logger.info("RAG import chunking size=%s overlap=%s", size, overlap)
 
         delay = 1.0
         last_err: Exception | None = None

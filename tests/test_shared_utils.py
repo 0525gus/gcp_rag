@@ -196,13 +196,30 @@ def _hit(fid: str, text: str, score: float) -> SearchHit:
     return SearchHit(text=text, score=score, source=SearchSource(file_id=fid))
 
 
-def test_postprocess_dedups_by_file_id_keeping_best_score() -> None:
+def test_postprocess_preserves_vertex_order() -> None:
+    """score 로 재정렬하면 안 된다.
+
+    거리/유사도 여부를 추측해 뒤집는 방식이라, 유사도였을 경우 순위가 통째로
+    거꾸로 뒤집힌다. Vertex 응답은 이미 관련도 순이므로 그대로 둔다.
+    """
+    hits = [_hit("f1.md", "가장 관련", 0.9), _hit("f2.md", "덜 관련", 0.1)]
+    out = postprocess_hits(hits, top_k=5)
+    assert [h.text for h in out] == ["가장 관련", "덜 관련"]
+
+
+def test_postprocess_keeps_first_chunk_per_file() -> None:
+    # 중복 제거는 API 순서상 앞선 것(= 더 관련 있는 것)을 남긴다
     hits = [_hit("f1.md", "첫 청크", 0.9), _hit("f1.md", "둘째 청크", 0.1)]
     out = postprocess_hits(hits, top_k=5)
     assert len(out) == 1
-    # 거리 0.1이 0.9보다 가까움 → relevance 높은 쪽(둘째 청크)이 남음
-    assert out[0].text == "둘째 청크"
+    assert out[0].text == "첫 청크"
     assert out[0].source.file_id == "f1"
+
+
+def test_postprocess_passes_score_through_unchanged() -> None:
+    # 점수는 표시용 원값 — 정규화하지 않는다
+    out = postprocess_hits([_hit("f1.md", "본문", 0.42)], top_k=5)
+    assert out[0].score == 0.42
 
 
 def test_postprocess_dedups_near_identical_text_across_files() -> None:

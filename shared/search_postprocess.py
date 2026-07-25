@@ -51,15 +51,15 @@ def unescape_chunk_text(text: str) -> str:
 
 
 def distance_to_relevance(raw_score: float) -> float:
-    """Vertex RAG score를 '높을수록 관련' relevance로 변환.
+    """(사용 안 함) 거리 → relevance 변환.
 
-    실측상 코퍼스 retrieve score는 거리형(낮을수록 유사)으로 오는 경우가 많아
-    1/(1+d) 로 뒤집는다. 이미 유사도(>1 등)처럼 보이면 그대로 clamp.
+    score 가 거리인지 유사도인지 추측해 뒤집는 방식이라, 유사도였을 경우
+    순위를 정확히 거꾸로 만든다. 순위는 Vertex 가 준 순서를 그대로 쓰므로
+    더 이상 정렬에 쓰지 않는다. 점수 의미가 확정되면 그때 다시 검토할 것.
     """
     s = float(raw_score)
     if s < 0:
         return 0.0
-    # 유사도처럼 보이면 (드묾) 그대로 상한
     if s > 1.5:
         return min(s / 10.0, 1.0) if s > 10 else min(s, 1.0)
     return 1.0 / (1.0 + s)
@@ -75,7 +75,14 @@ def postprocess_hits(
     *,
     top_k: int,
 ) -> list[SearchHit]:
-    """unescape + relevance 정규화 + fileId/본문 중복 제거 후 top_k."""
+    """unescape + fileId/본문 중복 제거 후 top_k.
+
+    **Vertex 가 돌려준 순서를 그대로 유지한다.** retrieval 응답은 이미 관련도
+    순으로 정렬돼 있는데, score 가 거리인지 유사도인지 추측해 변환한 값으로
+    재정렬하면 추측이 틀렸을 때 순위가 통째로 뒤집힌다. 중복 제거가 '먼저 나온
+    것'을 남기므로 파일당 엉뚱한 청크가 선택되는 결과까지 이어진다.
+    점수는 표시용으로만 원값을 통과시킨다.
+    """
     if not hits:
         return []
 
@@ -86,12 +93,8 @@ def postprocess_hits(
             hit.source.source_uri,
         )
         text = unescape_chunk_text(hit.text)
-        rel = distance_to_relevance(hit.score)
         src = replace(hit.source, file_id=fid)
-        prepared.append(SearchHit(text=text, score=rel, source=src))
-
-    # relevance 높은 순
-    prepared.sort(key=lambda h: h.score, reverse=True)
+        prepared.append(SearchHit(text=text, score=hit.score, source=src))
 
     seen_files: set[str] = set()
     seen_text: set[str] = set()
