@@ -44,7 +44,6 @@ MCP Client → Cloud Run MCP (/mcp) → RAG retrieval
 pip install -r requirements-parser.txt
 pip install -r requirements.txt
 set PYTHONPATH=.
-pytest tests/ -v
 python scripts/hwp_to_md.py sample.hwp -o sample.md
 ```
 

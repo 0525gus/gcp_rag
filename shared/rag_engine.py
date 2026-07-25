@@ -104,16 +104,28 @@ class RagEngineClient:
 
     def delete_by_file_id(self, file_id: str) -> bool:
         """fileId 기반 청크 제거 (display_name / 메타데이터 매칭)."""
-        deleted = False
+        return self.delete_files_by_ids([file_id]) > 0
+
+    def delete_files_by_ids(self, file_ids: list[str]) -> int:
+        """여러 fileId를 코퍼스 1회 순회로 일괄 제거.
+
+        파일마다 list_files()를 부르면 O(N×코퍼스)라 코퍼스가 커질수록 느리고
+        list RPM을 소모한다. 여기서는 list_files()를 한 번만 호출한다.
+        """
+        wanted = {fid for fid in file_ids if fid}
+        if not wanted:
+            return 0
+        deleted = 0
         for f in self.list_files():
             display = getattr(f, "display_name", "") or ""
             resource_name = getattr(f, "name", None)
+            if not resource_name:
+                continue
             # 정규화 md는 {fileId}.md, Drive 원본은 fileId가 이름에 포함될 수 있음
-            if file_id in display or display.startswith(file_id):
-                if resource_name:
-                    rag.delete_file(name=resource_name)
-                    deleted = True
-                    logger.info("Deleted RAG file: %s (%s)", resource_name, display)
+            if any(fid in display or display.startswith(fid) for fid in wanted):
+                rag.delete_file(name=resource_name)
+                deleted += 1
+                logger.info("Deleted RAG file: %s (%s)", resource_name, display)
         return deleted
 
     def retrieve(

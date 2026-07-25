@@ -24,7 +24,7 @@ def parse_hwp_bytes(data: bytes, *, filename: str = "doc.hwp") -> ParseOutput:
     import rhwp
 
     suffix = ".hwpx" if filename.lower().endswith(".hwpx") else ".hwp"
-    warnings: list[str] = ["RHWP"]
+    warnings: list[str] = []
 
     # from_bytes 우선, 없으면 임시 파일
     doc = None
@@ -69,14 +69,17 @@ def rhwp_available() -> bool:
 def _count_tables(ir: object, markdown: str) -> int:
     count = 0
     try:
-        blocks = getattr(ir, "blocks", None) or []
-        for block in blocks:
-            name = type(block).__name__.lower()
-            kind = str(getattr(block, "kind", "") or getattr(block, "type", "")).lower()
-            if "table" in name or "table" in kind:
-                count += 1
+        # HwpDocument 는 .blocks 가 아니라 .body/.furniture 구조 —
+        # iter_blocks(scope="all") 가 표를 세는 정식 경로 (중첩 표도 포함).
+        from rhwp.ir.nodes import TableBlock  # noqa: PLC0415
+
+        iter_blocks = getattr(ir, "iter_blocks", None)
+        if callable(iter_blocks):
+            count = sum(
+                1 for b in iter_blocks(scope="all") if isinstance(b, TableBlock)
+            )
     except Exception:  # noqa: BLE001
-        pass
+        count = 0
     if count == 0:
         count = markdown.lower().count("<table")
     if count == 0:
