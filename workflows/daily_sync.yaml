@@ -26,6 +26,8 @@ main:
           - drive_ids: ${default(map.get(args, "driveIds"), [])}
           - index_batch_size: ${default(map.get(args, "indexBatchSize"), 10)}
           - do_backfill: ${default(map.get(args, "backfill"), false)}
+          - recover_limit: ${default(map.get(args, "recoverLimit"), 200)}
+          - retry_max_attempts: ${default(map.get(args, "retryMaxAttempts"), 3)}
           - totals:
               listed: 0
               gcsUploaded: 0
@@ -50,6 +52,7 @@ main:
                   - pending_file_ids: []
                   - drive_listed: 0
                   - drive_gcs: 0
+                  - drive_uris: 0
                   - drive_indexed: 0
                   - drive_failed: 0
                   - drive_skipped: 0
@@ -87,6 +90,7 @@ main:
                           assign:
                             - drive_listed: ${default(backfill_resp.body.totals.listed, 0)}
                             - drive_gcs: ${default(backfill_resp.body.totals.gcsUploaded, 0)}
+                            - drive_uris: ${default(backfill_resp.body.totals.uris, 0)}
                             - drive_indexed: ${default(backfill_resp.body.totals.indexed, 0)}
                             - drive_failed: ${default(backfill_resp.body.totals.failed, 0)}
                             - drive_skipped: ${default(backfill_resp.body.totals.skipped, 0)}
@@ -286,6 +290,7 @@ main:
                                               - pending_uris: ${list.concat(pending_uris, ingest_resp.body.gcsUris)}
                                               - pending_file_ids: ${list.concat(pending_file_ids, [change.fileId])}
                                               - drive_gcs: ${drive_gcs + 1}
+                                              - drive_uris: ${drive_uris + len(ingest_resp.body.gcsUris)}
                                               - totals.gcsUploaded: ${totals.gcsUploaded + 1}
                                     - condition: ${ingest_resp.body.status == "UNCHANGED" or ingest_resp.body.status == "HASH_UNCHANGED"}
                                       steps:
@@ -405,6 +410,7 @@ main:
                       driveId: ${drive_id}
                       listed: ${drive_listed}
                       gcsUploaded: ${drive_gcs}
+                      uris: ${drive_uris}
                       indexed: ${drive_indexed}
                       failed: ${drive_failed}
                       skipped: ${drive_skipped}
@@ -426,7 +432,7 @@ main:
             # ----- 5) pageToken 커밋 (색인 하드 실패 시에는 위에서 스킵됨) -----
             - commit_token:
                 switch:
-                  - condition: ${pending_page_token != "" and drive_indexed == drive_gcs}
+                  - condition: ${pending_page_token != "" and drive_indexed == drive_uris}
                     steps:
                       - do_commit:
                           try:
@@ -453,7 +459,83 @@ main:
                           call: sys.log
                           args:
                             severity: "WARNING"
-                            text: ${"pageToken NOT committed drive=" + drive_id + " gcs=" + string(drive_gcs) + " indexed=" + string(drive_indexed)}
+                            text: ${"pageToken NOT committed drive=" + drive_id + " gcs=" + string(drive_gcs) + " uris=" + string(drive_uris) + " indexed=" + string(drive_indexed)}
+
+    # ----- 6) 자동 복구: 색인 누락(PARSED) → 재색인, 실패(FAILED/DLQ) → ingest 재시도 -----
+    # 워크플로우 본문이 실패해도 여기까지 오면 회수 시도. 복구 실패는 로그만 남기고 통과.
+    - recover_pending_index:
+        try:
+          call: http.post
+          args:
+            url: ${sync_url + "/sync/reindex-pending"}
+            auth:
+              type: OIDC
+            body:
+              limit: ${recover_limit}
+              indexBatchSize: ${index_batch_size}
+            timeout: 900
+          result: reindex_resp
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 2
+          backoff:
+            initial_delay: 5
+            max_delay: 60
+            multiplier: 2
+        except:
+          as: reindex_err
+          steps:
+            - reindex_log_err:
+                call: sys.log
+                args:
+                  severity: "ERROR"
+                  text: ${"reindex-pending failed " + json.encode_to_string(reindex_err)}
+            - reindex_skip:
+                next: recover_failed
+
+    - log_reindex:
+        call: sys.log
+        args:
+          severity: "INFO"
+          text: ${"reindex-pending " + json.encode_to_string(default(reindex_resp.body.totals, {}))}
+
+    - recover_failed:
+        try:
+          call: http.post
+          args:
+            url: ${sync_url + "/sync/retry-failed"}
+            auth:
+              type: OIDC
+            body:
+              limit: ${recover_limit}
+              parserUrl: ${parser_url}
+              maxAttempts: ${retry_max_attempts}
+              indexBatchSize: ${index_batch_size}
+            timeout: 1800
+          result: retry_resp
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 2
+          backoff:
+            initial_delay: 5
+            max_delay: 60
+            multiplier: 2
+        except:
+          as: retry_err
+          steps:
+            - retry_log_err:
+                call: sys.log
+                args:
+                  severity: "ERROR"
+                  text: ${"retry-failed failed " + json.encode_to_string(retry_err)}
+            - retry_skip:
+                next: return_summary
+
+    - log_retry:
+        call: sys.log
+        args:
+          severity: "INFO"
+          text: ${"retry-failed " + json.encode_to_string(default(retry_resp.body.totals, {}))}
 
     - return_summary:
         return:

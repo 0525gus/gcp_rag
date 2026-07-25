@@ -21,6 +21,9 @@ FILE_FIELDS = (
     "webViewLink,parents,driveId"
 )
 
+# googleapiclient 내장 재시도: 429/5xx·연결 오류에 지수 백오프 (커스텀 로직 불필요)
+NUM_RETRIES = 5
+
 
 class DriveClient:
     def __init__(self) -> None:
@@ -38,7 +41,7 @@ class DriveClient:
         resp = (
             self._service.changes()
             .getStartPageToken(driveId=drive_id, supportsAllDrives=True)
-            .execute()
+            .execute(num_retries=NUM_RETRIES)
         )
         return resp["startPageToken"]
 
@@ -65,7 +68,7 @@ class DriveClient:
                         "changes(fileId,removed,file(" + FILE_FIELDS + "))"
                     ),
                 )
-                .execute()
+                .execute(num_retries=NUM_RETRIES)
             )
             for item in resp.get("changes", []):
                 changes.append(self._to_change(item, drive_id))
@@ -86,7 +89,7 @@ class DriveClient:
         downloader = MediaIoBaseDownload(buffer, request)
         done = False
         while not done:
-            _, done = downloader.next_chunk()
+            _, done = downloader.next_chunk(num_retries=NUM_RETRIES)
         return buffer.getvalue()
 
     def export_file(self, file_id: str, export_mime: str) -> bytes:
@@ -98,14 +101,14 @@ class DriveClient:
         downloader = MediaIoBaseDownload(buffer, request)
         done = False
         while not done:
-            _, done = downloader.next_chunk()
+            _, done = downloader.next_chunk(num_retries=NUM_RETRIES)
         return buffer.getvalue()
 
     def get_file(self, file_id: str) -> dict[str, Any]:
         return (
             self._service.files()
             .get(fileId=file_id, supportsAllDrives=True, fields=FILE_FIELDS)
-            .execute()
+            .execute(num_retries=NUM_RETRIES)
         )
 
     def get_parents(self, file_id: str) -> list[str]:
@@ -211,7 +214,7 @@ class DriveClient:
                     pageToken=page_token,
                     fields=f"nextPageToken,files({FILE_FIELDS})",
                 )
-                .execute()
+                .execute(num_retries=NUM_RETRIES)
             )
             for f in resp.get("files", []):
                 yield f
@@ -244,7 +247,7 @@ class DriveClient:
                         pageToken=page_token,
                         fields=f"nextPageToken,files({FILE_FIELDS})",
                     )
-                    .execute()
+                    .execute(num_retries=NUM_RETRIES)
                 )
                 for f in resp.get("files", []):
                     if f.get("mimeType") == folder_mime:

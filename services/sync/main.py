@@ -114,6 +114,8 @@ class ReconcileBody(BaseModel):
     drive_id: str = Field(..., alias="driveId")
     listed: int
     gcs_uploaded: int = Field(..., alias="gcsUploaded")
+    # 업로드된 GCS URI 총수(파일당 원본+.meta.md면 2). indexed 정합성 비교 기준.
+    uris: int = 0
     indexed: int
     failed: int
     skipped: int
@@ -271,6 +273,7 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
     totals = {
         "listed": len(changes),
         "gcsUploaded": 0,
+        "uris": 0,
         "indexed": 0,
         "failed": 0,
         "skipped": 0,
@@ -332,6 +335,7 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
                         pending_uris.extend(uris)
                         pending_ids.extend([ch["fileId"]] * len(uris))
                         totals["gcsUploaded"] += 1
+                        totals["uris"] += len(uris)
                         if len(pending_uris) >= body.index_batch_size:
                             try:
                                 flush_index()
@@ -467,7 +471,7 @@ def ingest(body: IngestBody) -> dict[str, Any]:
             )
             return {
                 "fileId": body.file_id,
-                "status": "skipped",
+                "status": DocStatus.SKIPPED.value,
                 "reason": "out_of_folder_scope",
             }
 
@@ -729,7 +733,7 @@ def _ingest_hwp(
         gated["route"] = "HWP_PARSE"
         return gated
 
-    if store.content_unchanged(body.file_id, content_hash):
+    if store.should_skip_reindex(body.file_id, content_hash):
         store.upsert(
             _state_fields(
                 body,
@@ -790,7 +794,7 @@ def _ingest_google_export(
         title=body.name or body.file_id,
     )
     content_hash = sha256_text(f"{sha256_bytes(data)}|{path_ctx.path}|{sidecar}")
-    if store.content_unchanged(body.file_id, content_hash):
+    if store.should_skip_reindex(body.file_id, content_hash):
         return {
             "fileId": body.file_id,
             "status": "HASH_UNCHANGED",
@@ -855,7 +859,7 @@ def _ingest_file_copy(
             body=text,
         )
         content_hash = sha256_text(md_text)
-        if store.content_unchanged(body.file_id, content_hash):
+        if store.should_skip_reindex(body.file_id, content_hash):
             return {
                 "fileId": body.file_id,
                 "status": "HASH_UNCHANGED",
@@ -873,7 +877,7 @@ def _ingest_file_copy(
             title=name,
         )
         content_hash = sha256_text(f"{sha256_bytes(data)}|{path_ctx.path}|{sidecar}")
-        if store.content_unchanged(body.file_id, content_hash):
+        if store.should_skip_reindex(body.file_id, content_hash):
             return {
                 "fileId": body.file_id,
                 "status": "HASH_UNCHANGED",
@@ -937,12 +941,11 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
     rag = RagEngineClient()
     store = DocStateStore()
 
-    # upsert: 동일 fileId 기존 청크 제거 후 import
-    for fid in body.file_ids:
-        try:
-            rag.delete_by_file_id(fid)
-        except Exception:  # noqa: BLE001
-            logger.warning("pre-delete failed for %s", fid)
+    # upsert: 동일 fileId 기존 청크 제거 후 import (코퍼스 1회 순회로 일괄 삭제)
+    try:
+        rag.delete_files_by_ids(body.file_ids)
+    except Exception:  # noqa: BLE001
+        logger.warning("pre-delete failed for batch %s", body.file_ids)
 
     imported = rag.import_from_gcs(body.gcs_uris)
 
@@ -1086,6 +1089,99 @@ def reindex_pending(body: ReindexPendingBody) -> dict[str, Any]:
     return {"mode": "reindex-pending", "totals": totals, "ok": totals["failed"] == 0}
 
 
+class RetryFailedBody(BaseModel):
+    """FAILED(DLQ) 문서를 ingest부터 재시도."""
+
+    limit: int = Field(default=100, ge=1, le=1000)
+    parser_url: str = Field(default="", alias="parserUrl")
+    # 이 횟수만큼 재시도해도 실패하면 영구 실패로 두고 건너뜀 (무한 재시도 방지)
+    max_attempts: int = Field(default=3, alias="maxAttempts", ge=1, le=10)
+    index_batch_size: int = Field(default=10, alias="indexBatchSize", ge=1, le=50)
+
+    model_config = {"populate_by_name": True}
+
+
+@app.post("/sync/retry-failed")
+def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
+    """FAILED 문서를 ingest부터 재구동하고 GCS_READY면 색인까지 이어붙인다.
+
+    일시적 오류(Drive 429/5xx, 파서 타임아웃)로 DLQ에 빠진 문서를 자동 회수한다.
+    max_attempts 초과 문서는 실제 결함으로 보고 건너뛴다.
+    """
+    store = DocStateStore()
+    targets = store.list_by_status(DocStatus.FAILED, limit=body.limit)
+
+    totals = {
+        "candidates": len(targets),
+        "retried": 0,
+        "recovered": 0,
+        "stillFailed": 0,
+        "exhausted": 0,
+        "indexed": 0,
+    }
+    pending_uris: list[str] = []
+    pending_ids: list[str] = []
+
+    def flush() -> None:
+        nonlocal pending_uris, pending_ids
+        if not pending_uris:
+            return
+        uris, ids = pending_uris, pending_ids
+        pending_uris, pending_ids = [], []
+        idx = index_gcs(IndexGcsBody(gcsUris=uris, fileIds=list(dict.fromkeys(ids))))
+        totals["indexed"] += int(idx.get("count") or len(uris))
+
+    for doc in targets:
+        if store.get_dlq_attempts(doc.file_id) >= body.max_attempts:
+            totals["exhausted"] += 1
+            continue
+
+        store.record_dlq_attempt(doc.file_id)
+        totals["retried"] += 1
+        try:
+            res = ingest(
+                IngestBody(
+                    fileId=doc.file_id,
+                    driveId=doc.drive_id,
+                    name=doc.name,
+                    mimeType=doc.mime_type,
+                    modifiedTime=doc.modified_time,
+                    parserUrl=body.parser_url,
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("retry-failed ingest raised: %s", doc.file_id)
+            totals["stillFailed"] += 1
+            continue
+
+        status = res.get("status")
+        if status == "GCS_READY":
+            totals["recovered"] += 1
+            store.clear_dlq(doc.file_id)
+            uris = list(res.get("gcsUris") or [])
+            pending_uris.extend(uris)
+            pending_ids.extend([doc.file_id] * len(uris))
+            if len(pending_uris) >= body.index_batch_size:
+                try:
+                    flush()
+                except Exception:  # noqa: BLE001
+                    logger.exception("retry-failed flush failed")
+                    pending_uris, pending_ids = [], []
+        elif status in ("SKIPPED", "UNCHANGED", "HASH_UNCHANGED"):
+            totals["recovered"] += 1
+            store.clear_dlq(doc.file_id)
+        else:
+            totals["stillFailed"] += 1
+
+    try:
+        flush()
+    except Exception:  # noqa: BLE001
+        logger.exception("retry-failed final flush failed")
+
+    logger.info("retry-failed done totals=%s", totals)
+    return {"mode": "retry-failed", "totals": totals, "ok": totals["stillFailed"] == 0}
+
+
 @app.post("/sync/delete")
 def delete_file(body: DeleteBody) -> dict[str, Any]:
     rag = RagEngineClient()
@@ -1120,23 +1216,27 @@ def delete_file(body: DeleteBody) -> dict[str, Any]:
 @app.post("/sync/reconcile")
 def reconcile(body: ReconcileBody) -> dict[str, Any]:
     """Drive 조회 건수 vs GCS 업로드·색인·스킵·실패·삭제 정합성."""
+    # dlq/splitQueued 는 failed 의 하위 분류(집계 시 failed 도 함께 증가)이므로
+    # accounted 에 다시 더하면 이중 집계된다 — failed 만 합산한다.
     accounted = (
         body.gcs_uploaded
         + body.failed
         + body.skipped
         + body.deleted
         + body.unchanged
-        + body.dlq
-        + body.split_queued
     )
-    # indexed는 gcs_uploaded의 하위 집합이어야 함
-    index_ok = body.indexed <= body.gcs_uploaded
+    # indexed(=import된 URI 수)는 업로드된 URI 수의 하위 집합이어야 함.
+    # gcs_uploaded 는 '파일 수' 라 파일당 URI가 2개(원본+.meta.md)면 어긋난다 →
+    # uris(업로드된 URI 총수)와 비교. uris 미제공 시 gcs_uploaded 로 폴백.
+    index_baseline = body.uris if body.uris > 0 else body.gcs_uploaded
+    index_ok = body.indexed <= index_baseline
     delta = body.listed - accounted
     ok = delta == 0 and index_ok
     summary = {
         "driveId": body.drive_id,
         "listed": body.listed,
         "gcsUploaded": body.gcs_uploaded,
+        "uris": body.uris,
         "indexed": body.indexed,
         "failed": body.failed,
         "skipped": body.skipped,

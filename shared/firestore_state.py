@@ -69,6 +69,19 @@ class DocStateStore:
         existing = self.get(file_id)
         return bool(existing and existing.content_hash == content_hash)
 
+    def should_skip_reindex(self, file_id: str, content_hash: str) -> bool:
+        """색인 스킵 판단: 내용이 같고 '이미 INDEXED' 인 경우에만 True.
+
+        PARSED(색인만 실패)인데 해시가 같다는 이유로 스킵하면 색인 누락이
+        영구 고착된다 — 그 경우 URI 재방출해 색인을 복구해야 하므로 False.
+        """
+        existing = self.get(file_id)
+        return bool(
+            existing
+            and existing.content_hash == content_hash
+            and existing.status == DocStatus.INDEXED
+        )
+
     # --- Changes API pageToken ---
 
     def get_start_page_token(self, drive_id: str) -> str | None:
@@ -109,6 +122,26 @@ class DocStateStore:
             merge=True,
         )
         self.mark_failed(file_id, reason, **fields)
+
+    def get_dlq_attempts(self, file_id: str) -> int:
+        snap = self._db.collection(self.settings.dlq_collection).document(file_id).get()
+        if not snap.exists:
+            return 0
+        return int((snap.to_dict() or {}).get("retryCount") or 0)
+
+    def record_dlq_attempt(self, file_id: str) -> None:
+        self._db.collection(self.settings.dlq_collection).document(file_id).set(
+            {
+                "fileId": file_id,
+                "retryCount": firestore.Increment(1),
+                "lastRetryAt": datetime.now(timezone.utc),
+            },
+            merge=True,
+        )
+
+    def clear_dlq(self, file_id: str) -> None:
+        """재처리 성공 → DLQ 항목 제거 (다음 실패 시 카운트 0부터)."""
+        self._db.collection(self.settings.dlq_collection).document(file_id).delete()
 
     def enqueue_split(self, file_id: str, reason: str, size_bytes: int, **fields: Any) -> None:
         """크기 초과 → 분할 업로드 대기 큐."""
