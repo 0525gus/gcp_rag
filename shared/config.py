@@ -55,10 +55,12 @@ class Settings:
     # log: 경고만 / reject: 422·DLQ / fallback: Document AI(enable_docai_fallback 필요)
     qg_mode: str = "log"
     top_k_default: int = 5
-    # RAG 청킹 — 공문서는 표가 청크 경계에서 잘리면 검색 시 절반만 걸린다.
-    # 최적값은 코퍼스마다 달라 코드 수정·재배포 없이 A/B 할 수 있게 env 로 뺀다.
-    rag_chunk_size: int = 512
-    rag_chunk_overlap: int = 100
+    # RAG 청킹 — Vertex 기본값. 코퍼스마다 최적값이 달라 env 로 조정 가능하게 둔다
+    # (scripts/analyze_chunking.py 로 표 절단율을 재서 고를 것).
+    # 실측(공문 136건/표 220개): 512 는 표의 16% 를 자르고 1024 는 6%.
+    # 768 이상은 개선이 1%p 대로 평평해지며, 문서의 81% 는 768/1024 결과가 동일하다.
+    rag_chunk_size: int = 1024
+    rag_chunk_overlap: int = 256
     mcp_auth_audience: str = ""
     max_gcs_bytes: int = 50 * 1024 * 1024
     enable_docai_fallback: bool = False
@@ -101,8 +103,8 @@ class Settings:
             qg_min_text_length=_env_int("QG_MIN_TEXT_LENGTH", 20),
             qg_mode=mode,
             top_k_default=_env_int("TOP_K_DEFAULT", 5),
-            rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 512),
-            rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 100),
+            rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 1024),
+            rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 256),
             mcp_auth_audience=os.environ.get("MCP_AUTH_AUDIENCE", ""),
             max_gcs_bytes=_env_int("MAX_GCS_BYTES", 50 * 1024 * 1024),
             enable_docai_fallback=_env_bool("ENABLE_DOCAI_FALLBACK", False),
