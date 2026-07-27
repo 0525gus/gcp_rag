@@ -16,11 +16,12 @@ import logging
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -1046,8 +1047,35 @@ class ReindexPendingBody(BaseModel):
     index_batch_size: int = Field(default=10, alias="indexBatchSize", ge=1, le=50)
     # true면 INDEXED도 다시 import (기본은 PARSED만)
     force: bool = False
+    # true면 즉시 jobId를 반환하고 뒤에서 계속 돈다.
+    # 전량 재색인은 수십 분이 걸려 클라이언트가 먼저 끊기므로 이쪽을 쓸 것.
+    background: bool = False
+    # 내부용 — background 실행 시 진행률을 기록할 잡 ID
+    job_id: str | None = Field(default=None, alias="jobId")
 
     model_config = {"populate_by_name": True}
+
+
+_JOB_COLLECTION = "sync_jobs"
+
+
+def _job_set(job_id: str, **fields: Any) -> None:
+    from google.cloud import firestore
+
+    store = DocStateStore()
+    store._db.collection(_JOB_COLLECTION).document(job_id).set(  # noqa: SLF001
+        {"jobId": job_id, "updatedAt": firestore.SERVER_TIMESTAMP, **fields},
+        merge=True,
+    )
+
+
+@app.get("/sync/jobs/{job_id}")
+def job_status(job_id: str) -> dict[str, Any]:
+    store = DocStateStore()
+    snap = store._db.collection(_JOB_COLLECTION).document(job_id).get()  # noqa: SLF001
+    if not snap.exists:
+        raise HTTPException(status_code=404, detail=f"unknown job: {job_id}")
+    return snap.to_dict() or {}
 
 
 # RAG Engine 기본 파서가 안정적으로 받는 확장자 (+ sidecar meta.md)
@@ -1086,11 +1114,36 @@ def _normalized_uris_for_file(settings: Settings, file_id: str) -> list[str]:
 
 
 @app.post("/sync/reindex-pending")
-def reindex_pending(body: ReindexPendingBody) -> dict[str, Any]:
+def reindex_pending(
+    body: ReindexPendingBody, tasks: BackgroundTasks
+) -> dict[str, Any]:
     """Firestore PARSED(또는 force 시 전체) → GCS URI 모아 index-gcs.
 
     백필이 ingest만 하고 색인이 끊긴 경우 복구용.
+    전량 재색인은 수십 분이 걸려 클라이언트가 먼저 끊기므로 background=true 권장.
     """
+    if body.background:
+        job_id = f"reindex-{uuid.uuid4().hex[:12]}"
+        _job_set(job_id, status="RUNNING", mode="reindex-pending",
+                 limit=body.limit, force=body.force)
+        inner = body.model_copy(update={"background": False, "job_id": job_id})
+        tasks.add_task(_run_reindex_job, job_id, inner)
+        return {"jobId": job_id, "status": "RUNNING",
+                "statusUrl": f"/sync/jobs/{job_id}"}
+    return _reindex_pending_sync(body)
+
+
+def _run_reindex_job(job_id: str, body: ReindexPendingBody) -> None:
+    try:
+        result = _reindex_pending_sync(body)
+        _job_set(job_id, status="DONE", result=result)
+        logger.info("reindex job %s done: %s", job_id, result.get("totals"))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("reindex job %s failed", job_id)
+        _job_set(job_id, status="FAILED", error=str(exc)[:1000])
+
+
+def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
     settings = get_settings()
     store = DocStateStore()
 
@@ -1160,6 +1213,8 @@ def reindex_pending(body: ReindexPendingBody) -> dict[str, Any]:
                 flush()
             except Exception:  # noqa: BLE001
                 pending_uris, pending_ids = [], []
+            if body.job_id:
+                _job_set(body.job_id, status="RUNNING", totals=dict(totals))
 
     try:
         flush()

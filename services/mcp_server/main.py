@@ -25,6 +25,7 @@ if str(_ROOT) not in sys.path:
 from shared.config import get_settings  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
+from shared.lexical_rerank import rrf_rerank  # noqa: E402
 from shared.rag_engine import RagEngineClient  # noqa: E402
 from shared.search_postprocess import postprocess_hits  # noqa: E402
 
@@ -96,6 +97,11 @@ def search(
         top_k=fetch_k,
         vector_distance_threshold=threshold if threshold > 0 else None,
     )
+    # 어휘 순위를 섞어 상위를 다시 세운다(후보 안에서만, recall 불변).
+    # postprocess_hits 는 들어온 순서를 그대로 존중하므로 여기서 정렬해 넘긴다.
+    if settings.search_lexical_rerank and len(raw_hits) > 1:
+        order = rrf_rerank(query, [h.text for h in raw_hits])
+        raw_hits = [raw_hits[i] for i in order]
     hits = postprocess_hits(raw_hits, top_k=k)
     if not hits:
         # 필터가 전부 걸러낸 경우 — 임계값 조정 판단 근거로 남긴다

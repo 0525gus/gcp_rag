@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 # (초과 시 InvalidArgument: "GCS URIs cannot be specified more than 25 times.")
 _MAX_IMPORT_URIS = 25
 
+# corpus_name → (만든 시각, fileId→resource_name 인덱스)
+_CORPUS_INDEX_CACHE: dict[str, tuple[float, dict[str, list[str]]]] = {}
+_INDEX_TTL_SECONDS = 300.0
+
 
 class RagEngineClient:
     def __init__(self, settings: Settings | None = None) -> None:
@@ -63,6 +67,8 @@ class RagEngineClient:
             imported.extend(self._import_batch(batch, transformation, max_retries))
             if i + _MAX_IMPORT_URIS < len(gcs_uris):
                 time.sleep(2.0)  # 서브배치 사이 쿼터 여유 확보
+        # 코퍼스에 파일이 늘었으니 인덱스 캐시는 더 이상 유효하지 않다
+        self.invalidate_file_index()
         return imported
 
     def _import_batch(
@@ -125,6 +131,33 @@ class RagEngineClient:
     def list_files(self) -> list[Any]:
         return list(rag.list_files(corpus_name=self.corpus_name))
 
+    def _file_index(self) -> dict[str, list[str]]:
+        """fileId → RagFile resource_name 목록.
+
+        list_files() 는 코퍼스 전체를 훑으므로 배치마다 부르면
+        O(배치수 × 코퍼스)가 된다. 1,209건 재색인 때 이게 지배적인 비용이었다.
+        같은 프로세스 안에서는 짧은 TTL 로 재사용한다.
+        """
+        cached = _CORPUS_INDEX_CACHE.get(self.corpus_name)
+        if cached and (time.monotonic() - cached[0]) < _INDEX_TTL_SECONDS:
+            return cached[1]
+
+        index: dict[str, list[str]] = {}
+        for f in self.list_files():
+            resource_name = getattr(f, "name", None)
+            if not resource_name:
+                continue
+            display = getattr(f, "display_name", "") or ""
+            # 정규화 산출물은 {fileId}{.partN}{확장자} 꼴이라 여기서 되돌린다
+            index.setdefault(extract_file_id(display), []).append(resource_name)
+        _CORPUS_INDEX_CACHE[self.corpus_name] = (time.monotonic(), index)
+        logger.info("RAG corpus index built: %s files", sum(map(len, index.values())))
+        return index
+
+    def invalidate_file_index(self) -> None:
+        """import 등으로 코퍼스가 바뀐 뒤 캐시를 버린다."""
+        _CORPUS_INDEX_CACHE.pop(self.corpus_name, None)
+
     def find_rag_file_by_display_name(self, display_name: str) -> Any | None:
         for f in self.list_files():
             name = getattr(f, "display_name", "") or ""
@@ -137,28 +170,31 @@ class RagEngineClient:
         return self.delete_files_by_ids([file_id]) > 0
 
     def delete_files_by_ids(self, file_ids: list[str]) -> int:
-        """여러 fileId를 코퍼스 1회 순회로 일괄 제거.
-
-        파일마다 list_files()를 부르면 O(N×코퍼스)라 코퍼스가 커질수록 느리고
-        list RPM을 소모한다. 여기서는 list_files()를 한 번만 호출한다.
-        """
+        """여러 fileId 의 RagFile 을 제거. 인덱스 조회라 코퍼스 크기와 무관하다."""
         wanted = {fid for fid in file_ids if fid}
         if not wanted:
             return 0
+
+        index = self._file_index()
+        targets: list[tuple[str, str]] = []
+        for fid in wanted:
+            for resource_name in index.get(fid, ()):
+                targets.append((fid, resource_name))
+        if not targets:
+            return 0
+
+        pacing = self.settings.rag_delete_pacing_seconds
         deleted = 0
-        for f in self.list_files():
-            display = getattr(f, "display_name", "") or ""
-            resource_name = getattr(f, "name", None)
-            if not resource_name:
-                continue
-            # 정규화 md는 {fileId}.md, Drive 원본은 fileId가 이름에 포함될 수 있음
-            if any(fid in display or display.startswith(fid) for fid in wanted):
-                rag.delete_file(name=resource_name)
-                deleted += 1
-                logger.info("Deleted RAG file: %s (%s)", resource_name, display)
-                # VertexRagDataService 쿼터(분당 60건, list_files/import 와 공유)를
-                # 배치 하나가 순식간에 다 써버리지 않도록 호출 사이 페이싱.
-                time.sleep(1.1)
+        for i, (fid, resource_name) in enumerate(targets):
+            rag.delete_file(name=resource_name)
+            deleted += 1
+            logger.info("Deleted RAG file: %s (%s)", resource_name, fid)
+            # 지운 건 인덱스에서도 빼야 다음 호출이 없는 파일을 지우려 하지 않는다
+            index.get(fid, []).remove(resource_name)
+            # VertexRagDataService 쿼터(분당 60건, list/import 와 공유)를
+            # 배치 하나가 순식간에 다 써버리지 않도록 호출 사이 페이싱.
+            if pacing > 0 and i < len(targets) - 1:
+                time.sleep(pacing)
         return deleted
 
     def retrieve(

@@ -72,12 +72,24 @@ class Settings:
     #   무관한 질의      0.330 ~ 0.396   ← 0.285 와 0.330 사이가 비어 있다
     # 그 사이인 0.30 을 기본값으로 둔다. 0 이면 필터를 끈다(롤백용).
     search_distance_threshold: float = 0.30
+    # 어휘(BM25) 순위를 벡터 순위와 RRF 로 합쳐 상위를 다시 세운다.
+    # 점수가 아니라 **순위만** 쓰므로, 예전에 걷어낸 추측 기반 재정렬(83563ad)과
+    # 달리 score 의미를 몰라도 안전하다. 재검색이 아니라 이미 받은 후보만
+    # 다시 세우는 것이라 recall 은 그대로다.
+    # 실측(골든 15): hit@1 7/15 -> 11/15, MRR 0.647 -> 0.802. RRF 상수에는 둔감.
+    # 다만 골든 질의는 문서 어휘와 겹치게 쓰인 편향이 있고, 로그의 실사용 질의
+    # 10건에서는 top1 변화가 없었다(해롭지도 않았다).
+    search_lexical_rerank: bool = True
     # RAG 청킹 — Vertex 기본값. 코퍼스마다 최적값이 달라 env 로 조정 가능하게 둔다
     # (scripts/analyze_chunking.py 로 표 절단율을 재서 고를 것).
     # 실측(공문 136건/표 220개): 512 는 표의 16% 를 자르고 1024 는 6%.
     # 768 이상은 개선이 1%p 대로 평평해지며, 문서의 81% 는 768/1024 결과가 동일하다.
     rag_chunk_size: int = 1024
     rag_chunk_overlap: int = 256
+    # RagFile 삭제 호출 사이 간격(초). VertexRagDataService 쿼터가 분당 60건이라
+    # 배치 하나가 다 써버리지 않게 벌려 둔 값이다. 쿼터를 올렸다면 같이 낮출 것
+    # (300rpm 이면 0.2 정도). 0 이면 페이싱 없음.
+    rag_delete_pacing_seconds: float = 1.1
     mcp_auth_audience: str = ""
     max_gcs_bytes: int = 50 * 1024 * 1024
     enable_docai_fallback: bool = False
@@ -124,8 +136,10 @@ class Settings:
             search_fetch_multiplier=_env_int("SEARCH_FETCH_MULTIPLIER", 3),
             search_fetch_max=_env_int("SEARCH_FETCH_MAX", 60),
             search_distance_threshold=_env_float("SEARCH_DISTANCE_THRESHOLD", 0.30),
+            search_lexical_rerank=_env_bool("SEARCH_LEXICAL_RERANK", True),
             rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 1024),
             rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 256),
+            rag_delete_pacing_seconds=_env_float("RAG_DELETE_PACING_SECONDS", 1.1),
             mcp_auth_audience=os.environ.get("MCP_AUTH_AUDIENCE", ""),
             max_gcs_bytes=_env_int("MAX_GCS_BYTES", 50 * 1024 * 1024),
             enable_docai_fallback=_env_bool("ENABLE_DOCAI_FALLBACK", False),
