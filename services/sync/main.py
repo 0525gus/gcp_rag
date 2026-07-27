@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,7 @@ from shared.path_context import (  # noqa: E402
     build_breadcrumb_markdown,
 )
 from shared.rag_engine import RagEngineClient  # noqa: E402
+from shared.search_postprocess import extract_file_id  # noqa: E402
 
 setup_logging()
 logger = logging.getLogger("sync_service")
@@ -934,6 +936,24 @@ def _ext_for_mime(mime: str | None) -> str:
     return mapping.get((mime or "").lower(), ".bin")
 
 
+# Drive fileId 는 영숫자/-/_ 조합이라 점이 들어갈 수 없다.
+_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,}$")
+
+
+def _clean_file_ids(raw_ids: list[str]) -> tuple[list[str], list[str]]:
+    """(정상 fileId, 버린 값). 파일명/URI 로 들어와도 fileId 로 되돌린다.
+
+    여기서 거르지 않으면 아래 upsert 가 이상한 문서를 새로 만들어 버린다
+    (예: '{fileId}.meta.md' 를 순진하게 잘라 만든 '{fileId}.meta').
+    """
+    ok: list[str] = []
+    bad: list[str] = []
+    for raw in raw_ids:
+        fid = extract_file_id(raw)
+        (ok if _FILE_ID_RE.match(fid) else bad).append(fid)
+    return list(dict.fromkeys(ok)), bad
+
+
 @app.post("/sync/index-gcs")
 def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
     """GCS URI만 RAG Engine에 증분 import. Drive 커넥터 미사용."""
@@ -943,15 +963,21 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
     rag = RagEngineClient()
     store = DocStateStore()
 
+    file_ids, bad_ids = _clean_file_ids(body.file_ids)
+    if bad_ids:
+        logger.warning(
+            "index-gcs dropped %s malformed fileIds: %s", len(bad_ids), bad_ids[:10]
+        )
+
     # upsert: 동일 fileId 기존 청크 제거 후 import (코퍼스 1회 순회로 일괄 삭제)
     try:
-        rag.delete_files_by_ids(body.file_ids)
+        rag.delete_files_by_ids(file_ids)
     except Exception:  # noqa: BLE001
-        logger.warning("pre-delete failed for batch %s", body.file_ids)
+        logger.warning("pre-delete failed for batch %s", file_ids)
 
     imported = rag.import_from_gcs(body.gcs_uris)
 
-    for fid in body.file_ids:
+    for fid in file_ids:
         existing = store.get(fid)
         if existing:
             existing.status = DocStatus.INDEXED
@@ -961,7 +987,12 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
                 {"fileId": fid, "status": DocStatus.INDEXED.value}, merge=True
             )
 
-    return {"imported": imported, "count": len(imported), "status": "INDEXED"}
+    return {
+        "imported": imported,
+        "count": len(imported),
+        "droppedFileIds": len(bad_ids),
+        "status": "INDEXED",
+    }
 
 
 class ReindexPendingBody(BaseModel):

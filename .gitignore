@@ -28,4 +28,4 @@ service-account*.json
 .gcloud/
 
 sample/*
-sample
+tests/_bench_out/_tmp*

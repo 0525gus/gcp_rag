@@ -64,6 +64,14 @@ class Settings:
     search_top_k_max: int = 20
     search_fetch_multiplier: int = 3
     search_fetch_max: int = 60
+    # 벡터 거리 상한 — 이 값보다 먼 청크는 버린다(값이 작을수록 유사).
+    # 코퍼스 범위 밖 질문에 엉뚱한 공문을 물어다 주는 걸 막는 게 목적.
+    # 실측(운영 코퍼스, 정답 있는 질의 15 + 무관 질의 5):
+    #   정답 청크        0.120 ~ 0.214
+    #   같은 질의의 오답  0.113 ~ 0.285
+    #   무관한 질의      0.330 ~ 0.396   ← 0.285 와 0.330 사이가 비어 있다
+    # 그 사이인 0.30 을 기본값으로 둔다. 0 이면 필터를 끈다(롤백용).
+    search_distance_threshold: float = 0.30
     # RAG 청킹 — Vertex 기본값. 코퍼스마다 최적값이 달라 env 로 조정 가능하게 둔다
     # (scripts/analyze_chunking.py 로 표 절단율을 재서 고를 것).
     # 실측(공문 136건/표 220개): 512 는 표의 16% 를 자르고 1024 는 6%.
@@ -115,6 +123,7 @@ class Settings:
             search_top_k_max=_env_int("SEARCH_TOP_K_MAX", 20),
             search_fetch_multiplier=_env_int("SEARCH_FETCH_MULTIPLIER", 3),
             search_fetch_max=_env_int("SEARCH_FETCH_MAX", 60),
+            search_distance_threshold=_env_float("SEARCH_DISTANCE_THRESHOLD", 0.30),
             rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 1024),
             rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 256),
             mcp_auth_audience=os.environ.get("MCP_AUTH_AUDIENCE", ""),

@@ -88,8 +88,21 @@ def search(
         settings.search_fetch_max,
         max(k * settings.search_fetch_multiplier, k),
     )
-    raw_hits = rag.retrieve(query, top_k=fetch_k)
+    # 거리 상한 — 코퍼스 범위 밖 질문에 무관한 문서를 물어다 주지 않도록.
+    # 0 이하면 필터를 끈다.
+    threshold = settings.search_distance_threshold
+    raw_hits = rag.retrieve(
+        query,
+        top_k=fetch_k,
+        vector_distance_threshold=threshold if threshold > 0 else None,
+    )
     hits = postprocess_hits(raw_hits, top_k=k)
+    if not hits:
+        # 필터가 전부 걸러낸 경우 — 임계값 조정 판단 근거로 남긴다
+        logger.info(
+            "search no-hit query=%r fetched=%s threshold=%s",
+            query, len(raw_hits), threshold,
+        )
 
     store = DocStateStore(settings)
     results: list[dict[str, Any]] = []

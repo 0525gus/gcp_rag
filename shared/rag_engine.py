@@ -169,9 +169,17 @@ class RagEngineClient:
         vector_distance_threshold: float | None = None,
         metadata_filter: str | None = None,
     ) -> list[SearchHit]:
+        # vector_distance_threshold / metadata_filter 는 RagRetrievalConfig 의
+        # 최상위 필드가 아니라 filter=rag.Filter(...) 안에 있다. 평평한 kwarg 로
+        # 넘기면 TypeError 로 터진다 (그래서 이 경로는 여태 죽어 있었다).
         cfg_kwargs: dict[str, Any] = {"top_k": top_k}
+        filter_kwargs: dict[str, Any] = {}
         if vector_distance_threshold is not None:
-            cfg_kwargs["vector_distance_threshold"] = vector_distance_threshold
+            filter_kwargs["vector_distance_threshold"] = vector_distance_threshold
+        if metadata_filter:
+            filter_kwargs["metadata_filter"] = metadata_filter
+        if filter_kwargs:
+            cfg_kwargs["filter"] = rag.Filter(**filter_kwargs)
 
         rag_resources = [rag.RagResource(rag_corpus=self.corpus_name)]
         response = rag.retrieval_query(
