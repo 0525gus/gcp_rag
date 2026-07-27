@@ -38,7 +38,9 @@ from shared.mime_types import (  # noqa: E402
     RouteKind,
     classify_route,
     is_hwpx,
+    rag_size_limit,
 )
+from shared.pdf_split import PdfSplitError, split_pdf  # noqa: E402
 from shared.models import DocState, DocStatus, ParseRoute  # noqa: E402
 from shared.path_context import (  # noqa: E402
     PathContext,
@@ -549,6 +551,15 @@ def ingest(body: IngestBody) -> dict[str, Any]:
         }
 
 
+def _effective_limit(settings: Settings, ext: str) -> int:
+    """RAG Engine 타입별 한도와 우리 상한 중 작은 쪽.
+
+    RAG Engine 한도를 넘겨 올려봐야 import 에서 거부되므로, 올려도 의미가 없다.
+    MAX_GCS_BYTES 는 그보다 더 조이고 싶을 때만 쓰인다.
+    """
+    return min(settings.max_gcs_bytes, rag_size_limit(ext))
+
+
 def _size_gate(
     store: DocStateStore,
     settings: Settings,
@@ -556,12 +567,14 @@ def _size_gate(
     data: bytes,
     *,
     splittable: bool,
+    ext: str = "",
 ) -> dict[str, Any] | None:
     """업로드 직전 크기 체크. 초과 시 FAILED/분할 큐. None이면 통과."""
     size = len(data)
-    if size <= settings.max_gcs_bytes:
+    limit = _effective_limit(settings, ext)
+    if size <= limit:
         return None
-    reason = f"SIZE_EXCEEDED:{size}>{settings.max_gcs_bytes}"
+    reason = f"SIZE_EXCEEDED:{size}>{limit}"
     if splittable:
         store.enqueue_split(
             body.file_id,
@@ -732,7 +745,8 @@ def _ingest_hwp(
     md_uri = gcs.upload_normalized_md(md_text, body.file_id)
     md_bytes = md_text.encode("utf-8")
 
-    gated = _size_gate(store, settings, body, md_bytes, splittable=True)
+    # 파서 결과는 마크다운이므로 md 한도(10MB)가 적용된다
+    gated = _size_gate(store, settings, body, md_bytes, splittable=True, ext=".md")
     if gated:
         gated["route"] = "HWP_PARSE"
         return gated
@@ -787,7 +801,7 @@ def _ingest_google_export(
     path_ctx = _resolve_path_ctx(drive, body)
     export_mime, ext = GOOGLE_EXPORT_MAP[body.mime_type]
     data = drive.export_file(body.file_id, export_mime)
-    gated = _size_gate(store, settings, body, data, splittable=True)
+    gated = _size_gate(store, settings, body, data, splittable=True, ext=ext)
     if gated:
         gated["route"] = "GOOGLE_EXPORT"
         return gated
@@ -842,14 +856,29 @@ def _ingest_file_copy(
 ) -> dict[str, Any]:
     path_ctx = _resolve_path_ctx(drive, body)
     data = drive.download_file(body.file_id)
-    gated = _size_gate(store, settings, body, data, splittable=True)
-    if gated:
-        gated["route"] = "FILE_COPY"
-        return gated
 
     name = body.name or body.file_id
     mime = (body.mime_type or "").lower()
     ext = Path(name).suffix or _ext_for_mime(body.mime_type)
+
+    # PDF 는 한도를 넘으면 버리지 말고 페이지 경계로 쪼갠다.
+    pdf_parts: list[bytes] | None = None
+    if ext.lower() == ".pdf" and len(data) > _effective_limit(settings, ext):
+        try:
+            pdf_parts = split_pdf(data, _effective_limit(settings, ext))
+            logger.info(
+                "oversized PDF split %s: %sB -> %s parts",
+                body.file_id, len(data), len(pdf_parts),
+            )
+        except PdfSplitError as exc:
+            logger.warning("PDF split failed %s: %s", body.file_id, exc)
+            pdf_parts = None  # 아래 게이트가 큐로 보낸다
+
+    if pdf_parts is None:
+        gated = _size_gate(store, settings, body, data, splittable=True, ext=ext)
+        if gated:
+            gated["route"] = "FILE_COPY"
+            return gated
 
     if mime in _TEXT_COPY_MIMES:
         try:
@@ -890,15 +919,30 @@ def _ingest_file_copy(
                 "path": path_ctx.path,
                 "bundle": path_ctx.bundle,
             }
-        blob = f"normalized/{body.file_id}{ext}"
-        gcs_uri = gcs.upload_bytes(
-            data,
-            settings.gcs_normalized_bucket,
-            blob,
-            content_type=body.mime_type or "application/octet-stream",
-        )
-        meta_uri = gcs.upload_path_sidecar_md(sidecar, body.file_id)
-        uris = [gcs_uri, meta_uri]
+        ctype = body.mime_type or "application/octet-stream"
+        if pdf_parts and len(pdf_parts) > 1:
+            # {fileId}.part1.pdf ... — extract_file_id 가 .partN 을 떼어내므로
+            # 검색 결과에서는 원본 한 문서로 합쳐진다.
+            uris = []
+            for i, part in enumerate(pdf_parts, start=1):
+                uris.append(
+                    gcs.upload_bytes(
+                        part,
+                        settings.gcs_normalized_bucket,
+                        f"normalized/{body.file_id}.part{i}{ext}",
+                        content_type=ctype,
+                    )
+                )
+        else:
+            uris = [
+                gcs.upload_bytes(
+                    data,
+                    settings.gcs_normalized_bucket,
+                    f"normalized/{body.file_id}{ext}",
+                    content_type=ctype,
+                )
+            ]
+        uris.append(gcs.upload_path_sidecar_md(sidecar, body.file_id))
 
     store.upsert(
         _state_fields(

@@ -3,6 +3,26 @@
 from __future__ import annotations
 
 from enum import Enum
+from pathlib import Path
+
+_MB = 1024 * 1024
+
+# RAG Engine 기본 파서의 타입별 파일 크기 한도.
+# 우리가 정한 값이 아니라 Vertex 쪽 제약이라, 넘겨서 올려봐야 import 에서 거부된다.
+# https://cloud.google.com/vertex-ai/generative-ai/docs/rag-engine/supported-documents
+_RAG_LIMIT_BY_EXT: dict[str, int] = {
+    ".pdf": 50 * _MB,
+    ".docx": 50 * _MB,
+    # 나머지(md/txt/html/json/pptx/csv)는 10MB
+}
+RAG_DEFAULT_LIMIT_BYTES = 10 * _MB
+
+
+def rag_size_limit(filename_or_ext: str) -> int:
+    """확장자에 해당하는 RAG Engine 파일 크기 한도(바이트)."""
+    name = (filename_or_ext or "").lower()
+    ext = name if name.startswith(".") else Path(name).suffix
+    return _RAG_LIMIT_BY_EXT.get(ext, RAG_DEFAULT_LIMIT_BYTES)
 
 
 class RouteKind(str, Enum):

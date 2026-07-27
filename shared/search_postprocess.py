@@ -27,8 +27,12 @@ _FILE_SUFFIXES = (
 )
 
 
+# 크기 한도 초과로 쪼갠 조각: {fileId}.part2.pdf → {fileId}
+_PART_SUFFIX = re.compile(r"\.part\d+$", re.IGNORECASE)
+
+
 def extract_file_id(display: str, source_uri: str | None = None) -> str:
-    """GCS displayName/URI → Drive fileId (확장자·meta 접미사 제거)."""
+    """GCS displayName/URI → Drive fileId (확장자·meta·분할 접미사 제거)."""
     name = display or (source_uri or "")
     base = name.rsplit("/", 1)[-1].strip()
     if not base:
@@ -36,8 +40,9 @@ def extract_file_id(display: str, source_uri: str | None = None) -> str:
     lower = base.lower()
     for suf in _FILE_SUFFIXES:
         if lower.endswith(suf):
-            return base[: -len(suf)]
-    return base
+            base = base[: -len(suf)]
+            break
+    return _PART_SUFFIX.sub("", base)
 
 
 def unescape_chunk_text(text: str) -> str:
