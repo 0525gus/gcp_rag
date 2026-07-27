@@ -78,12 +78,16 @@ def search(
         drive_id: 특정 공유 드라이브로 필터 (선택)
     """
     k = top_k or settings.top_k_default
-    k = max(1, min(k, 20))
+    k = max(1, min(k, settings.search_top_k_max))
     logger.info("search query=%r top_k=%s drive_id=%s", query, k, drive_id)
 
     rag = RagEngineClient(settings)
-    # 여유분 retrieve 후 후처리(중복 제거·relevance)로 k개
-    fetch_k = min(20, max(k * 3, k))
+    # 여유분 retrieve 후 후처리(파일당 1청크 중복 제거)로 k개.
+    # 상한을 k*배수보다 낮게 두면 큰 k 에서 여유분이 사라져 k 개를 못 채운다.
+    fetch_k = min(
+        settings.search_fetch_max,
+        max(k * settings.search_fetch_multiplier, k),
+    )
     raw_hits = rag.retrieve(query, top_k=fetch_k)
     hits = postprocess_hits(raw_hits, top_k=k)
 

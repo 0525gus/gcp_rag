@@ -55,6 +55,15 @@ class Settings:
     # log: 경고만 / reject: 422·DLQ / fallback: Document AI(enable_docai_fallback 필요)
     qg_mode: str = "log"
     top_k_default: int = 5
+    # 검색 여유분 — retrieve 는 청크 단위인데 postprocess 가 '파일당 1청크' 로
+    # 접으므로, k 개 문서를 채우려면 k 보다 많이 뽑아야 한다.
+    # 실측(운영 코퍼스 1,209건): 청크 30개당 고유 문서 16.4개 = 문서당 청크 ~1.8개.
+    # 상한이 k*배수보다 작으면 여유분이 소리 없이 사라지므로
+    # search_fetch_max >= search_top_k_max * search_fetch_multiplier 를 지킬 것.
+    # (Vertex retrieveContexts 는 topK=100 까지 허용, 200 은 거부)
+    search_top_k_max: int = 20
+    search_fetch_multiplier: int = 3
+    search_fetch_max: int = 60
     # RAG 청킹 — Vertex 기본값. 코퍼스마다 최적값이 달라 env 로 조정 가능하게 둔다
     # (scripts/analyze_chunking.py 로 표 절단율을 재서 고를 것).
     # 실측(공문 136건/표 220개): 512 는 표의 16% 를 자르고 1024 는 6%.
@@ -103,6 +112,9 @@ class Settings:
             qg_min_text_length=_env_int("QG_MIN_TEXT_LENGTH", 20),
             qg_mode=mode,
             top_k_default=_env_int("TOP_K_DEFAULT", 5),
+            search_top_k_max=_env_int("SEARCH_TOP_K_MAX", 20),
+            search_fetch_multiplier=_env_int("SEARCH_FETCH_MULTIPLIER", 3),
+            search_fetch_max=_env_int("SEARCH_FETCH_MAX", 60),
             rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 1024),
             rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 256),
             mcp_auth_audience=os.environ.get("MCP_AUTH_AUDIENCE", ""),

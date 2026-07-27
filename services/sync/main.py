@@ -292,8 +292,14 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
             return
         uris, ids = pending_uris, pending_ids
         pending_uris, pending_ids = [], []
-        idx = index_gcs(IndexGcsBody(gcsUris=uris, fileIds=ids))
-        totals["indexed"] += int(idx.get("count") or len(uris))
+        # 실패 카운트는 uris 를 비우기 전이 아니라 여기서 직접 세야 한다.
+        try:
+            idx = index_gcs(IndexGcsBody(gcsUris=uris, fileIds=ids))
+            totals["indexed"] += int(idx.get("count") or len(uris))
+        except Exception:  # noqa: BLE001
+            logger.exception("backfill index flush failed for %s uris", len(uris))
+            totals["failed"] += len(uris)
+            raise
 
     def _ingest_one(ch: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         ingest_body = IngestBody(
@@ -340,8 +346,6 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
                             try:
                                 flush_index()
                             except Exception:  # noqa: BLE001
-                                logger.exception("backfill index flush failed")
-                                totals["failed"] += len(pending_uris)
                                 pending_uris, pending_ids = [], []
                 elif status in {"UNCHANGED", "HASH_UNCHANGED"}:
                     totals["unchanged"] += 1
@@ -360,9 +364,7 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
         with lock:
             flush_index()
     except Exception:  # noqa: BLE001
-        logger.exception("backfill final index failed")
-        with lock:
-            totals["failed"] += len(pending_uris)
+        pass
 
     if pending_page_token and totals["failed"] == 0:
         store.set_start_page_token(body.drive_id, pending_page_token)
@@ -1044,24 +1046,31 @@ def reindex_pending(body: ReindexPendingBody) -> dict[str, Any]:
         uris, ids = pending_uris, pending_ids
         pending_uris, pending_ids = [], []
         uniq_ids = list(dict.fromkeys(ids))
-        # PARSED 복구는 대부분 코퍼스 미존재 → 전량 list+delete 생략(속도)
-        if body.force:
-            idx = index_gcs(IndexGcsBody(gcsUris=uris, fileIds=uniq_ids))
-            totals["indexed"] += int(idx.get("count") or len(uris))
-            return
-        rag = RagEngineClient()
-        imported = rag.import_from_gcs(uris)
-        for fid in uniq_ids:
-            existing = store.get(fid)
-            if existing:
-                existing.status = DocStatus.INDEXED
-                store.upsert(existing)
-            else:
-                store._col.document(fid).set(  # noqa: SLF001
-                    {"fileId": fid, "status": DocStatus.INDEXED.value},
-                    merge=True,
-                )
-        totals["indexed"] += len(imported)
+        # 실패 카운트는 uris 를 비우기 전이 아니라 여기서 직접 세야 한다.
+        # (바깥 except 시점엔 이미 pending_uris 가 [] 라 len() 이 0으로 잡힘)
+        try:
+            # PARSED 복구는 대부분 코퍼스 미존재 → 전량 list+delete 생략(속도)
+            if body.force:
+                idx = index_gcs(IndexGcsBody(gcsUris=uris, fileIds=uniq_ids))
+                totals["indexed"] += int(idx.get("count") or len(uris))
+                return
+            rag = RagEngineClient()
+            imported = rag.import_from_gcs(uris)
+            for fid in uniq_ids:
+                existing = store.get(fid)
+                if existing:
+                    existing.status = DocStatus.INDEXED
+                    store.upsert(existing)
+                else:
+                    store._col.document(fid).set(  # noqa: SLF001
+                        {"fileId": fid, "status": DocStatus.INDEXED.value},
+                        merge=True,
+                    )
+            totals["indexed"] += len(imported)
+        except Exception:  # noqa: BLE001
+            logger.exception("reindex-pending flush failed for %s uris", len(uris))
+            totals["failed"] += len(uris)
+            raise
 
     for doc in targets:
         uris = _normalized_uris_for_file(settings, doc.file_id)
@@ -1075,15 +1084,12 @@ def reindex_pending(body: ReindexPendingBody) -> dict[str, Any]:
             try:
                 flush()
             except Exception:  # noqa: BLE001
-                logger.exception("reindex-pending flush failed")
-                totals["failed"] += len(pending_uris)
                 pending_uris, pending_ids = [], []
 
     try:
         flush()
     except Exception:  # noqa: BLE001
-        logger.exception("reindex-pending final flush failed")
-        totals["failed"] += len(pending_uris)
+        pass
 
     logger.info("reindex-pending done totals=%s", totals)
     return {"mode": "reindex-pending", "totals": totals, "ok": totals["failed"] == 0}

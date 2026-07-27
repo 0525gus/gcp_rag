@@ -16,6 +16,10 @@ from shared.search_postprocess import extract_file_id, unescape_chunk_text
 
 logger = logging.getLogger(__name__)
 
+# Vertex AI RAG import_files 는 호출 1회당 GCS URI 25개까지만 허용한다
+# (초과 시 InvalidArgument: "GCS URIs cannot be specified more than 25 times.")
+_MAX_IMPORT_URIS = 25
+
 
 class RagEngineClient:
     def __init__(self, settings: Settings | None = None) -> None:
@@ -53,6 +57,20 @@ class RagEngineClient:
         )
         logger.info("RAG import chunking size=%s overlap=%s", size, overlap)
 
+        imported: list[str] = []
+        for i in range(0, len(gcs_uris), _MAX_IMPORT_URIS):
+            batch = gcs_uris[i : i + _MAX_IMPORT_URIS]
+            imported.extend(self._import_batch(batch, transformation, max_retries))
+            if i + _MAX_IMPORT_URIS < len(gcs_uris):
+                time.sleep(2.0)  # 서브배치 사이 쿼터 여유 확보
+        return imported
+
+    def _import_batch(
+        self,
+        gcs_uris: list[str],
+        transformation: Any,
+        max_retries: int,
+    ) -> list[str]:
         delay = 1.0
         last_err: Exception | None = None
         for attempt in range(max_retries):
@@ -67,17 +85,21 @@ class RagEngineClient:
                     "RAG import done: uris=%s imported=%s", len(gcs_uris), imported
                 )
                 return list(gcs_uris)
-            except gcp_exceptions.ResourceExhausted as exc:
+            except Exception as exc:  # noqa: BLE001
+                # vertexai SDK가 내부에서 ResourceExhausted 를 잡아 RuntimeError 로
+                # 재포장하므로(__cause__ 에 원본이 남음), 타입 매칭만으로는 못 잡는다.
+                throttled = isinstance(exc, gcp_exceptions.ResourceExhausted) or isinstance(
+                    exc.__cause__, gcp_exceptions.ResourceExhausted
+                )
+                if not throttled:
+                    logger.exception("RAG import failed")
+                    raise
                 last_err = exc
                 logger.warning(
                     "RAG import throttled (attempt %s): %s", attempt + 1, exc
                 )
                 time.sleep(delay)
                 delay = min(delay * 2, 60)
-            except Exception as exc:  # noqa: BLE001
-                last_err = exc
-                logger.exception("RAG import failed")
-                raise
         raise RuntimeError(f"RAG import failed after retries: {last_err}")
 
     def import_drive_files(
@@ -134,6 +156,9 @@ class RagEngineClient:
                 rag.delete_file(name=resource_name)
                 deleted += 1
                 logger.info("Deleted RAG file: %s (%s)", resource_name, display)
+                # VertexRagDataService 쿼터(분당 60건, list_files/import 와 공유)를
+                # 배치 하나가 순식간에 다 써버리지 않도록 호출 사이 페이싱.
+                time.sleep(1.1)
         return deleted
 
     def retrieve(
