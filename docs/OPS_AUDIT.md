@@ -69,6 +69,27 @@
 X-API-Key 경로 → HTTP 200
 ```
 
+#### 바. 부작용 — FactChat 연동 일시 중단
+
+- □ 키를 켠 직후 FactChat 커넥터가 **인증 실패**로 중단됨
+
+```
+[TOOL_ERROR] Authentication failed for connector__chatbot_mcp_custom_2741__search.
+The saved token may be expired or revoked — please update this connector's Authorization header.
+```
+
+- □ 원인: **커넥터에 저장된 토큰이 복원한 키와 달랐음**
+  - ○ 조치 전 판단: 리비전 00002~00004에 있던 키를 FactChat도 쓰고 있을 것으로
+    **추정**하고 진행했음
+  - ○ 실제로는 7/25 키 유실 이후 인증이 무력화된 상태로 운영되어,
+    커넥터 토큰이 현재 키와 일치하는지 확인되지 않았음
+- □ **점검 절차상의 누락**: 키를 활성화하기 전에 클라이언트가 실제로 보내는
+  인증 헤더를 확인했어야 함(rag-mcp 접근 로그로 확인 가능)
+- □ 복구: FactChat 커넥터의 Authorization 헤더를 현재 키로 갱신
+- □ 교훈: **인증을 켜는 변경은 서버 단독으로 완결되지 않음.**
+  클라이언트 설정과 동시에 처리하거나, 최소한 클라이언트가 보내는 값을
+  먼저 확인해야 함
+
 ---
 
 ### 2. 일일 동기화 3일간 중단 〔주의〕
@@ -166,7 +187,7 @@ DLQ           0건
 
 ```
 지연        중앙값 1.14초 / 최대 1.39초   (Cloud Run timeout 60초)
-빈 결과     0건 / 50건
+빈 결과     1건 / 100건  (거리 임계값 관련, GOLDEN_EVAL.md Ⅴ장)
 ```
 
 ### 4. 접근제어
