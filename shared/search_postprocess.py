@@ -75,18 +75,27 @@ def _text_fingerprint(text: str, n: int = 180) -> str:
     return t[:n]
 
 
+CHUNK_JOINER = "\n\n[...]\n\n"
+
+
 def postprocess_hits(
     hits: list[SearchHit],
     *,
     top_k: int,
+    max_chunks_per_file: int = 3,
 ) -> list[SearchHit]:
-    """unescape + fileId/본문 중복 제거 후 top_k.
+    """unescape + 같은 문서의 청크 병합 후 상위 top_k 문서.
 
     **Vertex 가 돌려준 순서를 그대로 유지한다.** retrieval 응답은 이미 관련도
     순으로 정렬돼 있는데, score 가 거리인지 유사도인지 추측해 변환한 값으로
-    재정렬하면 추측이 틀렸을 때 순위가 통째로 뒤집힌다. 중복 제거가 '먼저 나온
-    것'을 남기므로 파일당 엉뚱한 청크가 선택되는 결과까지 이어진다.
+    재정렬하면 추측이 틀렸을 때 순위가 통째로 뒤집힌다.
     점수는 표시용으로만 원값을 통과시킨다.
+
+    파일당 1청크만 남기던 시절에는 긴 규정 문서에서 질문이 원하는 조문이
+    통째로 버려졌다(제15·16·25조 청크가 후순위라 탈락하고 제3·4조만 남는 식).
+    실제로 FactChat 이 조문 번호를 바꿔가며 같은 문서를 4~5회 재질의했다.
+    그래서 문서 단위 다양성은 유지하되, 한 문서 안에서는 상위 몇 청크를
+    이어 붙여 함께 돌려준다.
     """
     if not hits:
         return []
@@ -101,20 +110,30 @@ def postprocess_hits(
         src = replace(hit.source, file_id=fid)
         prepared.append(SearchHit(text=text, score=hit.score, source=src))
 
-    seen_files: set[str] = set()
+    # 문서별로 묶되 처음 나온 순서(=관련도 순)를 보존한다
+    order: list[str] = []
+    grouped: dict[str, list[SearchHit]] = {}
     seen_text: set[str] = set()
-    out: list[SearchHit] = []
     for hit in prepared:
         fid = hit.source.file_id
-        if fid in seen_files:
-            continue
         fp = _text_fingerprint(hit.text)
         if fp and fp in seen_text:
-            continue
-        seen_files.add(fid)
+            continue  # 같은 본문이 다른 파일로 중복 색인된 경우
         if fp:
             seen_text.add(fp)
-        out.append(hit)
-        if len(out) >= top_k:
-            break
+        if fid not in grouped:
+            grouped[fid] = []
+            order.append(fid)
+        if len(grouped[fid]) < max_chunks_per_file:
+            grouped[fid].append(hit)
+
+    out: list[SearchHit] = []
+    for fid in order[:top_k]:
+        chunks = grouped[fid]
+        head = chunks[0]
+        if len(chunks) == 1:
+            out.append(head)
+            continue
+        merged = CHUNK_JOINER.join(c.text for c in chunks)
+        out.append(SearchHit(text=merged, score=head.score, source=head.source))
     return out

@@ -202,18 +202,46 @@ class RagEngineClient:
         if not targets:
             return 0
 
+        # 삭제 1건은 호출 자체가 ~0.4초 걸린다. 순차로 돌리면 그 지연이 그대로
+        # 쌓이므로(1,373건이면 15분) 동시에 여러 건을 보낸다.
+        # 쿼터는 초당 (동시수 / 호출지연) 로 소모되니 페이싱과 함께 조절할 것.
+        workers = max(1, self.settings.rag_delete_concurrency)
         pacing = self.settings.rag_delete_pacing_seconds
+
+        def _delete_one(item: tuple[str, str]) -> tuple[str, str] | None:
+            fid, resource_name = item
+            try:
+                rag.delete_file(name=resource_name)
+                logger.info("Deleted RAG file: %s (%s)", resource_name, fid)
+                return item
+            except Exception:  # noqa: BLE001
+                # 이미 지워졌거나 일시 오류 — 재색인 자체를 막지는 않는다
+                logger.warning("delete failed: %s (%s)", resource_name, fid)
+                return None
+
         deleted = 0
-        for i, (fid, resource_name) in enumerate(targets):
-            rag.delete_file(name=resource_name)
-            deleted += 1
-            logger.info("Deleted RAG file: %s (%s)", resource_name, fid)
-            # 지운 건 인덱스에서도 빼야 다음 호출이 없는 파일을 지우려 하지 않는다
-            index.get(fid, []).remove(resource_name)
-            # VertexRagDataService 쿼터(분당 60건, list/import 와 공유)를
-            # 배치 하나가 순식간에 다 써버리지 않도록 호출 사이 페이싱.
-            if pacing > 0 and i < len(targets) - 1:
-                time.sleep(pacing)
+        if workers == 1:
+            for i, item in enumerate(targets):
+                if _delete_one(item):
+                    deleted += 1
+                    index.get(item[0], []).remove(item[1])
+                if pacing > 0 and i < len(targets) - 1:
+                    time.sleep(pacing)
+            return deleted
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            # 한 묶음(=동시 실행 수)을 보내고 페이싱만큼 쉬는 식으로 속도를 제어한다
+            for start in range(0, len(targets), workers):
+                chunk = targets[start : start + workers]
+                for done in pool.map(_delete_one, chunk):
+                    if done:
+                        deleted += 1
+                        # 지운 건 인덱스에서도 빼야 다음 호출이 없는 파일을 노리지 않는다
+                        index.get(done[0], []).remove(done[1])
+                if pacing > 0 and start + workers < len(targets):
+                    time.sleep(pacing)
         return deleted
 
     def retrieve(

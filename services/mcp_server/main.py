@@ -102,7 +102,11 @@ def search(
     if settings.search_lexical_rerank and len(raw_hits) > 1:
         order = rrf_rerank(query, [h.text for h in raw_hits])
         raw_hits = [raw_hits[i] for i in order]
-    hits = postprocess_hits(raw_hits, top_k=k)
+    hits = postprocess_hits(
+        raw_hits,
+        top_k=k,
+        max_chunks_per_file=settings.search_max_chunks_per_file,
+    )
     if not hits:
         # 필터가 전부 걸러낸 경우 — 임계값 조정 판단 근거로 남긴다
         logger.info(

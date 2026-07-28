@@ -80,6 +80,10 @@ class Settings:
     # 다만 골든 질의는 문서 어휘와 겹치게 쓰인 편향이 있고, 로그의 실사용 질의
     # 10건에서는 top1 변화가 없었다(해롭지도 않았다).
     search_lexical_rerank: bool = True
+    # 한 문서에서 이어 붙일 최대 청크 수. 1 이면 예전처럼 파일당 1청크만 준다.
+    # 긴 규정 문서는 답이 여러 조문에 걸쳐 있어 1이면 필요한 조문이 통째로
+    # 탈락한다(실측: 제15·16·25조 청크가 후순위라 버려짐).
+    search_max_chunks_per_file: int = 3
     # RAG 청킹 — Vertex 기본값. 코퍼스마다 최적값이 달라 env 로 조정 가능하게 둔다
     # (scripts/analyze_chunking.py 로 표 절단율을 재서 고를 것).
     # 실측(공문 136건/표 220개): 512 는 표의 16% 를 자르고 1024 는 6%.
@@ -90,6 +94,10 @@ class Settings:
     # 배치 하나가 다 써버리지 않게 벌려 둔 값이다. 쿼터를 올렸다면 같이 낮출 것
     # (300rpm 이면 0.2 정도). 0 이면 페이싱 없음.
     rag_delete_pacing_seconds: float = 1.1
+    # 삭제 동시 실행 수. 호출 1건이 ~0.4초 걸려 순차로는 지연이 그대로 쌓인다.
+    # 실측 소모율 ≈ 동시수 / (0.4 + 페이싱) 건/초. 300rpm(=5건/초) 기준
+    # 동시 4 + 페이싱 0.25 면 약 6건/초라 여유가 빠듯하니 그보다 낮게 잡을 것.
+    rag_delete_concurrency: int = 1
     mcp_auth_audience: str = ""
     max_gcs_bytes: int = 50 * 1024 * 1024
     enable_docai_fallback: bool = False
@@ -137,9 +145,15 @@ class Settings:
             search_fetch_max=_env_int("SEARCH_FETCH_MAX", 60),
             search_distance_threshold=_env_float("SEARCH_DISTANCE_THRESHOLD", 0.30),
             search_lexical_rerank=_env_bool("SEARCH_LEXICAL_RERANK", True),
+            search_max_chunks_per_file=max(
+                1, _env_int("SEARCH_MAX_CHUNKS_PER_FILE", 3)
+            ),
             rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 1024),
             rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 256),
             rag_delete_pacing_seconds=_env_float("RAG_DELETE_PACING_SECONDS", 1.1),
+            rag_delete_concurrency=max(
+                1, min(_env_int("RAG_DELETE_CONCURRENCY", 1), 16)
+            ),
             mcp_auth_audience=os.environ.get("MCP_AUTH_AUDIENCE", ""),
             max_gcs_bytes=_env_int("MAX_GCS_BYTES", 50 * 1024 * 1024),
             enable_docai_fallback=_env_bool("ENABLE_DOCAI_FALLBACK", False),
