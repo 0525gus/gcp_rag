@@ -1,0 +1,66 @@
+{
+  "corpus": "C:\\dev\\gcp-mcp\\tests\\2026_문서접수_test",
+  "file_count": 135,
+  "engines": [
+    {
+      "engine": "rhwp",
+      "total": 135,
+      "ok": 135,
+      "fail": 0,
+      "ok_rate": 1.0,
+      "gate_pass": 133,
+      "gate_pass_rate_of_ok": 0.9852,
+      "ms_sum": 2722.4,
+      "ms_avg": 20.2,
+      "ms_p50": 17.4,
+      "ms_max": 63.4,
+      "md_chars_avg": 2525.0,
+      "tables_avg": 2.47,
+      "fail_samples": [],
+      "gate_fail_samples": [
+        {
+          "name": "1.교원 업적평가 시행안내(2026 상반기).hwp",
+          "reasons": [
+            "G1_DENSITY:0.000851<0.001"
+          ],
+          "md_chars": 2360,
+          "size": 2772480
+        },
+        {
+          "name": "2026년 한국공학대학교 개인정보 청소하는 날 캠페인 실시.hwp",
+          "reasons": [
+            "G1_DENSITY:0.000902<0.001"
+          ],
+          "md_chars": 1051,
+          "size": 1165824
+        }
+      ]
+    },
+    {
+      "engine": "kordoc",
+      "total": 135,
+      "ok": 135,
+      "fail": 0,
+      "ok_rate": 1.0,
+      "gate_pass": 134,
+      "gate_pass_rate_of_ok": 0.9926,
+      "ms_sum": 46130.9,
+      "ms_avg": 341.7,
+      "ms_p50": 326.3,
+      "ms_max": 508.5,
+      "md_chars_avg": 4070.2,
+      "tables_avg": 0.58,
+      "fail_samples": [],
+      "gate_fail_samples": [
+        {
+          "name": "1.교원 업적평가 시행안내(2026 상반기).hwp",
+          "reasons": [
+            "G1_DENSITY:0.000839<0.001"
+          ],
+          "md_chars": 2327,
+          "size": 2772480
+        }
+      ]
+    }
+  ]
+}
