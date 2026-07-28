@@ -22,6 +22,8 @@ _MAX_IMPORT_URIS = 25
 
 # corpus_name → (만든 시각, fileId→resource_name 인덱스)
 _CORPUS_INDEX_CACHE: dict[str, tuple[float, dict[str, list[str]]]] = {}
+# 인덱스를 만든 뒤 import 된 fileId — 이 id 를 건드릴 때만 다시 만든다
+_CORPUS_DIRTY_IDS: dict[str, set[str]] = {}
 _INDEX_TTL_SECONDS = 300.0
 
 
@@ -67,8 +69,9 @@ class RagEngineClient:
             imported.extend(self._import_batch(batch, transformation, max_retries))
             if i + _MAX_IMPORT_URIS < len(gcs_uris):
                 time.sleep(2.0)  # 서브배치 사이 쿼터 여유 확보
-        # 코퍼스에 파일이 늘었으니 인덱스 캐시는 더 이상 유효하지 않다
-        self.invalidate_file_index()
+        # 캐시를 통째로 버리면 다음 배치가 또 코퍼스를 훑는다.
+        # 이번에 올린 id 만 dirty 로 두고 나머지 캐시는 살린다.
+        self._mark_dirty({extract_file_id(u) for u in imported})
         return imported
 
     def _import_batch(
@@ -131,15 +134,24 @@ class RagEngineClient:
     def list_files(self) -> list[Any]:
         return list(rag.list_files(corpus_name=self.corpus_name))
 
-    def _file_index(self) -> dict[str, list[str]]:
+    def _file_index(self, wanted: set[str] | None = None) -> dict[str, list[str]]:
         """fileId → RagFile resource_name 목록.
 
         list_files() 는 코퍼스 전체를 훑으므로 배치마다 부르면
         O(배치수 × 코퍼스)가 된다. 1,209건 재색인 때 이게 지배적인 비용이었다.
         같은 프로세스 안에서는 짧은 TTL 로 재사용한다.
+
+        import 이 끝날 때마다 캐시를 통째로 버리면 재색인(배치별 delete→import)
+        에서는 캐시가 한 번도 안 맞는다. 그래서 import 된 id 만 dirty 로 두고,
+        **그 id 를 실제로 건드릴 때만** 다시 만든다.
         """
+        dirty = _CORPUS_DIRTY_IDS.get(self.corpus_name, set())
         cached = _CORPUS_INDEX_CACHE.get(self.corpus_name)
-        if cached and (time.monotonic() - cached[0]) < _INDEX_TTL_SECONDS:
+        if (
+            cached
+            and (time.monotonic() - cached[0]) < _INDEX_TTL_SECONDS
+            and not (wanted and (wanted & dirty))
+        ):
             return cached[1]
 
         index: dict[str, list[str]] = {}
@@ -151,12 +163,19 @@ class RagEngineClient:
             # 정규화 산출물은 {fileId}{.partN}{확장자} 꼴이라 여기서 되돌린다
             index.setdefault(extract_file_id(display), []).append(resource_name)
         _CORPUS_INDEX_CACHE[self.corpus_name] = (time.monotonic(), index)
+        _CORPUS_DIRTY_IDS[self.corpus_name] = set()
         logger.info("RAG corpus index built: %s files", sum(map(len, index.values())))
         return index
 
+    def _mark_dirty(self, file_ids: set[str]) -> None:
+        """import 으로 새 RagFile 이 생긴 id 표시 — 다음에 건드리면 재구축."""
+        if file_ids:
+            _CORPUS_DIRTY_IDS.setdefault(self.corpus_name, set()).update(file_ids)
+
     def invalidate_file_index(self) -> None:
-        """import 등으로 코퍼스가 바뀐 뒤 캐시를 버린다."""
+        """코퍼스가 크게 바뀐 뒤 캐시를 통째로 버린다."""
         _CORPUS_INDEX_CACHE.pop(self.corpus_name, None)
+        _CORPUS_DIRTY_IDS.pop(self.corpus_name, None)
 
     def find_rag_file_by_display_name(self, display_name: str) -> Any | None:
         for f in self.list_files():
@@ -175,7 +194,7 @@ class RagEngineClient:
         if not wanted:
             return 0
 
-        index = self._file_index()
+        index = self._file_index(wanted)
         targets: list[tuple[str, str]] = []
         for fid in wanted:
             for resource_name in index.get(fid, ()):
