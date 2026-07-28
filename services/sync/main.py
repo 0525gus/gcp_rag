@@ -1044,7 +1044,17 @@ class ReindexPendingBody(BaseModel):
     """PARSED(색인 누락) 문서를 GCS URI로 재인덱싱."""
 
     limit: int = Field(default=200, ge=1, le=2000)
-    index_batch_size: int = Field(default=10, alias="indexBatchSize", ge=1, le=50)
+    # URI 개수 기준이다(문서 수 아님 — 아래 루프의 len(pending_uris) 비교).
+    # rag.import_files 는 호출 1회당 URI 25개까지만 받고(_MAX_IMPORT_URIS),
+    # 호출 지연이 URI 수와 거의 무관하게 ~21초다. 즉 **호출 횟수가 곧 시간**이라
+    # 한 번에 최대한 담아야 한다. 실측(1,211건 재색인): 10 이면 ~140회 42분.
+    #
+    # 상한이 25인데 기본값을 24로 두는 이유: 문서 하나가 URI 를 최대 2개
+    # 만든다(본문 + .meta.md, 실측 892건이 1개 / 317건이 2개). 임계값이 25면
+    # pending 이 24일 때 2-URI 문서가 와서 26이 되고, 25+1 로 쪼개져 호출이
+    # 한 번 더 든다. 그 1개짜리 호출도 21초를 그대로 먹는다.
+    # 24면 pending 이 23 이하이므로 2를 더해도 25 — 항상 한 번에 끝난다.
+    index_batch_size: int = Field(default=24, alias="indexBatchSize", ge=1, le=25)
     # true면 INDEXED도 다시 import (기본은 PARSED만)
     force: bool = False
     # true면 즉시 jobId를 반환하고 뒤에서 계속 돈다.

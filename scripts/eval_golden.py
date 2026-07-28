@@ -134,9 +134,14 @@ def main() -> int:
         names = [(s.get("name") or "").strip().lower() for s in sources]
         bundles = [(s.get("bundle") or "").strip() for s in sources]
 
+        # 같은 문서가 드라이브에 두 벌 있는 경우, 어느 쪽이 걸려도 정답이다
+        # (also_accept 는 본문 바이트를 대조해 동일함을 확인한 fileId 만 적을 것)
+        accept = {g["file_id"], *g.get("also_accept", [])}
+        strict = next((i for i, f in enumerate(ids, 1) if f in accept), None)
+
         rows.append({
             **g,
-            "rank": _rank(ids, g["file_id"]),
+            "rank": strict,
             "same_doc_rank": _rank(names, (g.get("name") or "").strip().lower()),
             "bundle_rank": _rank(bundles, (g.get("bundle") or "").strip())
             if g.get("bundle") else None,
