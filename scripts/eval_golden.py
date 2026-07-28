@@ -139,8 +139,18 @@ def main() -> int:
         accept = {g["file_id"], *g.get("also_accept", [])}
         strict = next((i for i, f in enumerate(ids, 1) if f in accept), None)
 
+        # 거리 임계값 조정 판단에 쓰려면 점수가 필요하다. 정답이 임계값
+        # 바로 아래에 몰려 있으면 질의 표현이 조금만 달라져도 통째로 잘린다.
+        scores = [h.get("score") for h in hits]
+        hit_score = next(
+            (s for s, f in zip(scores, ids) if f in
+             {g["file_id"], *g.get("also_accept", [])}), None
+        )
+
         rows.append({
             **g,
+            "top_score": scores[0] if scores else None,
+            "hit_score": hit_score,
             "rank": strict,
             "same_doc_rank": _rank(names, (g.get("name") or "").strip().lower()),
             "bundle_rank": _rank(bundles, (g.get("bundle") or "").strip())
