@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 # 운영 코퍼스 최대가 146,472 셀이라 실측 최대의 2배로 잡았다.
 MAX_CELLS = 300_000
 
+# 출력 바이트 상한. 셀 수만 제한하면 부족하다 — 셀 30만개가 29MB 를 만들어
+# RAG 한도(10MB)를 넘긴 사례가 있었다(2026-07-29 재색인). 한도를 넘기면 색인
+# 자체가 실패해 사이드카로도 못 찾게 되므로, 잘라서라도 넣는 편이 낫다.
+# 머리말과 한도 사이 여유를 두고 8MB.
+MAX_BYTES = 8 * 1024 * 1024
+
 # 암호화된 OOXML 은 OLE2 컨테이너로 감싸여 구형 .xls 와 매직바이트가 같다.
 # (MS-OFFCRYPTO) 확장자로는 구분되지 않아 바이트로 본다.
 _OLE2_MAGIC = b"\xd0\xcf\x11\xe0"
@@ -128,11 +134,16 @@ def _to_table(rows: list[list[str]]) -> list[str]:
     return lines
 
 
-def xlsx_to_markdown(data: bytes, *, max_cells: int = MAX_CELLS) -> str:
+def xlsx_to_markdown(
+    data: bytes, *, max_cells: int = MAX_CELLS, max_bytes: int = MAX_BYTES
+) -> str:
     """XLSX 바이트를 마크다운으로. 열 수 없으면 XlsxParseError.
 
     시트가 둘 이상이면 시트명을 소제목으로 단다. 하나뿐이면 파일명이 이미
     제목으로 붙으므로 생략한다(`Sheet1` 같은 기본명이 본문에 섞이는 것 방지).
+
+    셀 수(max_cells)와 출력 바이트(max_bytes) 양쪽으로 자른다. 둘 중 하나만
+    막으면 나머지로 새어 한도를 넘긴다.
     """
     if data[:4] == _OLE2_MAGIC:
         raise XlsxParseError(
@@ -144,21 +155,30 @@ def xlsx_to_markdown(data: bytes, *, max_cells: int = MAX_CELLS) -> str:
         sheets = wb.worksheets
         budget = [max_cells]
         chunks: list[str] = []
+        used = 0
+        truncated = False
         for ws in sheets:
             rows = _sheet_rows(ws, budget)
             if not rows:
                 continue
-            if len(sheets) > 1:
-                chunks.append(f"## {ws.title}")
-            chunks.extend(_to_table(rows))
+            lines = ([f"## {ws.title}"] if len(sheets) > 1 else []) + _to_table(rows)
+            for line in lines:
+                size = len(line.encode("utf-8")) + 1
+                if used + size > max_bytes:
+                    truncated = True
+                    break
+                chunks.append(line)
+                used += size
             chunks.append("")
-        truncated = budget[0] <= 0
+            if truncated:
+                break
+        truncated = truncated or budget[0] <= 0
     finally:
         wb.close()
 
-    if not chunks:
+    if not chunks or not any(c.strip() for c in chunks):
         raise XlsxParseError("내용 없는 스프레드시트(빈 셀만)")
 
     if truncated:
-        chunks.append(f"> (셀 {max_cells:,}개 상한에서 잘림)")
+        chunks.append("> (크기 상한에서 잘림 — 원본 일부만 색인됨)")
     return "\n".join(chunks).strip()

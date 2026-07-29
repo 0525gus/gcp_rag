@@ -11,7 +11,7 @@ import pytest
 
 openpyxl = pytest.importorskip("openpyxl")
 
-from shared.xlsx_md import XlsxParseError, xlsx_to_markdown  # noqa: E402
+from shared.xlsx_md import MAX_BYTES, XlsxParseError, xlsx_to_markdown  # noqa: E402
 
 
 def _book(sheets: dict[str, list[list[object]]]) -> bytes:
@@ -157,3 +157,22 @@ def test_cell_budget_truncates_and_says_so() -> None:
     md = xlsx_to_markdown(data, max_cells=20)
     assert "잘림" in md
     assert len(md.splitlines()) < 50
+
+
+def test_byte_budget_caps_output() -> None:
+    """셀 수만 막으면 출력 바이트가 새어 RAG 한도를 넘는다.
+
+    실제로 셀 30만개가 29MB 를 만들어 색인이 통째로 실패한 적이 있다.
+    """
+    data = _book({"s": [[f"긴셀값{i}-{j}" * 5 for j in range(8)] for i in range(400)]})
+    md = xlsx_to_markdown(data, max_bytes=4_000)
+
+    assert len(md.encode("utf-8")) <= 4_200  # 상한 + 잘림 표기 여유
+    assert "잘림" in md
+
+
+def test_byte_budget_untouched_when_small() -> None:
+    data = _book({"s": [["부서", "담당자"], ["교무처", "홍길동"]]})
+    md = xlsx_to_markdown(data, max_bytes=MAX_BYTES)
+    assert "잘림" not in md
+    assert "홍길동" in md
