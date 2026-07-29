@@ -1,5 +1,8 @@
 starlette>=0.40.0
-mcp>=1.1.0
+# 2.0.0 에서 mcp.server.fastmcp 가 사라져 서버가 기동조차 못 한다.
+# 상한이 없던 탓에 재빌드가 조용히 2.0.0 을 끌어와 리비전이 죽었다
+# (2026-07-29, rag-mcp-00015). 올릴 때는 import 경로 이관을 같이 해야 한다.
+mcp>=1.1.0,<2
 uvicorn[standard]>=0.32.0
 pydantic>=2.9.0,<3
 google-cloud-firestore>=2.19.0
