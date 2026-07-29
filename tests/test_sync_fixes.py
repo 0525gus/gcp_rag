@@ -191,3 +191,33 @@ def test_workflow_recovery_calls_both_endpoints() -> None:
     txt = (ROOT / "workflows" / "daily_sync.yaml").read_text(encoding="utf-8")
     assert "/sync/reindex-pending" in txt
     assert "/sync/retry-failed" in txt
+
+
+# ---------------------------------------------------------------- import 재시도
+def test_import_retries_on_corpus_busy(monkeypatch) -> None:
+    """코퍼스 동시 작업(FailedPrecondition)은 기다리면 풀린다 — 재시도해야 한다.
+
+    2026-07-29 재색인에서 48건이 이걸로 즉시 실패했다. 당시엔
+    ResourceExhausted 만 재시도 대상이었다.
+    """
+    from google.api_core import exceptions as gcp_exceptions
+
+    calls: list[int] = []
+
+    def _flaky(corpus, uris, transformation_config=None):  # noqa: ANN001
+        calls.append(1)
+        if len(calls) < 3:
+            raise RuntimeError(
+                "Failed in importing the RagFiles due to: ",
+            ) from gcp_exceptions.FailedPrecondition("other operations running")
+        return type("R", (), {"imported_rag_files_count": len(uris)})()
+
+    monkeypatch.setattr(rag_engine.rag, "import_files", _flaky)
+    monkeypatch.setattr(rag_engine.time, "sleep", lambda *_: None)
+
+    client = RagEngineClient.__new__(RagEngineClient)
+    client.corpus_name = "corpora/x"  # type: ignore[attr-defined]
+    out = client._import_batch(["gs://b/a.md"], None, max_retries=5)
+
+    assert out == ["gs://b/a.md"]
+    assert len(calls) == 3, "재시도 없이 즉시 실패하면 안 된다"

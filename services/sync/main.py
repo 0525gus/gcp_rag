@@ -54,7 +54,7 @@ from shared.search_postprocess import extract_file_id  # noqa: E402
 setup_logging()
 logger = logging.getLogger("sync_service")
 
-# FILE_COPY 중 텍스트는 본문에 breadcrumb를 직접 삽입
+# 직접 경로(_ingest_direct) 중 텍스트는 본문에 breadcrumb를 직접 삽입
 _TEXT_COPY_MIMES = frozenset(
     {
         "text/plain",
@@ -530,7 +530,7 @@ def ingest(body: IngestBody) -> dict[str, Any]:
         if route == RouteKind.GOOGLE_EXPORT:
             return _ingest_google_export(body, store, gcs, drive, settings)
         if route == RouteKind.FILE_COPY:
-            return _ingest_file_copy(body, store, gcs, drive, settings)
+            return _ingest_direct(body, store, gcs, drive, settings)
         store.upsert(
             DocState(
                 file_id=body.file_id,
@@ -859,13 +859,28 @@ def _ingest_google_export(
     )
 
 
-def _ingest_file_copy(
+def _ingest_direct(
     body: IngestBody,
     store: DocStateStore,
     gcs: GcsClient,
     drive: DriveClient,
     settings: Settings,
 ) -> dict[str, Any]:
+    """파서 서비스를 거치지 않고 Drive→GCS 로 바로 가는 포맷들.
+
+    한때는 이름 그대로 '복사'만 했으나 지금은 포맷마다 다르게 손본다.
+    라우트 키(`FILE_COPY`)는 워크플로가 문자열로 비교하고 API 응답에도
+    나가므로 그대로 두고, 함수 이름만 실제 동작에 맞춘다.
+
+        PDF          한도 초과분을 페이지 경계로 분할
+        XLSX         셀을 마크다운 표로 변환
+        TXT/HTML/CSV 머리말을 본문 앞에 심음
+        그 외        원본 복사 + 경로 사이드카
+
+    크기 게이트가 두 번 나오는데 **재는 대상이 다르다**. 위쪽은 원본 바이트,
+    아래쪽은 RAG 로 실제 올라갈 산출물이다. 둘을 섞으면 색인되지도 않을
+    원본 크기 때문에 문서를 잃는다(실측 사고 있었음).
+    """
     path_ctx = _resolve_path_ctx(drive, body)
     data = drive.download_file(body.file_id)
 

@@ -95,17 +95,31 @@ class RagEngineClient:
                 )
                 return list(gcs_uris)
             except Exception as exc:  # noqa: BLE001
-                # vertexai SDK가 내부에서 ResourceExhausted 를 잡아 RuntimeError 로
+                # vertexai SDK가 내부에서 원인 예외를 잡아 RuntimeError 로
                 # 재포장하므로(__cause__ 에 원본이 남음), 타입 매칭만으로는 못 잡는다.
-                throttled = isinstance(exc, gcp_exceptions.ResourceExhausted) or isinstance(
-                    exc.__cause__, gcp_exceptions.ResourceExhausted
+                #
+                # 기다리면 풀리는 두 가지를 재시도한다.
+                #   ResourceExhausted   쿼터(RPM) 초과
+                #   FailedPrecondition  같은 코퍼스에 다른 작업이 실행 중.
+                #                       코퍼스는 import/delete 를 동시에 못 받는다.
+                #                       (2026-07-29 재색인에서 48건이 이걸로 즉시
+                #                        실패했다 — 재시도 대상이 아니었기 때문)
+                retryable = tuple(
+                    e
+                    for e in (
+                        gcp_exceptions.ResourceExhausted,
+                        gcp_exceptions.FailedPrecondition,
+                    )
                 )
-                if not throttled:
+                transient = isinstance(exc, retryable) or isinstance(
+                    exc.__cause__, retryable
+                )
+                if not transient:
                     logger.exception("RAG import failed")
                     raise
                 last_err = exc
                 logger.warning(
-                    "RAG import throttled (attempt %s): %s", attempt + 1, exc
+                    "RAG import retryable (attempt %s): %s", attempt + 1, exc
                 )
                 time.sleep(delay)
                 delay = min(delay * 2, 60)

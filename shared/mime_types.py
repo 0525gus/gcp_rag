@@ -30,7 +30,9 @@ class RouteKind(str, Enum):
 
     HWP_PARSE = "HWP_PARSE"  # 파서 → 정규화 md → GCS
     GOOGLE_EXPORT = "GOOGLE_EXPORT"  # Drive export → GCS
-    FILE_COPY = "FILE_COPY"  # 원본 다운로드 → GCS
+    # 파서 서비스를 안 거치고 Drive→GCS 로 직행. 이름과 달리 단순 복사만은
+    # 아니다(PDF 분할·XLSX 표 변환 포함) — 처리는 _ingest_direct 참고.
+    FILE_COPY = "FILE_COPY"
     SKIP = "SKIP"
     DELETE = "DELETE"
 

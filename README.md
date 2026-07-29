@@ -15,7 +15,7 @@ Cloud Scheduler (00:00 KST, Asia/Seoul)
        │    SKIP          → doc_state SKIPPED
        │    HWP_PARSE     → Drive 다운로드 → /parse(rhwp) → GCS *.md
        │    GOOGLE_EXPORT → Drive export → GCS
-       │    FILE_COPY     → 원본 복사 → GCS
+       │    FILE_COPY     → PDF 분할 / XLSX 표 변환 / 그 외 복사 → GCS
        ├─ /sync/index-gcs        RAG Engine은 GCS만 import (Drive 커넥터 미사용)
        ├─ /sync/reconcile
        └─ /sync/commit-token     색인 성공 시에만 커밋

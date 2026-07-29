@@ -1,0 +1,217 @@
+"""_ingest_direct (FILE_COPY 라우트) 분기 검증.
+
+이 함수는 테스트가 없어서 결함 두 개가 운영 재색인까지 가서야 드러났다
+(2026-07-29). 둘 다 크기 게이트였고, 아래 두 테스트로 고정한다.
+
+  - 원본 xlsx 를 RAG 한도로 재서 27.7MB 문서를 통째로 잃은 건
+  - 변환 결과가 한도를 넘겨도 잘라서 넣지 못하고 실패한 건
+"""
+
+from __future__ import annotations
+
+import io
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+openpyxl = pytest.importorskip("openpyxl")
+
+import services.sync.main as sync_main  # noqa: E402
+from services.sync.main import IngestBody, _ingest_direct  # noqa: E402
+from shared.config import Settings  # noqa: E402
+from shared.path_context import PathContext  # noqa: E402
+
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _xlsx(rows: list[list[object]]) -> bytes:
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class _Drive:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def download_file(self, file_id: str) -> bytes:
+        return self.payload
+
+    def resolve_path_context(self, file_id: str, fallback: str) -> PathContext:
+        return PathContext(
+            path="Drive/문서결재/시험묶음",
+            bundle="시험묶음",
+            segments=("Drive", "문서결재", "시험묶음"),
+        )
+
+
+class _Gcs:
+    def __init__(self) -> None:
+        self.md: list[tuple[str, str]] = []
+        self.blobs: list[str] = []
+        self.sidecars: list[str] = []
+        self.deleted: list[str] = []
+
+    def upload_normalized_md(self, markdown: str, file_id: str) -> str:
+        self.md.append((file_id, markdown))
+        return f"gs://nb/normalized/{file_id}.md"
+
+    def upload_bytes(self, data, bucket, blob_name, content_type=None) -> str:  # noqa: ANN001
+        self.blobs.append(blob_name)
+        return f"gs://{bucket}/{blob_name}"
+
+    def upload_path_sidecar_md(self, markdown: str, file_id: str) -> str:
+        self.sidecars.append(file_id)
+        return f"gs://nb/normalized/{file_id}.meta.md"
+
+    def delete(self, uri: str) -> None:
+        self.deleted.append(uri)
+
+
+class _Store:
+    def __init__(self) -> None:
+        self.upserts: list[Any] = []
+        self.split_queue: list[tuple[str, str, int]] = []
+        self.dlq: list[tuple[str, str]] = []
+
+    def should_skip_reindex(self, file_id: str, content_hash: str) -> bool:
+        return False
+
+    def upsert(self, state: Any) -> None:
+        self.upserts.append(state)
+
+    def enqueue_split(self, file_id: str, reason: str, size_bytes: int, **kw: Any) -> None:
+        self.split_queue.append((file_id, reason, size_bytes))
+
+    def enqueue_dlq(self, file_id: str, reason: str, **kw: Any) -> None:
+        self.dlq.append((file_id, reason))
+
+
+def _settings(**over: Any) -> Settings:
+    base = {
+        "gcp_project_id": "p",
+        "gcs_normalized_bucket": "nb",
+        "max_gcs_bytes": 50 * 1024 * 1024,
+    }
+    base.update(over)
+    return Settings(**base)
+
+
+def _body(name: str = "표.xlsx", mime: str = XLSX_MIME) -> IngestBody:
+    return IngestBody(fileId="f1", driveId="d1", name=name, mimeType=mime)
+
+
+def _run(payload: bytes, *, body: IngestBody | None = None, settings: Settings | None = None):
+    gcs, store = _Gcs(), _Store()
+    res = _ingest_direct(
+        body or _body(), store, gcs, _Drive(payload), settings or _settings()
+    )
+    return res, gcs, store
+
+
+# ---------------------------------------------------------------- xlsx 변환
+def test_xlsx_is_converted_to_markdown_body() -> None:
+    res, gcs, _ = _run(_xlsx([["부서", "담당자"], ["교무처", "홍길동"]]))
+
+    assert res["status"] == "GCS_READY"
+    assert res["gcsUris"] == ["gs://nb/normalized/f1.md"]
+    assert len(gcs.md) == 1
+    assert "| 교무처 | 홍길동 |" in gcs.md[0][1]
+    # 본문이 생겼으니 사이드카는 만들지 않는다
+    assert gcs.sidecars == []
+
+
+def test_xlsx_body_drops_stale_sidecar() -> None:
+    # 예전에 사이드카만 올려둔 문서가 있다. 남기면 청크가 두 벌 잡힌다
+    _, gcs, _ = _run(_xlsx([["a"], ["b"]]))
+    assert gcs.deleted == ["gs://nb/normalized/f1.meta.md"]
+
+
+def test_unreadable_xlsx_falls_back_to_sidecar() -> None:
+    # 암호 걸린 파일(OLE2). 색인 자체를 실패시키지 않고 기존 동작으로 떨어진다
+    res, gcs, store = _run(b"\xd0\xcf\x11\xe0" + b"\x00" * 600)
+
+    assert res["status"] == "GCS_READY"
+    assert gcs.md == []
+    assert gcs.sidecars == ["f1"]
+    assert store.split_queue == [] and store.dlq == []
+
+
+# ---------------------------------------------------------------- 크기 게이트
+def test_large_xlsx_original_is_not_measured_against_rag_limit(monkeypatch) -> None:
+    """원본 xlsx 는 RAG 로 가지 않는다 — 원본 크기로 떨어뜨리면 안 된다.
+
+    회귀 고정: 27.7MB xlsx 가 원본 게이트에서 SPLIT_QUEUED 로 떨어져
+    본문은 물론 사이드카로도 검색되지 않았다. 변환하면 통과하는 문서였다.
+
+    실제 27MB xlsx 를 만드는 대신 변환을 대역으로 바꾼다 — 여기서 재는 건
+    게이트 판정이지 변환 품질이 아니다.
+    """
+    monkeypatch.setattr(sync_main, "xlsx_to_markdown", lambda data: "| a |\n| --- |")
+    # RAG 기본 한도(10MB)를 넘고 저장 상한(50MB)에는 못 미치는 원본
+    fat = b"PK\x03\x04" + b"\x00" * (12 * 1024 * 1024)
+    assert sync_main._effective_limit(_settings(), ".xlsx") == 10 * 1024 * 1024
+
+    res, gcs, store = _run(fat)
+
+    assert store.split_queue == [], "원본 크기로 떨어뜨리면 안 된다"
+    assert res["status"] == "GCS_READY"
+    assert gcs.md, "변환 결과가 색인되어야 한다"
+
+
+def test_oversized_original_still_blocked_by_storage_cap(monkeypatch) -> None:
+    # RAG 한도는 안 재도 우리 저장 상한은 지켜야 한다
+    monkeypatch.setattr(sync_main, "xlsx_to_markdown", lambda data: "| a |\n| --- |")
+    fat = b"PK\x03\x04" + b"\x00" * 5000
+
+    res, _, store = _run(fat, settings=_settings(max_gcs_bytes=4000))
+
+    assert res["status"] == "SPLIT_QUEUED"
+    assert store.split_queue and "SIZE_EXCEEDED" in store.split_queue[0][1]
+
+
+def test_converted_markdown_is_measured_against_rag_limit(monkeypatch) -> None:
+    """RAG 로 올라가는 건 .md 다. 원본이 작아도 산출물이 넘치면 막아야 한다.
+
+    저장 상한은 넉넉히 두어 원본 게이트가 아니라 **변환 후 게이트**가
+    도는 것을 확인한다.
+    """
+    huge = "가" * (4 * 1024 * 1024)  # UTF-8 로 12MB → .md 한도(10MB) 초과
+    monkeypatch.setattr(sync_main, "xlsx_to_markdown", lambda data: huge)
+    payload = _xlsx([["a"], ["b"]])
+
+    res, gcs, store = _run(payload, settings=_settings(max_gcs_bytes=50 * 1024 * 1024))
+
+    assert res["status"] == "SPLIT_QUEUED"
+    assert store.split_queue and "SIZE_EXCEEDED" in store.split_queue[0][1]
+    assert gcs.md == [], "한도를 넘긴 산출물은 올리지 않는다"
+
+
+# ---------------------------------------------------------------- 텍스트 경로
+def test_text_file_keeps_breadcrumb_body_path() -> None:
+    res, gcs, _ = _run(
+        "본문 내용".encode(),
+        body=_body(name="메모.txt", mime="text/plain"),
+    )
+    assert res["gcsUris"] == ["gs://nb/normalized/f1.md"]
+    assert "본문 내용" in gcs.md[0][1]
+
+
+def test_binary_file_keeps_copy_plus_sidecar() -> None:
+    res, gcs, _ = _run(
+        b"%PDF-1.4 fake",
+        body=_body(name="문서.pdf", mime="application/pdf"),
+    )
+    assert gcs.blobs == ["normalized/f1.pdf"]
+    assert gcs.sidecars == ["f1"]
+    assert gcs.md == []
