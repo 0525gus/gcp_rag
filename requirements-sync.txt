@@ -9,3 +9,5 @@ google-cloud-aiplatform>=1.70.0
 httpx>=0.27.0
 # RAG Engine 한도(PDF 50MB) 초과분을 페이지 단위로 쪼개기 위해
 pypdf>=5.1.0
+# RAG Engine 기본 파서가 못 읽는 xlsx 를 마크다운 표로 뽑기 위해
+openpyxl>=3.1.5

@@ -46,9 +46,14 @@ Vertex AI RAG Engine  ← normalized 버킷만 읽는다
 | `…-raw/raw/` | 892 | 271 MB | `.hwp` / `.hwpx` **원본만** |
 | `…-normalized/normalized/` | 1,526 | 530 MB | `.md`, `.meta.md`, 복사된 `.pdf`/`.xlsx`/`.pptx` |
 
-raw 에 HWP 만 있는 이유: **변환이 필요한 포맷만 raw 를 거친다.** PDF·XLSX 는
-RAG Engine 이 직접 읽거나(PDF) 사이드카로 대체하므로(XLSX) normalized 로 바로
-간다.
+raw 에 HWP 만 있는 이유: **raw 는 sync→parser 사이의 페이로드 채널이라, 별도
+파서 서비스를 거치는 포맷만 들른다.** PDF 는 RAG Engine 이 직접 읽고, XLSX 는
+sync 안에서 곧바로 마크다운으로 바뀌므로(→ [`shared/xlsx_md.py`](../shared/xlsx_md.py))
+둘 다 normalized 로 바로 간다.
+
+XLSX 는 `{fileId}.md`(셀을 뽑은 표)로 색인된다. 원본 `.xlsx` 객체는 남아 있지만
+RAG Engine 이 읽지 못해 색인 대상에서 제외된다. 암호가 걸려 변환에 실패한
+27건만 예전처럼 `.meta.md` 사이드카로 남는다.
 
 ## 3. raw 객체는 무슨 일을 하나
 

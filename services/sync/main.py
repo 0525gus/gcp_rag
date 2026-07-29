@@ -31,7 +31,7 @@ if str(_ROOT) not in sys.path:
 from shared.config import Settings, get_settings  # noqa: E402
 from shared.drive import DriveClient  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
-from shared.gcs import GcsClient  # noqa: E402
+from shared.gcs import GcsClient, gs_uri  # noqa: E402
 from shared.hashing import sha256_bytes, sha256_text  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
 from shared.mime_types import (  # noqa: E402
@@ -42,6 +42,7 @@ from shared.mime_types import (  # noqa: E402
     rag_size_limit,
 )
 from shared.pdf_split import PdfSplitError, split_pdf  # noqa: E402
+from shared.xlsx_md import XlsxParseError, xlsx_to_markdown  # noqa: E402
 from shared.models import DocState, DocStatus, ParseRoute  # noqa: E402
 from shared.path_context import (  # noqa: E402
     PathContext,
@@ -60,6 +61,15 @@ _TEXT_COPY_MIMES = frozenset(
         "text/markdown",
         "text/html",
         "text/csv",
+    }
+)
+
+# 스프레드시트는 셀을 마크다운 표로 뽑아 본문으로 삼는다.
+# RAG Engine 기본 파서가 xlsx 를 못 읽어 원본은 색인 대상이 아니다.
+_SPREADSHEET_COPY_MIMES = frozenset(
+    {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel.sheet.macroenabled.12",
     }
 )
 
@@ -881,17 +891,35 @@ def _ingest_file_copy(
             gated["route"] = "FILE_COPY"
             return gated
 
-    if mime in _TEXT_COPY_MIMES:
+    body_text: str | None = None
+    if mime in _SPREADSHEET_COPY_MIMES:
         try:
-            text = data.decode("utf-8")
+            body_text = xlsx_to_markdown(data)
+        except XlsxParseError as exc:
+            # 암호 걸린 파일 등 — 사이드카만 남기던 기존 동작으로 떨어진다.
+            # 색인 자체를 실패시키지는 않는다(경로·파일명으로는 여전히 찾힌다).
+            logger.warning("xlsx→md 실패 %s (%s): %s", body.file_id, name, exc)
+    elif mime in _TEXT_COPY_MIMES:
+        try:
+            body_text = data.decode("utf-8")
         except UnicodeDecodeError:
-            text = data.decode("utf-8", errors="replace")
+            body_text = data.decode("utf-8", errors="replace")
+
+    if body_text is not None:
         md_text = build_breadcrumb_markdown(
             path=path_ctx.path,
             bundle=path_ctx.bundle,
             title=name,
-            body=text,
+            body=body_text,
         )
+        # 원본 바이트가 아니라 머리말까지 붙인 최종 산출물로 잰다.
+        # 변환으로 늘어난 분량(xlsx→표)은 원본 크기로는 안 보인다.
+        gated = _size_gate(
+            store, settings, body, md_text.encode("utf-8"), splittable=True, ext=".md"
+        )
+        if gated:
+            gated["route"] = "FILE_COPY"
+            return gated
         content_hash = sha256_text(md_text)
         if store.should_skip_reindex(body.file_id, content_hash):
             return {
@@ -904,6 +932,7 @@ def _ingest_file_copy(
             }
         gcs_uri = gcs.upload_normalized_md(md_text, body.file_id)
         uris = [gcs_uri]
+        _drop_stale_sidecar(gcs, settings, body.file_id)
     else:
         sidecar = build_breadcrumb_markdown(
             path=path_ctx.path,
@@ -963,6 +992,20 @@ def _ingest_file_copy(
         content_hash=content_hash,
         path_ctx=path_ctx,
     )
+
+
+def _drop_stale_sidecar(gcs: GcsClient, settings: Settings, file_id: str) -> None:
+    """본문 md 가 생긴 문서의 옛 경로 사이드카를 치운다.
+
+    xlsx 는 예전에 `.meta.md` 한 줄만 색인했다. 본문이 생긴 뒤에도 남겨두면
+    같은 fileId 로 청크가 두 벌 잡혀, 문서당 청크 상한을 사이드카가 잡아먹는다.
+    """
+    uri = gs_uri(settings.gcs_normalized_bucket, f"normalized/{file_id}.meta.md")
+    try:
+        gcs.delete(uri)
+    except Exception as exc:  # noqa: BLE001
+        # 처음부터 없었으면 그만이다. 삭제 실패로 색인을 막지 않는다.
+        logger.debug("사이드카 정리 건너뜀 %s: %s", uri, exc)
 
 
 def _ext_for_mime(mime: str | None) -> str:
