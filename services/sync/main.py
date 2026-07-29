@@ -579,10 +579,11 @@ def _size_gate(
     *,
     splittable: bool,
     ext: str = "",
+    limit: int | None = None,
 ) -> dict[str, Any] | None:
     """업로드 직전 크기 체크. 초과 시 FAILED/분할 큐. None이면 통과."""
     size = len(data)
-    limit = _effective_limit(settings, ext)
+    limit = limit if limit is not None else _effective_limit(settings, ext)
     if size <= limit:
         return None
     reason = f"SIZE_EXCEEDED:{size}>{limit}"
@@ -886,7 +887,16 @@ def _ingest_file_copy(
             pdf_parts = None  # 아래 게이트가 큐로 보낸다
 
     if pdf_parts is None:
-        gated = _size_gate(store, settings, body, data, splittable=True, ext=ext)
+        # 스프레드시트 원본은 RAG 로 가지 않는다 — 색인되는 건 변환된 .md 뿐이다.
+        # 원본을 RAG 한도로 재면 색인되지도 않을 크기 때문에 문서를 통째로 잃는다.
+        # (실측: 27.7MB xlsx 가 여기서 떨어져 사이드카로도 못 찾게 됐다)
+        # 변환 결과는 아래에서 .md 기준으로 따로 잰다. 여기서는 우리 저장 상한만 본다.
+        raw_limit = (
+            settings.max_gcs_bytes if mime in _SPREADSHEET_COPY_MIMES else None
+        )
+        gated = _size_gate(
+            store, settings, body, data, splittable=True, ext=ext, limit=raw_limit
+        )
         if gated:
             gated["route"] = "FILE_COPY"
             return gated
