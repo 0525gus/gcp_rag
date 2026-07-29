@@ -25,9 +25,9 @@ if str(_ROOT) not in sys.path:
 from shared.config import get_settings  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
-from shared.lexical_rerank import rrf_rerank  # noqa: E402
+from shared.lexical_rerank import query_terms, rrf_rerank, term_coverage  # noqa: E402
 from shared.rag_engine import RagEngineClient  # noqa: E402
-from shared.search_postprocess import postprocess_hits  # noqa: E402
+from shared.search_postprocess import build_answer_payload, postprocess_hits  # noqa: E402
 
 setup_logging()
 logger = logging.getLogger("mcp_server")
@@ -73,6 +73,23 @@ def search(
 ) -> list[dict[str, Any]]:
     """사내/공공 문서 벡터스토어에서 관련 청크를 검색합니다.
 
+    반환된 청크는 **서로 독립적인 문서**입니다. 같은 사실을 함께 뒷받침한다는
+    보장이 없으므로, 여러 청크의 내용을 하나의 서술로 합치지 마세요.
+    문장마다 근거가 된 문서를 구분하고, 청크에 적혀 있지 않은 관계
+    (예: 어느 문서의 인물이 다른 문서의 업무 담당자라는 연결)를 지어내지 마세요.
+
+    각 청크의 `missingTerms` 는 그 청크 본문에 **없는** 질의어입니다.
+    질문의 핵심어가 `missingTerms` 에 들어 있으면, 그 청크는 그 부분에 대한
+    근거가 아닙니다. 어떤 청크도 질문에 답하지 못할 때는 주변 정보를 나열하는
+    대신 '확인되지 않는다'는 결론을 먼저 밝혀 주세요.
+
+    **같은 의도로 다시 검색하지 마세요.** `missingTerms` 는 '그 내용이 코퍼스에
+    없다'는 뜻이지 다시 찾으라는 뜻이 아닙니다. 표현을 바꿔 재질의하거나 top_k 를
+    올려도 없는 문서가 생기지는 않으며, 호출마다 수만 토큰이 누적됩니다.
+    한 질문에는 원칙적으로 **한 번만** 호출하고, 다시 부를 때는 앞선 결과로는
+    답할 수 없는 **새로운 정보**를 찾을 때로 한정하세요.
+    기본 top_k 로 충분합니다 — 결과가 부족하면 값을 키우지 말고 없다고 답하세요.
+
     Args:
         query: 검색 질의 (자연어)
         top_k: 반환할 최대 청크 수 (기본 5)
@@ -106,6 +123,7 @@ def search(
         raw_hits,
         top_k=k,
         max_chunks_per_file=settings.search_max_chunks_per_file,
+        max_total_chunks=settings.search_max_total_chunks,
     )
     if not hits:
         # 필터가 전부 걸러낸 경우 — 임계값 조정 판단 근거로 남긴다
@@ -115,6 +133,10 @@ def search(
         )
 
     store = DocStateStore(settings)
+    # 질의어별 근거 유무를 청크마다 붙인다. 지시문은 무시당해도 데이터는
+    # 남으므로, 호출 LLM 이 '이 문서는 질의의 어느 부분을 덮는가'를 스스로
+    # 판단할 수 있어야 서로 다른 문서를 하나로 합치는 답이 줄어든다.
+    terms = query_terms(query)
     results: list[dict[str, Any]] = []
     for hit in hits:
         meta = store.get(hit.source.file_id)
@@ -145,6 +167,7 @@ def search(
             ),
             "driveId": meta.drive_id if meta else None,
         }
+        matched, missing = term_coverage(terms, hit.text)
         results.append(
             {
                 "text": hit.text,
@@ -153,6 +176,8 @@ def search(
                 "score": round(hit.score, 6),
                 "scoreType": "vertex_raw",
                 "rank": len(results) + 1,
+                "matchedTerms": matched,
+                "missingTerms": missing,
                 "source": source,
             }
         )
@@ -161,21 +186,18 @@ def search(
 
 @mcp.tool()
 def answer(query: str, top_k: int | None = None) -> dict[str, Any]:
-    """검색 청크+출처를 묶어 반환합니다. 최종 답변 생성은 호출 LLM이 담당합니다."""
-    chunks = search(query=query, top_k=top_k)
-    citations = [
-        {
-            "fileId": c["source"]["fileId"],
-            "name": c["source"]["name"],
-            "sourceUri": c["source"]["sourceUri"],
-        }
-        for c in chunks
-    ]
-    return {
-        "context": "\n\n---\n\n".join(c["text"] for c in chunks),
-        "citations": citations,
-        "chunk_count": len(chunks),
-    }
+    """검색 청크+출처를 묶어 반환합니다. 최종 답변 생성은 호출 LLM이 담당합니다.
+
+    `context` 는 문서마다 `[n] 파일명` 라벨이 붙은 블록입니다. 인용은 그 번호를
+    따르고, **블록 경계를 넘어 내용을 합치지 마세요.** 라벨이 없던 이전 형식에서는
+    어느 문장이 어느 문서에서 왔는지 복원할 수 없었습니다.
+
+    - `uncoveredTerms` 가 비어 있지 않으면, 그 검색어를 담은 근거가 하나도
+      없다는 뜻입니다. 답을 지어내지 말고 확인되지 않음을 밝히거나 되물으세요.
+    - `coverage="partial"` 은 어떤 문서 하나도 질의 전체를 덮지 못했다는 뜻이며,
+      여러 문서를 이어 붙여 답을 만들면 근거 없는 결합이 됩니다.
+    """
+    return build_answer_payload(search(query=query, top_k=top_k), query)
 
 
 @mcp.custom_route("/health", methods=["GET"])

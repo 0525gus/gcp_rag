@@ -84,6 +84,13 @@ class Settings:
     # 긴 규정 문서는 답이 여러 조문에 걸쳐 있어 1이면 필요한 조문이 통째로
     # 탈락한다(실측: 제15·16·25조 청크가 후순위라 버려짐).
     search_max_chunks_per_file: int = 3
+    # 한 응답에 실어 보낼 **총** 청크 수 상한. top_k × max_chunks_per_file 이
+    # 곱셈이라 그냥 두면 터진다: top_k=20 이면 최대 60청크 ≈ 6만 토큰이 한 번에
+    # 나가고, 그게 호출마다 에이전트 컨텍스트에 쌓인다(실측: 한 질문에 7회 호출,
+    # top_k 를 10→20 으로 스스로 올림).
+    # 기본 15 = top_k_default(5) × 3 이라 기본 호출의 동작은 그대로다.
+    # 문서 다양성이 우선이라 top_k 보다 낮게는 못 내려간다(문서당 1청크는 보장).
+    search_max_total_chunks: int = 15
     # RAG 청킹 — Vertex 기본값. 코퍼스마다 최적값이 달라 env 로 조정 가능하게 둔다
     # (scripts/analyze_chunking.py 로 표 절단율을 재서 고를 것).
     # 실측(공문 136건/표 220개): 512 는 표의 16% 를 자르고 1024 는 6%.
@@ -147,6 +154,9 @@ class Settings:
             search_lexical_rerank=_env_bool("SEARCH_LEXICAL_RERANK", True),
             search_max_chunks_per_file=max(
                 1, _env_int("SEARCH_MAX_CHUNKS_PER_FILE", 3)
+            ),
+            search_max_total_chunks=max(
+                1, _env_int("SEARCH_MAX_TOTAL_CHUNKS", 15)
             ),
             rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 1024),
             rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 256),

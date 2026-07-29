@@ -10,7 +10,9 @@ from shared.folder_scope import is_under_folder_allowlist
 from shared.gcs import parse_gs_uri
 from shared.mime_types import RouteKind, classify_route, is_hwp_family, is_hwpx
 from shared.models import SearchHit, SearchSource
+from shared.lexical_rerank import query_terms, term_coverage
 from shared.search_postprocess import (
+    build_answer_payload,
     distance_to_relevance,
     extract_file_id,
     postprocess_hits,
@@ -273,3 +275,128 @@ def test_to_change_handles_removed_without_file_payload() -> None:
     assert change.file_id == "f1"
     assert change.drive_id == "d"
     assert change.removed is True
+
+
+# ------------------------------------------------- 질의어 커버리지 (근거 표시)
+def test_query_terms_drops_quotes_short_tokens_and_duplicates() -> None:
+    # 따옴표·조사 잔여물은 토큰이 아니고, 1글자는 노이즈라 버린다
+    assert query_terms('"LMS" "명단" 및 AI, LMS') == ["LMS", "명단", "AI"]
+
+
+def test_query_terms_excludes_bigrams() -> None:
+    # 호출 LLM 에게 그대로 보여줄 값이라 '교수학' 같은 조각이 섞이면 안 된다
+    assert query_terms("교수학습개발센터") == ["교수학습개발센터"]
+
+
+def test_term_coverage_matches_hangul_with_josa_attached() -> None:
+    matched, missing = term_coverage(
+        ["교수학습개발센터", "명단"], "교수학습개발센터의 센터장으로 임명함"
+    )
+    assert matched == ["교수학습개발센터"]
+    assert missing == ["명단"]
+
+
+def test_term_coverage_requires_whole_token_for_latin() -> None:
+    # 부분문자열로 보면 'ai' 가 said/train 에 걸려 근거 없는 매치가 된다
+    matched, missing = term_coverage(["AI"], "he said the train arrived")
+    assert matched == []
+    assert missing == ["AI"]
+
+    matched, _ = term_coverage(["AI"], "AI혁신위원회 위원")
+    assert matched == ["AI"]
+
+
+def _chunk(name: str, text: str, matched: list[str], missing: list[str]) -> dict:
+    return {
+        "text": text,
+        "matchedTerms": matched,
+        "missingTerms": missing,
+        "source": {"fileId": "f-" + name, "name": name, "sourceUri": None},
+    }
+
+
+def test_build_answer_payload_labels_each_document_block() -> None:
+    chunks = [
+        _chunk("인사발령.hwp", "김나영 센터장", ["교수학습개발센터"], ["LMS"]),
+        _chunk("조사표.xlsx", "AI 튜터 기능", ["LMS"], ["교수학습개발센터"]),
+    ]
+    out = build_answer_payload(chunks, "LMS 교수학습개발센터")
+    # 라벨이 없으면 어느 문장이 어느 문서에서 왔는지 복원할 수 없다
+    assert "[1] 인사발령.hwp\n김나영 센터장" in out["context"]
+    assert "[2] 조사표.xlsx\nAI 튜터 기능" in out["context"]
+    assert [c["n"] for c in out["citations"]] == [1, 2]
+
+
+def test_build_answer_payload_flags_partial_when_terms_split_across_docs() -> None:
+    chunks = [
+        _chunk("인사발령.hwp", "김나영", ["교수학습개발센터"], ["LMS", "명단"]),
+        _chunk("조사표.xlsx", "AI 튜터", ["LMS"], ["교수학습개발센터", "명단"]),
+    ]
+    out = build_answer_payload(chunks, '"LMS" "명단" "교수학습개발센터"')
+    # 두 문서를 이어 붙여야만 질의가 덮인다 = 근거 없는 결합 위험
+    assert out["coverage"] == "partial"
+    # 어느 문서에도 없는 검색어는 되물어야 한다는 신호
+    assert out["uncoveredTerms"] == ["명단"]
+
+
+def test_build_answer_payload_reports_full_only_when_one_doc_covers_all() -> None:
+    chunks = [
+        _chunk("규정.hwp", "연구윤리 규정 개정", ["연구윤리", "개정"], []),
+        _chunk("붙임.hwp", "참고", ["연구윤리"], ["개정"]),
+    ]
+    out = build_answer_payload(chunks, "연구윤리 개정")
+    assert out["coverage"] == "full"
+    assert out["uncoveredTerms"] == []
+
+
+def test_build_answer_payload_handles_empty_result() -> None:
+    out = build_answer_payload([], "LMS 명단")
+    assert out["coverage"] == "none"
+    assert out["context"] == ""
+    assert out["chunk_count"] == 0
+    assert out["uncoveredTerms"] == ["LMS", "명단"]
+
+
+# ------------------------------------------------- 응답 총량 예산 (토큰 폭발 방지)
+def _multi(fid: str, n: int) -> list[SearchHit]:
+    return [_hit(fid, f"{fid}-청크{i}", 0.1 * i) for i in range(1, n + 1)]
+
+
+def test_total_budget_defaults_to_previous_behaviour() -> None:
+    # 예산을 안 주면 예전처럼 문서당 max_chunks_per_file 만큼 이어 붙인다
+    hits = _multi("f1.md", 3) + _multi("f2.md", 3)
+    out = postprocess_hits(hits, top_k=5, max_chunks_per_file=3)
+    assert out[0].text.count("[...]") == 2
+    assert out[1].text.count("[...]") == 2
+
+
+def test_total_budget_caps_response_size() -> None:
+    hits = _multi("f1.md", 3) + _multi("f2.md", 3) + _multi("f3.md", 3)
+    out = postprocess_hits(
+        hits, top_k=3, max_chunks_per_file=3, max_total_chunks=4
+    )
+    # 문서 3건은 그대로 나오고, 총 청크는 4개를 넘지 않는다
+    assert len(out) == 3
+    total = sum(h.text.count("[...]") + 1 for h in out)
+    assert total == 4
+    # 남은 예산은 관련도 1위 문서가 먼저 가져간다
+    assert out[0].text.count("[...]") == 1
+
+
+def test_total_budget_never_drops_a_document() -> None:
+    # 예산이 문서 수보다 작아도 문서당 1청크는 보장 — 다양성이 이 함수의 목적
+    hits = _multi("f1.md", 3) + _multi("f2.md", 3) + _multi("f3.md", 3)
+    out = postprocess_hits(
+        hits, top_k=3, max_chunks_per_file=3, max_total_chunks=1
+    )
+    assert [h.source.file_id for h in out] == ["f1", "f2", "f3"]
+    assert all("[...]" not in h.text for h in out)
+
+
+def test_total_budget_spreads_before_deepening() -> None:
+    # 앞 문서에 몰아주지 않고 한 개씩 돌려 나눈다
+    hits = _multi("f1.md", 3) + _multi("f2.md", 3)
+    out = postprocess_hits(
+        hits, top_k=2, max_chunks_per_file=3, max_total_chunks=4
+    )
+    assert [h.text.count("[...]") for h in out] == [1, 1]

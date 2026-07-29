@@ -231,6 +231,12 @@ RAG Engine 기본 파서는 xlsx 를 읽지 못한다. 예전에는 경로 사�
 | `SEARCH_DISTANCE_THRESHOLD` | 0.30 | 코퍼스 범위 밖 질의 차단 |
 | `SEARCH_LEXICAL_RERANK` | true | BM25·벡터 순위 RRF 결합 |
 | `SEARCH_MAX_CHUNKS_PER_FILE` | 3 | 문서당 이어붙일 청크 수 |
+| `SEARCH_MAX_TOTAL_CHUNKS` | 15 | 응답 **총** 청크 상한 (토큰 폭발 방지) |
+
+- □ `SEARCH_MAX_TOTAL_CHUNKS` 가 필요한 이유: `top_k × 문서당 청크` 는 곱셈이라
+  `top_k=20` 이면 한 응답에 최대 60청크(≈6만 토큰)가 실린다. 실측으로 팩트챗이
+  한 질문에 7회 호출하며 top_k 를 10→20 으로 올린 사례가 있다.
+  문서당 1청크는 예산보다 우선 보장되므로, 예산을 낮춰도 문서가 사라지지는 않는다.
 
 - □ 거리 임계값 근거(실측, 골든 100건 기준)
 
