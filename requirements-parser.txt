@@ -1,10 +1,12 @@
+# 메이저 상한 필수 — 근거는 requirements-mcp.txt 머리말 참고.
+# 아래 rhwp 주석처럼 버전이 곧 동작인 의존성이 섞인 파일이라 특히 조심할 곳이다.
 fastapi>=0.115.0,<0.116
-uvicorn[standard]>=0.32.0
+uvicorn[standard]>=0.32.0,<1
 pydantic>=2.9.0,<3
-google-cloud-storage>=2.18.0
-google-cloud-documentai>=3.0.0
-google-cloud-firestore>=2.19.0
-httpx>=0.27.0
+google-cloud-storage>=2.18.0,<4
+google-cloud-documentai>=3.0.0,<4
+google-cloud-firestore>=2.19.0,<3
+httpx>=0.27.0,<1
 # HWP(구형 바이너리) → Markdown
 #
 # 0.8.x 고정 해제 금지 — 휠 자체 결함이며 런타임 환경 탓이 아니다.

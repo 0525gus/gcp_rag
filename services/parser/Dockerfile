@@ -21,4 +21,5 @@ ENV PORT=8080
 ENV QG_MODE=log
 
 EXPOSE 8080
-CMD ["uvicorn", "services.parser.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# $PORT 를 듣는다 — services/sync/Dockerfile 의 같은 줄 주석 참고.
+CMD ["sh", "-c", "exec uvicorn services.parser.main:app --host 0.0.0.0 --port ${PORT:-8080}"]

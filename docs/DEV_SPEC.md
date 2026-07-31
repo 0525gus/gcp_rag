@@ -94,7 +94,12 @@ Vertex AI RAG Engine  (RagManagedDb, 청킹·임베딩·벡터검색)
 | `.hwp` | rhwp (PyO3 네이티브) | |
 | `.hwpx` | python-hwpx (순수 파이썬) | 엔진 부재 시 rhwp 대체 |
 
-- □ 품질 게이트: 텍스트 밀도·표 실패율·이미지 비율 판정 → `log`/`reject`/`fallback` 모드
+- □ 품질 게이트: `log`/`reject`/`fallback` 모드
+  - ○ 실제 발동: **텍스트 밀도(G1)와 빈 텍스트 두 가지뿐임**
+  - ○ 표 실패율(G2)·이미지 비율(G3)은 판정 로직은 있으나 파서가 입력값
+    (`table_cell_failures` / `image_area_ratio`)을 채우지 않아 **발동하지 않음**
+  - ○ 따라서 `QG_TABLE_FAIL_RATIO` / `QG_IMAGE_RATIO` 는 현재 무효한 설정값임
+    (근거: [`quality_gate.py`](../services/parser/quality_gate.py) 머리말)
 - □ 접근제어: rag-sync 서비스계정만 호출 가능
 
 #### 다. rag-mcp (검색 제공)

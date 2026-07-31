@@ -29,6 +29,10 @@ import webbrowser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts._env import force_utf8_stdout, load_dotenv  # noqa: E402
 
 SERVICES: dict[str, str | None] = {
     "sync": "rag-sync",
@@ -39,19 +43,6 @@ SERVICES: dict[str, str | None] = {
 }
 
 SEVERITY_ORDER = ("DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY")
-
-
-def _load_dotenv() -> None:
-    env_path = ROOT / ".env"
-    if not env_path.is_file():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        key, val = key.strip(), val.strip().strip('"').strip("'")
-        os.environ.setdefault(key, val)
 
 
 def _project() -> str:
@@ -131,12 +122,14 @@ def run_gcloud_read(
         f"--format={format_}",
     ]
     print(f"# {' '.join(cmd)}\n", file=sys.stderr)
-    proc = subprocess.run(cmd, check=False)
+    # Windows의 gcloud는 .cmd 배치 스크립트라 shell=True 없이는 CreateProcess가 못 찾는다.
+    proc = subprocess.run(cmd, check=False, shell=(os.name == "nt"))
     return proc.returncode
 
 
 def main() -> int:
-    _load_dotenv()
+    force_utf8_stdout()
+    load_dotenv()
 
     parser = argparse.ArgumentParser(
         description="Cloud Run / Workflows 로그를 조회하거나 Log Explorer를 연다."

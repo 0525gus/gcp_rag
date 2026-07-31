@@ -1,10 +1,24 @@
-starlette>=0.40.0
+# 상한을 반드시 둘 것 — 이 파일은 이미 한 번 사고를 냈다.
+# mcp 2.0.0 이 조용히 들어와 `mcp.server.fastmcp` 가 사라져 리비전이 기동조차
+# 못 했다(2026-07-29, rag-mcp-00015). 상한이 없으면 재빌드 시점의 최신 메이저가
+# 그대로 들어오고, 배포 전에는 아무 신호도 없다.
+#
+# 실측(2026-07-30): 상한 없던 것들이 이미 메이저를 넘어 있었다.
+#   starlette   0.4x -> 1.3.1   (sync 쪽에서 fastapi 와 붙이면 Router TypeError)
+# 새 의존성을 추가할 때도 메이저 상한을 같이 적을 것.
+starlette>=0.40.0,<2
 # 2.0.0 에서 mcp.server.fastmcp 가 사라져 서버가 기동조차 못 한다.
 # 상한이 없던 탓에 재빌드가 조용히 2.0.0 을 끌어와 리비전이 죽었다
 # (2026-07-29, rag-mcp-00015). 올릴 때는 import 경로 이관을 같이 해야 한다.
 mcp>=1.1.0,<2
-uvicorn[standard]>=0.32.0
+uvicorn[standard]>=0.32.0,<1
 pydantic>=2.9.0,<3
-google-cloud-firestore>=2.19.0
-google-cloud-aiplatform>=1.70.0
-google-auth>=2.35.0
+google-cloud-firestore>=2.19.0,<3
+# 상한 필수 — mcp 2.0.0 과 같은 사고가 여기서 더 크게 난다.
+# shared/rag_engine.py 가 `from vertexai import rag` 에 전적으로 의존하는데
+# 이 모듈은 이미 폐기 예고 상태다(import 시 "vertexai.rag is deprecated and
+# will be removed in a future version. Please migrate to the agentplatform
+# client."). 사라지는 날 rag-sync·rag-mcp 가 **둘 다 import 에서 죽는다**.
+# 상한만으로는 시한폭탄을 미루는 것뿐이니 agentplatform 이관을 별도로 잡을 것.
+google-cloud-aiplatform>=1.70.0,<2
+google-auth>=2.35.0,<3

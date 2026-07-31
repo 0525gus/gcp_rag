@@ -71,7 +71,16 @@ class DriveClient:
                 .execute(num_retries=NUM_RETRIES)
             )
             for item in resp.get("changes", []):
-                changes.append(self._to_change(item, drive_id))
+                change = self._to_change(item, drive_id)
+                if not change.file_id:
+                    # 공유 드라이브 자체의 변경(이름·권한 등)은 changeType="drive" 로
+                    # 오며 fileId 가 없다. 파일 변경이 아니라 처리할 대상이 없는데,
+                    # 그대로 흘리면 빈 id 로 Drive 조회(400)와 Firestore 문서 경로
+                    # (`doc_state/` — trailing slash) 를 만들어 ingest 가 500 으로
+                    # 죽는다. 실측: 7/23·24·29 일일 동기화가 매번 failed=1 로 끝났다.
+                    logger.info("skipping change without fileId: %s", item)
+                    continue
+                changes.append(change)
             token = resp.get("nextPageToken")
             if "newStartPageToken" in resp:
                 new_start = resp["newStartPageToken"]

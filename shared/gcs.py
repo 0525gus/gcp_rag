@@ -87,3 +87,39 @@ class GcsClient:
         blob = self._client.bucket(bucket_name).blob(blob_name)
         if blob.exists():
             blob.delete()
+
+    def list_blob_names(self, bucket: str, prefix: str) -> list[str]:
+        """prefix 아래 객체 이름 전체 (정리·감사용 전수 조회)."""
+        return [
+            blob.name
+            for blob in self._client.list_blobs(self._client.bucket(bucket), prefix=prefix)
+        ]
+
+    def list_blob_names_for_file(
+        self, bucket: str, prefix_dir: str, file_id: str
+    ) -> list[str]:
+        """`{prefix_dir}/{file_id}` 에 속하는 객체 이름만 반환.
+
+        확장자를 미리 알 수 없어서 prefix 로 훑는다. 확장자 목록을 손으로 적는
+        방식은 목록에 없는 것을 조용히 놓친다 — 실측으로 `.partN.pdf`(분할 PDF)와
+        `.rtf`/`.doc` 가 빠져 있었다.
+
+        `rest` 검사가 fileId 경계를 지킨다. prefix 만으로 걸면 fileId 가 다른
+        fileId 의 접두사일 때 남의 파일을 지운다.
+        """
+        base = f"{prefix_dir.strip('/')}/{file_id}"
+        names: list[str] = []
+        for blob in self._client.list_blobs(self._client.bucket(bucket), prefix=base):
+            rest = blob.name[len(base) :]
+            if rest and not rest.startswith("."):
+                continue
+            names.append(blob.name)
+        return names
+
+    def delete_for_file(self, bucket: str, prefix_dir: str, file_id: str) -> list[str]:
+        """해당 fileId 의 객체를 전부 지우고 지운 이름을 반환."""
+        deleted: list[str] = []
+        for name in self.list_blob_names_for_file(bucket, prefix_dir, file_id):
+            self._client.bucket(bucket).blob(name).delete()
+            deleted.append(name)
+        return deleted

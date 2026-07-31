@@ -23,6 +23,8 @@ Thumbs.db
 *.log
 credentials.json
 service-account*.json
+# scripts/cleanup_orphans.py --csv 산출물 (실행 근거 기록, 커밋 대상 아님)
+orphans*.csv
 .terraform/
 *.tfstate*
 .gcloud/

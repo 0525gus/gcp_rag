@@ -10,7 +10,14 @@ from typing import Any
 from shared.lexical_rerank import query_terms
 from shared.models import SearchHit
 
-# 긴 suffix 먼저
+# 긴 suffix 먼저.
+#
+# 파이프라인이 실제로 만들어내는 확장자를 모두 담아야 한다. 빠진 확장자가 있으면
+# extract_file_id 가 `abc.hwp` 를 fileId 로 되돌리지 못해 `abc.hwp` 를 그대로
+# 반환하고, 그 값은 두 곳에서 조용히 잘못 쓰인다.
+#   rag_engine._file_index   fileId 로 안 접혀 delete_files_by_ids 가 못 찾는다
+#   sync._clean_file_ids     점이 들어가 _FILE_ID_RE 에 걸려 버려진다
+# `.hwp`/`.hwpx` 는 raw/ 에, `.doc` 은 _ext_for_mime 이 normalized/ 에 만든다.
 _FILE_SUFFIXES = (
     ".meta.md",
     ".markdown",
@@ -19,7 +26,10 @@ _FILE_SUFFIXES = (
     ".txt",
     ".html",
     ".htm",
+    ".hwpx",
+    ".hwp",
     ".docx",
+    ".doc",
     ".pptx",
     ".xlsx",
     ".xls",
@@ -82,6 +92,41 @@ CHUNK_JOINER = "\n\n[...]\n\n"
 
 CONTEXT_SEPARATOR = "\n\n---\n\n"
 
+# 게시판 수집물처럼 제목이 폴더에 있고 파일명은 기계가 붙인 경우
+_GENERIC_FILENAMES = frozenset({"content", "index", "body", "untitled"})
+
+
+def citation_label(source: dict[str, Any]) -> str:
+    """인용에 쓸, 사람이 읽고 문서를 특정할 수 있는 이름.
+
+    파일명만으로는 문서를 못 가리는 경우가 많다.
+
+    - 게시판 수집물은 제목이 폴더에 있고 파일명이 전부 `content.txt` 다.
+      실측 1,155건 중 27건이며 **코퍼스에서 가장 흔한 파일명**(2위의 7배)이다.
+      공지 본문이라 자주 걸리는데, 라벨이 `content.txt` 로만 나가면 여러 건이
+      동시에 걸렸을 때 어느 공지인지 구분되지 않는다.
+    - 첨부가 여러 개인 게시글이 표준이다(bundle 당 파일 중앙값 2개, 80.2% 가
+      2개 이상, 최대 28개). `매뉴얼_pc.pdf` / `매뉴얼_mobile.pdf` 처럼
+      같은 게시글의 다른 첨부인지 다른 게시글인지 파일명으로는 알 수 없다.
+
+    그래서 자료묶음을 앞에 붙여 `자료묶음 / 파일명` 으로 만든다. 파일명이 이미
+    자료묶음을 담고 있으면 중복이라 그대로 둔다.
+    """
+    name = (source.get("name") or "").strip()
+    bundle = (source.get("bundle") or "").strip()
+    if not name:
+        return bundle or str(source.get("fileId") or "") or "(이름 없음)"
+    if bundle and bundle != name and bundle not in name:
+        return f"{bundle} / {name}"
+    if bundle:
+        return name
+    # 자료묶음이 없는데 파일명도 기계가 붙인 것이면 경로가 유일한 단서다
+    if name.rsplit(".", 1)[0].lower() in _GENERIC_FILENAMES:
+        path = (source.get("path") or "").strip()
+        if path:
+            return path
+    return name
+
 
 def build_answer_payload(chunks: list[dict[str, Any]], query: str) -> dict[str, Any]:
     """search 결과 → answer 툴 payload (출처 라벨 + 커버리지 신호).
@@ -105,13 +150,15 @@ def build_answer_payload(chunks: list[dict[str, Any]], query: str) -> dict[str, 
 
     for n, chunk in enumerate(chunks, start=1):
         src = chunk.get("source") or {}
-        label = src.get("name") or src.get("fileId") or "(이름 없음)"
+        label = citation_label(src)
         blocks.append(f"[{n}] {label}\n{chunk.get('text', '')}")
         citations.append(
             {
                 "n": n,
                 "fileId": src.get("fileId"),
                 "name": src.get("name"),
+                "label": label,
+                "bundle": src.get("bundle"),
                 "sourceUri": src.get("sourceUri"),
             }
         )
@@ -129,7 +176,12 @@ def build_answer_payload(chunks: list[dict[str, Any]], query: str) -> dict[str, 
     return {
         "context": CONTEXT_SEPARATOR.join(blocks),
         "citations": citations,
+        # `chunk_count` 는 이름과 달리 **문서(=context 블록) 수**다. search 결과
+        # 한 항목이 청크 하나가 아니라 한 문서(청크 여러 개를 이어 붙인 것)이기
+        # 때문이다. 이름을 바꾸면 FactChat 쪽이 깨지므로 남겨 두고, 뜻이 맞는
+        # 이름을 함께 싣는다.
         "chunk_count": len(chunks),
+        "documentCount": len(chunks),
         "queryTerms": terms,
         "uncoveredTerms": [t for t in terms if t.lower() not in covered],
         "coverage": coverage,

@@ -7,9 +7,13 @@ tool: search / answer
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import sys
+import threading
+import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +31,11 @@ from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
 from shared.lexical_rerank import query_terms, rrf_rerank, term_coverage  # noqa: E402
 from shared.rag_engine import RagEngineClient  # noqa: E402
-from shared.search_postprocess import build_answer_payload, postprocess_hits  # noqa: E402
+from shared.search_postprocess import (  # noqa: E402
+    build_answer_payload,
+    citation_label,
+    postprocess_hits,
+)
 
 setup_logging()
 logger = logging.getLogger("mcp_server")
@@ -65,6 +73,50 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+# --------------------------------------------------------------- 동일 질의 캐시
+# 호출측 에이전트가 같은 질의를 그대로 반복한다. 실측(7/29~7/30 운영 로그):
+# 50회 호출 중 고유 질의 37개 — 13회(26%)가 **바이트 단위 동일**한 재질의였고,
+# 한 질의는 8번 반복됐다(18분간 5차례 버스트, 21초에 8회가 몰린 구간도 있다).
+#
+# 툴 설명에 "같은 의도로 다시 검색하지 마세요"를 넣어 봤지만(4eaeea8) 지시문은
+# 지켜지지 않았다. 그 커밋도 "지시문은 무시당해도 데이터는 남으므로"라고 적어
+# 한계를 예상했다 — 남은 레버는 서버 쪽이다.
+#
+# 반환값이 완전히 같으므로 호출측 동작은 달라지지 않는다. 코퍼스는 하루 한 번
+# 바뀌므로 짧은 TTL 로 stale 위험이 사실상 없다. 0 이면 캐시를 끈다.
+_CACHE_TTL = float(os.environ.get("SEARCH_CACHE_TTL_SECONDS", "60"))
+_CACHE_MAX = int(os.environ.get("SEARCH_CACHE_MAX_ENTRIES", "128"))
+_CacheKey = tuple[str, int, str | None]
+_cache: OrderedDict[_CacheKey, tuple[float, list[dict[str, Any]]]] = OrderedDict()
+_cache_lock = threading.Lock()
+
+
+def _cache_get(key: _CacheKey) -> list[dict[str, Any]] | None:
+    if _CACHE_TTL <= 0:
+        return None
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit is None:
+            return None
+        stored_at, value = hit
+        if time.monotonic() - stored_at > _CACHE_TTL:
+            del _cache[key]
+            return None
+        _cache.move_to_end(key)
+    # 호출측이 리스트를 만지더라도 캐시가 오염되지 않게 사본을 준다
+    return copy.deepcopy(value)
+
+
+def _cache_put(key: _CacheKey, value: list[dict[str, Any]]) -> None:
+    if _CACHE_TTL <= 0:
+        return
+    with _cache_lock:
+        _cache[key] = (time.monotonic(), copy.deepcopy(value))
+        _cache.move_to_end(key)
+        while len(_cache) > _CACHE_MAX:
+            _cache.popitem(last=False)
+
+
 @mcp.tool()
 def search(
     query: str,
@@ -90,14 +142,27 @@ def search(
     답할 수 없는 **새로운 정보**를 찾을 때로 한정하세요.
     기본 top_k 로 충분합니다 — 결과가 부족하면 값을 키우지 말고 없다고 답하세요.
 
+    반환 배열의 한 항목은 청크 하나가 아니라 **문서 하나**입니다. 한 문서에서
+    여러 청크가 걸리면 `[...]` 로 이어 붙여 한 항목으로 옵니다.
+
     Args:
         query: 검색 질의 (자연어)
-        top_k: 반환할 최대 청크 수 (기본 5)
+        top_k: 반환할 최대 **문서** 수 (기본 5, 청크 수가 아님).
+            문서마다 청크가 여러 개 붙을 수 있어 실제 청크 수는 이 값보다
+            많습니다(top_k=5 면 대략 5~15청크). 총 청크 수에는 별도 상한이
+            있어, top_k 를 올려도 받는 본문 양은 그만큼 늘지 않고 **문서가
+            얕게 여러 건 오는 쪽으로만** 바뀝니다.
         drive_id: 특정 공유 드라이브로 필터 (선택)
     """
     k = top_k or settings.top_k_default
     k = max(1, min(k, settings.search_top_k_max))
     logger.info("search query=%r top_k=%s drive_id=%s", query, k, drive_id)
+
+    cache_key = (query, k, drive_id)
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        logger.info("search cache hit query=%r top_k=%s", query, k)
+        return cached
 
     rag = RagEngineClient(settings)
     # 여유분 retrieve 후 후처리(파일당 1청크 중복 제거)로 k개.
@@ -167,6 +232,10 @@ def search(
             ),
             "driveId": meta.drive_id if meta else None,
         }
+        # 파일명만으로는 문서를 못 가리는 코퍼스라(게시판 수집물 27건이 전부
+        # content.txt, 게시글당 첨부 중앙값 2개) 자료묶음을 붙인 표시용 이름을
+        # 함께 싣는다. name 은 원래 파일명 그대로 둔다.
+        source["label"] = citation_label(source)
         matched, missing = term_coverage(terms, hit.text)
         results.append(
             {
@@ -181,6 +250,7 @@ def search(
                 "source": source,
             }
         )
+    _cache_put(cache_key, results)
     return results
 
 
@@ -196,6 +266,11 @@ def answer(query: str, top_k: int | None = None) -> dict[str, Any]:
       없다는 뜻입니다. 답을 지어내지 말고 확인되지 않음을 밝히거나 되물으세요.
     - `coverage="partial"` 은 어떤 문서 하나도 질의 전체를 덮지 못했다는 뜻이며,
       여러 문서를 이어 붙여 답을 만들면 근거 없는 결합이 됩니다.
+
+    Args:
+        query: 검색 질의 (자연어)
+        top_k: 근거로 쓸 최대 **문서** 수 (기본 5, 청크 수가 아님).
+            자세한 의미는 `search` 의 같은 인자 설명을 참고하세요.
     """
     return build_answer_payload(search(query=query, top_k=top_k), query)
 

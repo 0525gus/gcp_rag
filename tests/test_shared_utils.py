@@ -13,6 +13,7 @@ from shared.models import SearchHit, SearchSource
 from shared.lexical_rerank import query_terms, term_coverage
 from shared.search_postprocess import (
     build_answer_payload,
+    citation_label,
     distance_to_relevance,
     extract_file_id,
     postprocess_hits,
@@ -168,6 +169,13 @@ def test_is_hwpx_distinguishes_from_hwp() -> None:
         ("normalized/abc123.pdf", "abc123"),
         ("gs://b/normalized/abc123.docx", "abc123"),
         ("noext", "noext"),
+        # 파이프라인이 실제로 만드는 확장자인데 목록에 빠져 있었다.
+        # 빠지면 fileId 로 안 접혀 코퍼스 삭제가 대상을 못 찾고,
+        # _clean_file_ids 는 점 때문에 malformed 로 버린다.
+        ("raw/abc123.hwp", "abc123"),
+        ("raw/abc123.hwpx", "abc123"),
+        ("normalized/abc123.doc", "abc123"),
+        ("normalized/abc123.part12.pdf", "abc123"),
     ],
 )
 def test_extract_file_id(display: str, expected: str) -> None:
@@ -209,13 +217,21 @@ def test_postprocess_preserves_vertex_order() -> None:
     assert [h.text for h in out] == ["가장 관련", "덜 관련"]
 
 
-def test_postprocess_keeps_first_chunk_per_file() -> None:
-    # 중복 제거는 API 순서상 앞선 것(= 더 관련 있는 것)을 남긴다
+def test_postprocess_collapses_a_file_into_one_result() -> None:
+    # 같은 문서의 청크는 몇 개를 이어 붙이든 결과 항목 하나로 접힌다.
+    # 앞선 청크(= 더 관련 있는 것)가 머리에 오고, 출처는 그 청크의 것을 쓴다.
     hits = [_hit("f1.md", "첫 청크", 0.9), _hit("f1.md", "둘째 청크", 0.1)]
     out = postprocess_hits(hits, top_k=5)
     assert len(out) == 1
-    assert out[0].text == "첫 청크"
+    assert out[0].text.startswith("첫 청크")
     assert out[0].source.file_id == "f1"
+
+
+def test_postprocess_max_chunks_per_file_one_keeps_only_the_first() -> None:
+    # 문서당 1청크로 조이면 예전 동작 그대로 — 둘째 청크는 버린다
+    hits = [_hit("f1.md", "첫 청크", 0.9), _hit("f1.md", "둘째 청크", 0.1)]
+    out = postprocess_hits(hits, top_k=5, max_chunks_per_file=1)
+    assert [h.text for h in out] == ["첫 청크"]
 
 
 def test_postprocess_passes_score_through_unchanged() -> None:
@@ -325,6 +341,47 @@ def test_build_answer_payload_labels_each_document_block() -> None:
     assert "[1] 인사발령.hwp\n김나영 센터장" in out["context"]
     assert "[2] 조사표.xlsx\nAI 튜터 기능" in out["context"]
     assert [c["n"] for c in out["citations"]] == [1, 2]
+
+
+def test_citation_label_prefixes_bundle_when_filename_is_generic() -> None:
+    """게시판 수집물은 파일명이 전부 content.txt — 제목은 자료묶음에만 있다.
+
+    실측 1,155건 중 27건이고 코퍼스에서 가장 흔한 파일명이다. 라벨이
+    `content.txt` 로만 나가면 여러 공지가 동시에 걸렸을 때 구분되지 않는다.
+    """
+    label = citation_label(
+        {"name": "content.txt", "bundle": "147294_수강정정기간 안내", "fileId": "f1"}
+    )
+    assert label == "147294_수강정정기간 안내 / content.txt"
+
+
+def test_citation_label_disambiguates_attachments_of_one_post() -> None:
+    # 같은 게시글의 다른 첨부인지 다른 게시글인지 파일명으로는 알 수 없다
+    same = {"bundle": "147294_개강 안내", "fileId": "f1"}
+    a = citation_label({**same, "name": "매뉴얼_pc.pdf"})
+    b = citation_label({**same, "name": "매뉴얼_mobile.pdf"})
+    assert a.startswith("147294_개강 안내 / ") and b.startswith("147294_개강 안내 / ")
+    assert a != b
+
+
+def test_citation_label_does_not_repeat_bundle_already_in_filename() -> None:
+    label = citation_label(
+        {"name": "2026년 안전점검의 날 운영계획.hwp", "bundle": "2026년 안전점검의 날", "fileId": "f1"}
+    )
+    assert label == "2026년 안전점검의 날 운영계획.hwp"
+
+
+def test_citation_label_falls_back_to_path_without_bundle() -> None:
+    # 자료묶음이 없는데 파일명도 기계가 붙인 것이면 경로가 유일한 단서다
+    label = citation_label(
+        {"name": "content.txt", "bundle": "", "path": "Drive/공지/글제목/content.txt"}
+    )
+    assert label == "Drive/공지/글제목/content.txt"
+
+
+def test_citation_label_keeps_plain_filename_when_nothing_to_add() -> None:
+    assert citation_label({"name": "인사발령.hwp", "bundle": ""}) == "인사발령.hwp"
+    assert citation_label({"name": "", "bundle": "", "fileId": "abc"}) == "abc"
 
 
 def test_build_answer_payload_flags_partial_when_terms_split_across_docs() -> None:
