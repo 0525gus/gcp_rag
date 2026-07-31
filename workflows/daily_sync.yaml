@@ -38,6 +38,7 @@ main:
               unchanged: 0
               dlq: 0
               splitQueued: 0
+              excluded: 0
 
     - for_each_drive:
         for:
@@ -60,6 +61,7 @@ main:
                   - drive_unchanged: 0
                   - drive_dlq: 0
                   - drive_split: 0
+                  - drive_excluded: 0
 
             # ----- 1) 초기 backfill-run 또는 Changes 델타 -----
             - fetch_source:
@@ -97,6 +99,7 @@ main:
                             - drive_unchanged: ${default(backfill_resp.body.totals.unchanged, 0)}
                             - drive_dlq: ${default(backfill_resp.body.totals.dlq, 0)}
                             - drive_split: ${default(backfill_resp.body.totals.splitQueued, 0)}
+                            - drive_excluded: ${default(backfill_resp.body.totals.excluded, 0)}
                             - pending_page_token: ${default(backfill_resp.body.pendingPageToken, "")}
                             - pending_uris: []
                             - pending_file_ids: []
@@ -109,6 +112,7 @@ main:
                             - totals.unchanged: ${totals.unchanged + default(backfill_resp.body.totals.unchanged, 0)}
                             - totals.dlq: ${totals.dlq + default(backfill_resp.body.totals.dlq, 0)}
                             - totals.splitQueued: ${totals.splitQueued + default(backfill_resp.body.totals.splitQueued, 0)}
+                            - totals.excluded: ${totals.excluded + default(backfill_resp.body.totals.excluded, 0)}
                       - log_backfill:
                           call: sys.log
                           args:
@@ -198,6 +202,44 @@ main:
                                   assign:
                                     - drive_deleted: ${drive_deleted + 1}
                                     - totals.deleted: ${totals.deleted + 1}
+
+                          # === 대상 폴더 밖 — 집계에서 제외 ===
+                          # SKIP(대상인데 처리 못 함)과 구분한다. reconcile 이
+                          # listed 에서 차감하므로 skipped 가 진짜 신호가 된다.
+                          - condition: ${change.route == "EXCLUDE"}
+                            steps:
+                              - do_exclude:
+                                  try:
+                                    call: http.post
+                                    args:
+                                      url: ${sync_url + "/sync/ingest"}
+                                      auth:
+                                        type: OIDC
+                                      body:
+                                        fileId: ${change.fileId}
+                                        driveId: ${change.driveId}
+                                        name: ${change.name}
+                                        mimeType: ${change.mimeType}
+                                        modifiedTime: ${change.modifiedTime}
+                                        removed: false
+                                        webViewLink: ${change.webViewLink}
+                                        route: "EXCLUDE"
+                                        parserUrl: ${parser_url}
+                                      timeout: 120
+                                    result: exclude_resp
+                                  except:
+                                    as: exclude_err
+                                    steps:
+                                      - exclude_fail:
+                                          assign:
+                                            - drive_failed: ${drive_failed + 1}
+                                            - totals.failed: ${totals.failed + 1}
+                                      - exclude_continue:
+                                          next: process_each_end
+                              - exclude_ok:
+                                  assign:
+                                    - drive_excluded: ${drive_excluded + 1}
+                                    - totals.excluded: ${totals.excluded + 1}
 
                           # === 미지원 스킵 ===
                           - condition: ${change.route == "SKIP"}
@@ -418,6 +460,7 @@ main:
                       unchanged: ${drive_unchanged}
                       dlq: ${drive_dlq}
                       splitQueued: ${drive_split}
+                      excluded: ${drive_excluded}
                     timeout: 60
                   result: recon_resp
                 except:

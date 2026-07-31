@@ -37,12 +37,41 @@ def _coerce_enum(enum_cls: type[_E], raw: Any, fallback: _E) -> _E:  # noqa: UP0
 
 
 class DocStatus(str, Enum):
+    """문서 상태.
+
+    `SKIPPED` 와 `EXCLUDED` 의 구분이 중요하다 — 한동안 둘이 뭉쳐 있었다.
+
+      SKIPPED   우리 **대상인데** 처리하지 못했다
+                (미지원 MIME, 암호 걸린 xlsx/PDF 등)
+                → 집계 대상. 늘어나면 손봐야 할 신호다.
+      EXCLUDED  **애초에 대상이 아니다** (동기화 지정 폴더 밖)
+                → 집계에서 뺀다. 우리가 할 일이 없는 문서다.
+
+    뭉쳐 있을 때는 393건 전부가 폴더 밖인데도 `SKIPPED` 로 잡혀
+    `accounted` 에 들어갔고, 그래서 "대상인데 처리 못 한 것"이 몇 건인지
+    알 수 없었다.
+    """
+
     PENDING = "PENDING"
     PARSED = "PARSED"
     INDEXED = "INDEXED"
     FAILED = "FAILED"
     DELETED = "DELETED"
     SKIPPED = "SKIPPED"
+    EXCLUDED = "EXCLUDED"
+
+
+class Audience(str, Enum):
+    """이 문서를 어느 코퍼스에 실을 것인가.
+
+    STAFF 가 기본값인 것이 이 enum 의 핵심이다. 판정에 실패했거나, 필드가 없는
+    구 문서이거나, 모르는 값이 들어오면 **전부 STAFF 로 떨어진다** — 즉 학생
+    코퍼스에는 실리지 않는다. 반대로 기본을 STUDENT 로 두면 판정 실패 한 번이
+    곧 노출이 된다.
+    """
+
+    STUDENT = "STUDENT"  # 학생자료 폴더 트리 — 학생·교직원 코퍼스 양쪽에 실림
+    STAFF = "STAFF"  # 그 외 전부 — 교직원 코퍼스에만
 
 
 class ParseRoute(str, Enum):
@@ -76,6 +105,8 @@ class DocState:
     path: str | None = None
     # 직계 자료묶음 폴더명
     bundle: str | None = None
+    # 노출 범위. 필드가 없는 구 문서는 from_firestore 가 STAFF 로 읽는다.
+    audience: Audience = Audience.STAFF
 
     def to_firestore(self) -> dict[str, Any]:
         return {
@@ -97,6 +128,11 @@ class DocState:
             "ragFileId": self.rag_file_id,
             "path": self.path,
             "bundle": self.bundle,
+            "audience": (
+                self.audience.value
+                if isinstance(self.audience, Audience)
+                else self.audience
+            ),
         }
 
     @classmethod
@@ -120,6 +156,12 @@ class DocState:
             rag_file_id=data.get("ragFileId") or data.get("rag_file_id"),
             path=data.get("path"),
             bundle=data.get("bundle"),
+            # 필드가 없는 구 문서(= 분리 도입 이전 1,155건)는 STAFF 로 읽힌다.
+            # 학생 코퍼스는 재색인으로 명시적으로 채워야 한다 — 기본값이 조용히
+            # 학생에게 문서를 여는 일은 없다.
+            audience=_coerce_enum(
+                Audience, data.get("audience", Audience.STAFF.value), Audience.STAFF
+            ),
         )
 
 

@@ -28,13 +28,24 @@ _INDEX_TTL_SECONDS = 300.0
 
 
 class RagEngineClient:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        corpus_name: str | None = None,
+    ) -> None:
+        """corpus_name 을 주면 그 코퍼스를, 없으면 설정의 기본(=교직원용)을 쓴다.
+
+        학생/교직원 코퍼스를 나누면서 인스턴스마다 대상이 달라진다. 아래 인덱스
+        캐시는 처음부터 corpus_name 으로 키잉돼 있어(_CORPUS_INDEX_CACHE) 코퍼스가
+        여럿이어도 서로 섞이지 않는다.
+        """
         self.settings = settings or get_settings()
         vertexai.init(
             project=self.settings.gcp_project_id,
             location=self.settings.gcp_region,
         )
-        self.corpus_name = self.settings.rag_corpus_name
+        self.corpus_name = corpus_name or self.settings.rag_corpus_name
 
     def import_from_gcs(
         self,

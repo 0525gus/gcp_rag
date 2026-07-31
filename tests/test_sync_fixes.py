@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from shared.config import Settings  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.models import DocState, DocStatus  # noqa: E402
 from shared import rag_engine  # noqa: E402
@@ -60,8 +61,30 @@ class _FakeRagFile:
         self.name = name
 
 
+def _bare_client(corpus: str) -> RagEngineClient:
+    """__init__(vertexai.init) 우회. 인덱스 캐시가 읽는 필드만 손으로 채운다.
+
+    캐시는 corpus_name 을 키로 쓰는 모듈 전역이라, 테스트마다 다른 이름을 주고
+    이전 잔재를 지워야 옆 테스트의 인덱스를 물려받지 않는다.
+    """
+    client = object.__new__(RagEngineClient)
+    client.corpus_name = corpus
+    client.settings = get_settings_for_test()
+    rag_engine._CORPUS_INDEX_CACHE.pop(corpus, None)
+    rag_engine._CORPUS_DIRTY_IDS.pop(corpus, None)
+    return client
+
+
+def get_settings_for_test() -> Settings:
+    return Settings(
+        gcp_project_id="p",
+        rag_delete_concurrency=1,
+        rag_delete_pacing_seconds=0.0,
+    )
+
+
 def test_delete_files_by_ids_single_list(monkeypatch) -> None:
-    client = object.__new__(RagEngineClient)  # __init__(vertexai.init) 우회
+    client = _bare_client("corpus-single-list")
     calls = {"list": 0, "deleted": []}
 
     def fake_list() -> list[_FakeRagFile]:
@@ -85,7 +108,7 @@ def test_delete_files_by_ids_single_list(monkeypatch) -> None:
 
 
 def test_delete_files_by_ids_empty(monkeypatch) -> None:
-    client = object.__new__(RagEngineClient)
+    client = _bare_client("corpus-empty")
 
     def boom() -> list:
         raise AssertionError("list_files should not be called for empty ids")
@@ -138,7 +161,7 @@ def test_reconcile_detects_real_gap() -> None:
 
 
 # ---------------------------------------------------------------- #4
-def test_ingest_out_of_scope_returns_uppercase_skipped(monkeypatch) -> None:
+def test_ingest_out_of_scope_returns_uppercase_excluded(monkeypatch) -> None:
     from services.sync.main import IngestBody, ingest
 
     class FakeSettings:
@@ -158,8 +181,161 @@ def test_ingest_out_of_scope_returns_uppercase_skipped(monkeypatch) -> None:
     monkeypatch.setattr(sync_main, "DriveClient", lambda *a, **k: FakeDrive())
 
     res = ingest(IngestBody(fileId="f1", driveId="d", mimeType="application/pdf"))
-    assert res["status"] == DocStatus.SKIPPED.value == "SKIPPED"
+    # 원래 이 테스트가 고정하려던 것은 '대문자 enum 값'이었다. 거기에 더해
+    # 이제 폴더 밖은 SKIPPED 가 아니라 EXCLUDED 로 갈린다 — 집계에서 빠져야
+    # skipped 가 '대상인데 처리 못 함'만 가리키기 때문이다.
+    assert res["status"] == DocStatus.EXCLUDED.value == "EXCLUDED"
     assert res["reason"] == "out_of_folder_scope"
+
+
+# ------------------------------------------------- GCS 삭제 범위 (prefix 훑기)
+class _FakeBlob:
+    def __init__(self, name: str, sink: list[str]) -> None:
+        self.name = name
+        self._sink = sink
+
+    def delete(self) -> None:
+        self._sink.append(self.name)
+
+
+class _FakeGcsBackend:
+    """list_blobs / bucket().blob() 만 흉내내는 최소 스텁."""
+
+    def __init__(self, names: list[str]) -> None:
+        self.names = names
+        self.deleted: list[str] = []
+
+    def bucket(self, _name: str) -> object:
+        backend = self
+
+        class _B:
+            @staticmethod
+            def blob(n: str) -> _FakeBlob:
+                return _FakeBlob(n, backend.deleted)
+
+        return _B()
+
+    def list_blobs(self, _bucket, prefix: str = "") -> list[_FakeBlob]:
+        return [_FakeBlob(n, self.deleted) for n in self.names if n.startswith(prefix)]
+
+
+def _fake_gcs(names: list[str]):
+    from shared.gcs import GcsClient
+
+    client = object.__new__(GcsClient)
+    backend = _FakeGcsBackend(names)
+    client._client = backend  # noqa: SLF001
+    return client, backend
+
+
+def test_delete_for_file_catches_suffixes_a_hardcoded_list_missed() -> None:
+    """손으로 적은 확장자 목록이 놓쳤던 것들 — 분할 PDF 조각과 .rtf."""
+    client, backend = _fake_gcs(
+        [
+            "normalized/abc123.part1.pdf",
+            "normalized/abc123.part2.pdf",
+            "normalized/abc123.meta.md",
+            "normalized/abc123.rtf",
+        ]
+    )
+    removed = client.delete_for_file("b", "normalized", "abc123")
+    assert len(removed) == 4
+    assert sorted(backend.deleted) == sorted(removed)
+
+
+def test_delete_for_file_respects_file_id_boundary() -> None:
+    """prefix 만으로 걸면 fileId 가 남의 fileId 접두사일 때 남의 파일을 지운다."""
+    client, backend = _fake_gcs(
+        [
+            "normalized/abc123.md",
+            "normalized/abc123456.md",  # 다른 문서 — 건드리면 안 된다
+            "normalized/abc123",  # 확장자 없는 정확 일치는 대상
+        ]
+    )
+    removed = client.delete_for_file("b", "normalized", "abc123")
+    assert sorted(removed) == ["normalized/abc123", "normalized/abc123.md"]
+    assert "normalized/abc123456.md" not in backend.deleted
+
+
+def test_delete_file_also_clears_the_raw_original(monkeypatch) -> None:
+    """Drive 에서 지운 문서의 원본이 raw 에 남아 있었다(실측 52건)."""
+    from services.sync.main import DeleteBody, delete_file
+
+    class FakeSettings:
+        gcs_normalized_bucket = "norm"
+        gcs_raw_bucket = "raw-b"
+        # 학생/교직원 분리가 꺼진 기본 배포 형상
+        audience_split_enabled = False
+        rag_corpus_name_student = ""
+
+    client, backend = _fake_gcs(
+        ["normalized/abc123.md", "raw/abc123.hwp"]
+    )
+    monkeypatch.setattr(sync_main, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(sync_main, "GcsClient", lambda *a, **k: client)
+    monkeypatch.setattr(
+        sync_main, "RagEngineClient", lambda *a, **k: type(
+            "_R", (), {"delete_by_file_id": staticmethod(lambda _f: True)}
+        )()
+    )
+    monkeypatch.setattr(
+        sync_main, "DocStateStore", lambda *a, **k: type(
+            "_S", (), {"mark_deleted": staticmethod(lambda _f: None)}
+        )()
+    )
+
+    res = delete_file(DeleteBody(fileId="abc123"))
+    assert res["gcsDeleted"] == 2
+    assert "raw/abc123.hwp" in backend.deleted
+
+
+# ------------------------------------------------------------- 빈 fileId
+def test_ingest_rejects_blank_file_id() -> None:
+    """빈 fileId 는 400 이어야 한다 — Firestore 경로가 `doc_state/` 가 되어 500 났다."""
+    import pytest
+    from fastapi import HTTPException
+
+    from services.sync.main import IngestBody, ingest
+
+    with pytest.raises(HTTPException) as exc:
+        ingest(IngestBody(fileId="", driveId="d", mimeType="application/pdf"))
+    assert exc.value.status_code == 400
+
+
+def test_list_changes_drops_entries_without_file_id(monkeypatch) -> None:
+    """fileId 없는 change(공유 드라이브 자체 변경)는 목록에서 빠져야 한다.
+
+    흘려보내면 빈 id 로 Drive 를 조회해 400 이 나고, 이어지는 upsert 가
+    Firestore 400 으로 죽어 /sync/ingest 가 500 을 낸다(7/23·24·29 실측).
+    """
+    from shared.drive import DriveClient
+
+    client = object.__new__(DriveClient)
+
+    class _Changes:
+        @staticmethod
+        def list(**_kwargs):
+            class _Req:
+                @staticmethod
+                def execute(**_k):
+                    return {
+                        "newStartPageToken": "t2",
+                        "changes": [
+                            {"fileId": "", "file": {}},  # 드라이브 자체 변경
+                            {
+                                "fileId": "realid1234",
+                                "file": {"id": "realid1234", "name": "a.pdf"},
+                            },
+                        ],
+                    }
+
+            return _Req()
+
+    client._service = type("_S", (), {"changes": staticmethod(lambda: _Changes())})()
+
+    changes, token = client.list_changes("drive1", "t1")
+    assert [c.file_id for c in changes] == ["realid1234"]
+    assert token == "t2"
 
 
 # ---------------------------------------------------------------- workflow YAML

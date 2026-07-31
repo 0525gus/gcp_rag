@@ -41,11 +41,18 @@ class Settings:
     firestore_database: str = "(default)"
     sync_token_collection: str = "sync_tokens"
     rag_corpus_name: str = ""
+    # 학생 공개용 코퍼스. **비우면 분리 기능 자체가 꺼진다**(현행 단일 코퍼스 동작).
+    # rag_corpus_name 쪽은 전체(학생+교직원)를 담는 교직원용이므로 이름을 바꾸지
+    # 않는다 — 기존 배포·env 가 그대로 교직원용이 된다.
+    rag_corpus_name_student: str = ""
     docai_processor_id: str = ""
     docai_location: str = "asia-northeast3"
     drive_ids: str = ""
     # 공유 드라이브 내부에서 RAG/GCS 대상 폴더만 (비우면 드라이브 전체)
     sync_folder_ids: str = ""
+    # 이 폴더 트리 아래 문서만 학생 코퍼스에 실린다. sync_folder_ids 의 부분집합이며
+    # 여기 없는 문서는 전부 교직원 전용이다(판정 불가도 교직원 — 안전한 쪽).
+    student_folder_ids: str = ""
     # 품질 게이트 — 실측 코퍼스 기준 완화 (이미지 많은 공문 G1 오탐 방지)
     # 예: 업적평가 안내 ~0.00085, 개인정보 캠페인 rhwp ~0.00090
     qg_density_threshold: float = 0.0005
@@ -121,6 +128,19 @@ class Settings:
     def sync_folder_id_list(self) -> list[str]:
         return [d.strip() for d in self.sync_folder_ids.split(",") if d.strip()]
 
+    @property
+    def student_folder_id_list(self) -> list[str]:
+        return [d.strip() for d in self.student_folder_ids.split(",") if d.strip()]
+
+    @property
+    def audience_split_enabled(self) -> bool:
+        """학생/교직원 코퍼스 분리가 켜져 있는가.
+
+        둘 다 있어야 켠다. 코퍼스만 있고 폴더가 없으면 학생 코퍼스가 영원히
+        비고, 폴더만 있고 코퍼스가 없으면 판정 결과를 쓸 곳이 없다.
+        """
+        return bool(self.rag_corpus_name_student and self.student_folder_id_list)
+
     @classmethod
     def from_env(cls) -> Settings:
         mode = os.environ.get("QG_MODE", "log").strip().lower()
@@ -137,10 +157,12 @@ class Settings:
                 "SYNC_TOKEN_COLLECTION", "sync_tokens"
             ),
             rag_corpus_name=_env("RAG_CORPUS_NAME"),
+            rag_corpus_name_student=os.environ.get("RAG_CORPUS_NAME_STUDENT", ""),
             docai_processor_id=os.environ.get("DOCAI_PROCESSOR_ID", ""),
             docai_location=os.environ.get("DOCAI_LOCATION", "asia-northeast3"),
             drive_ids=os.environ.get("DRIVE_IDS", ""),
             sync_folder_ids=os.environ.get("SYNC_FOLDER_IDS", ""),
+            student_folder_ids=os.environ.get("STUDENT_FOLDER_IDS", ""),
             qg_density_threshold=_env_float("QG_DENSITY_THRESHOLD", 0.0005),
             qg_table_fail_ratio=_env_float("QG_TABLE_FAIL_RATIO", 0.3),
             qg_image_ratio=_env_float("QG_IMAGE_RATIO", 0.5),

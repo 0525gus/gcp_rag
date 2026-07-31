@@ -43,7 +43,7 @@ from shared.mime_types import (  # noqa: E402
 )
 from shared.pdf_split import PdfSplitError, split_pdf  # noqa: E402
 from shared.xlsx_md import XlsxParseError, xlsx_to_markdown  # noqa: E402
-from shared.models import DocState, DocStatus, ParseRoute  # noqa: E402
+from shared.models import Audience, DocState, DocStatus, ParseRoute  # noqa: E402
 from shared.path_context import (  # noqa: E402
     PathContext,
     build_breadcrumb_markdown,
@@ -138,6 +138,8 @@ class ReconcileBody(BaseModel):
     unchanged: int = 0
     dlq: int = 0
     split_queued: int = Field(default=0, alias="splitQueued")
+    # 동기화 지정 폴더 밖 — 애초에 우리 대상이 아니므로 listed 에서 차감한다.
+    excluded: int = 0
 
     model_config = {"populate_by_name": True}
 
@@ -165,7 +167,7 @@ def _route_file_meta(
     skip_reason: str | None = None
     if folder_ids and kind != RouteKind.DELETE:
         if not drive.is_in_sync_scope(file_id, folder_ids, parents=parents):
-            kind = RouteKind.SKIP
+            kind = RouteKind.EXCLUDE
             skip_reason = "out_of_folder_scope"
     entry: dict[str, Any] = {
         "fileId": file_id,
@@ -296,6 +298,8 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
         "unchanged": 0,
         "dlq": 0,
         "splitQueued": 0,
+        # 백필은 범위 밖 파일을 목록에 넣지 않으므로 스냅샷 집계를 그대로 쓴다
+        "excluded": int(snapshot.get("skippedOutOfScope") or 0),
     }
     pending_uris: list[str] = []
     pending_ids: list[str] = []
@@ -427,7 +431,10 @@ def list_changes(body: DriveIdBody) -> dict[str, Any]:
                 ch.file_id, folder_ids, parents=ch.parents or None
             )
             if not in_scope:
-                kind = RouteKind.SKIP
+                # 백필과 달리 델타에서는 목록에서 빼지 않고 EXCLUDE 로 흘린다.
+                # 이전에 색인된 문서가 폴더 밖으로 나간 경우, 목록에서 빼버리면
+                # 코퍼스·GCS 잔존물을 회수할 기회 자체가 사라지기 때문이다.
+                kind = RouteKind.EXCLUDE
                 skip_reason = "out_of_folder_scope"
                 skipped_out_of_scope += 1
         entry: dict[str, Any] = {
@@ -465,32 +472,46 @@ def commit_token(body: CommitTokenBody) -> dict[str, str]:
 @app.post("/sync/ingest")
 def ingest(body: IngestBody) -> dict[str, Any]:
     """Drive 문서를 GCS 정규화 버킷에 적재. RAG import는 /sync/index-gcs."""
+    # 빈 fileId 는 Firestore 문서 경로를 `doc_state/` 로 만들어 400 을 던진다.
+    # 호출측을 고쳐도(shared/drive.py) 이 엔드포인트가 500 으로 죽을 이유는 없다.
+    if not body.file_id.strip():
+        raise HTTPException(status_code=400, detail="fileId is required")
+
     store = DocStateStore()
     settings = get_settings()
     gcs = GcsClient(settings)
     drive = DriveClient()
 
+    def _mark_excluded() -> dict[str, Any]:
+        """대상 폴더 밖 — 우리가 할 일이 없는 문서.
+
+        SKIPPED 로 찍으면 '대상인데 처리 못 함'과 섞여 집계가 흐려진다.
+        EXCLUDED 는 reconcile 의 listed 에서 차감되고, cleanup 이 잔존물을
+        회수할 수 있게 살아있는 상태 목록에서도 빠진다.
+        """
+        store.upsert(
+            DocState(
+                file_id=body.file_id,
+                drive_id=body.drive_id,
+                name=body.name,
+                mime_type=body.mime_type,
+                modified_time=body.modified_time,
+                status=DocStatus.EXCLUDED,
+                parse_route=ParseRoute.NONE,
+                source_uri=body.web_view_link,
+                error="out_of_folder_scope",
+            )
+        )
+        return {
+            "fileId": body.file_id,
+            "status": DocStatus.EXCLUDED.value,
+            "reason": "out_of_folder_scope",
+        }
+
     folder_ids = settings.sync_folder_id_list
     if folder_ids and not body.removed:
         if not drive.is_in_sync_scope(body.file_id, folder_ids):
-            store.upsert(
-                DocState(
-                    file_id=body.file_id,
-                    drive_id=body.drive_id,
-                    name=body.name,
-                    mime_type=body.mime_type,
-                    modified_time=body.modified_time,
-                    status=DocStatus.SKIPPED,
-                    parse_route=ParseRoute.NONE,
-                    source_uri=body.web_view_link,
-                    error="out_of_folder_scope",
-                )
-            )
-            return {
-                "fileId": body.file_id,
-                "status": DocStatus.SKIPPED.value,
-                "reason": "out_of_folder_scope",
-            }
+            return _mark_excluded()
 
     route = RouteKind(body.route) if body.route else classify_route(
         body.mime_type, body.name, removed=body.removed
@@ -498,6 +519,9 @@ def ingest(body: IngestBody) -> dict[str, Any]:
 
     if route == RouteKind.DELETE or body.removed:
         return {"fileId": body.file_id, "status": "DELETE_PENDING", "route": "DELETE"}
+
+    if route == RouteKind.EXCLUDE:
+        return _mark_excluded()
 
     if route == RouteKind.SKIP:
         store.upsert(
@@ -632,6 +656,30 @@ def _resolve_path_ctx(drive: DriveClient, body: IngestBody) -> PathContext:
         )
 
 
+def _resolve_audience(
+    drive: DriveClient, settings: Settings, body: IngestBody
+) -> Audience:
+    """학생자료 폴더 트리 안이면 STUDENT, 아니면 STAFF.
+
+    판정에 필요한 부모 조회는 `_resolve_path_ctx` 가 이미 훑어 캐시해 둔 것을
+    재사용하므로(DriveClient._parent_cache) Drive 호출이 추가로 들지 않는다.
+
+    실패는 전부 STAFF 로 떨어진다. `is_in_sync_scope` 자체가 부모를 못 읽으면
+    False 를 주므로 이미 그쪽으로 기울어 있지만, 여기서 한 번 더 감싼다 —
+    이 함수가 틀리는 방향은 '학생에게 안 보인다' 여야 하고, 절대 그 반대가
+    되어서는 안 된다.
+    """
+    folder_ids = settings.student_folder_id_list
+    if not folder_ids:
+        return Audience.STAFF
+    try:
+        in_student = drive.is_in_sync_scope(body.file_id, folder_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("audience 판정 실패 %s: %s — STAFF 로 둔다", body.file_id, exc)
+        return Audience.STAFF
+    return Audience.STUDENT if in_student else Audience.STAFF
+
+
 def _state_fields(
     body: IngestBody,
     *,
@@ -640,6 +688,8 @@ def _state_fields(
     parse_route: ParseRoute,
     source_uri: str | None,
     path_ctx: PathContext,
+    audience: Audience = Audience.STAFF,
+    error: str | None = None,
 ) -> DocState:
     return DocState(
         file_id=body.file_id,
@@ -653,6 +703,8 @@ def _state_fields(
         source_uri=source_uri,
         path=path_ctx.path,
         bundle=path_ctx.bundle,
+        audience=audience,
+        error=error,
     )
 
 
@@ -701,6 +753,7 @@ def _ingest_hwp(
         raise ValueError("parserUrl required for HWP_PARSE")
 
     path_ctx = _resolve_path_ctx(drive, body)
+    audience = _resolve_audience(drive, settings, body)
     raw = drive.download_file(body.file_id)
     ext = ".hwpx" if is_hwpx(body.mime_type, body.name) else ".hwp"
     raw_uri = gcs.upload_raw(raw, body.file_id, ext)
@@ -772,6 +825,7 @@ def _ingest_hwp(
                 parse_route=route,
                 source_uri=body.web_view_link or md_uri,
                 path_ctx=path_ctx,
+                audience=audience,
             )
         )
         return {
@@ -791,6 +845,7 @@ def _ingest_hwp(
             parse_route=route,
             source_uri=body.web_view_link or md_uri,
             path_ctx=path_ctx,
+            audience=audience,
         )
     )
     return _gcs_ready(
@@ -811,6 +866,7 @@ def _ingest_google_export(
     settings: Settings,
 ) -> dict[str, Any]:
     path_ctx = _resolve_path_ctx(drive, body)
+    audience = _resolve_audience(drive, settings, body)
     export_mime, ext = GOOGLE_EXPORT_MAP[body.mime_type]
     data = drive.export_file(body.file_id, export_mime)
     gated = _size_gate(store, settings, body, data, splittable=True, ext=ext)
@@ -847,6 +903,7 @@ def _ingest_google_export(
             parse_route=ParseRoute.GCS_EXPORT,
             source_uri=body.web_view_link or gcs_uri,
             path_ctx=path_ctx,
+            audience=audience,
         )
     )
     return _gcs_ready(
@@ -882,6 +939,7 @@ def _ingest_direct(
     원본 크기 때문에 문서를 잃는다(실측 사고 있었음).
     """
     path_ctx = _resolve_path_ctx(drive, body)
+    audience = _resolve_audience(drive, settings, body)
     data = drive.download_file(body.file_id)
 
     name = body.name or body.file_id
@@ -917,13 +975,26 @@ def _ingest_direct(
             return gated
 
     body_text: str | None = None
+    # 원본 바이트를 RAG 로 보낼지. 스프레드시트는 변환에 실패하면 보내지 않는다.
+    index_original = True
+    skip_reason: str | None = None
     if mime in _SPREADSHEET_COPY_MIMES:
         try:
             body_text = xlsx_to_markdown(data)
         except XlsxParseError as exc:
-            # 암호 걸린 파일 등 — 사이드카만 남기던 기존 동작으로 떨어진다.
-            # 색인 자체를 실패시키지는 않는다(경로·파일명으로는 여전히 찾힌다).
-            logger.warning("xlsx→md 실패 %s (%s): %s", body.file_id, name, exc)
+            # 암호 걸린 파일 등 — 사이드카만 남긴다(경로·파일명으로는 찾힌다).
+            #
+            # 원본 xlsx 를 색인 목록에 넣으면 안 된다. RAG Engine 기본 파서는
+            # xlsx 를 못 읽어 **매번 import 에서 거부**되는데, 지금까지는 그
+            # 실패가 성공으로 집계돼 보이지 않았다(실측 27건이 상시 실패 중).
+            # 재색인 경로(_normalized_uris_for_file)는 이미 .xlsx 를 빼고
+            # 있었다 — ingest 경로만 빠져 있었던 것이다.
+            index_original = False
+            skip_reason = f"XLSX_UNREADABLE:{exc}"
+            logger.warning(
+                "xlsx→md 실패 %s (%s): %s — 사이드카만 색인한다",
+                body.file_id, name, exc,
+            )
     elif mime in _TEXT_COPY_MIMES:
         try:
             body_text = data.decode("utf-8")
@@ -975,7 +1046,12 @@ def _ingest_direct(
                 "bundle": path_ctx.bundle,
             }
         ctype = body.mime_type or "application/octet-stream"
-        if pdf_parts and len(pdf_parts) > 1:
+        if not index_original:
+            # 읽을 수 없는 스프레드시트 — 원본은 GCS 에도 올리지 않는다.
+            # 아무도 읽지 않는데(재색인 경로가 .xlsx 를 제외한다) 자리만 차지하고,
+            # 색인에 넣으면 매번 import 를 실패시킨다.
+            uris = []
+        elif pdf_parts and len(pdf_parts) > 1:
             # {fileId}.part1.pdf ... — extract_file_id 가 .partN 을 떼어내므로
             # 검색 결과에서는 원본 한 문서로 합쳐진다.
             uris = []
@@ -1007,6 +1083,10 @@ def _ingest_direct(
             parse_route=ParseRoute.GCS_COPY,
             source_uri=body.web_view_link or uris[0],
             path_ctx=path_ctx,
+            audience=audience,
+            # 본문 추출 실패 사유를 남긴다. 상태는 INDEXED 로 가지만(사이드카는
+            # 색인됨) 본문이 없는 문서라는 사실은 조회 가능해야 한다.
+            error=skip_reason,
         )
     )
     return _gcs_ready(
@@ -1067,13 +1147,62 @@ def _clean_file_ids(raw_ids: list[str]) -> tuple[list[str], list[str]]:
     return list(dict.fromkeys(ok)), bad
 
 
+def _sync_student_corpus(
+    gcs_uris: list[str], file_ids: list[str], settings: Settings, store: DocStateStore
+) -> dict[str, Any]:
+    """학생 코퍼스를 doc_state 의 audience 에 맞춘다.
+
+    교직원 코퍼스(=기본 코퍼스)는 전량을 담으므로 기존 경로가 그대로 처리한다.
+    여기서는 **학생 코퍼스만** 따로 맞춘다.
+
+    핵심은 대상이 아닌 문서까지 **먼저 지운다**는 점이다. 학생자료 → 교직원자료로
+    옮긴 문서는 삭제 대상이 아니라 소속 변경 대상이고, 그 이동이 반영되는 지점이
+    여기뿐이다. 지우지 않으면 옮긴 뒤에도 학생에게 계속 노출된다.
+
+    URI → fileId 는 이름에서 되돌린다(`extract_file_id`). 워크플로가 넘기는
+    fileIds 는 URI 와 1:1 이 아니라(파일 하나가 본문+.meta.md 로 URI 2개를
+    만든다) URI 별 판정에는 쓸 수 없기 때문이다.
+    """
+    if not settings.audience_split_enabled:
+        return {"enabled": False}
+
+    student_uris: list[str] = []
+    touched: set[str] = {fid for fid in file_ids if fid}
+    for uri in gcs_uris:
+        fid = extract_file_id(uri)
+        if not _FILE_ID_RE.match(fid):
+            # fileId 로 못 되돌리는 URI 는 소속을 판정할 수 없다 → 학생에게 안 준다
+            logger.warning("학생 코퍼스: fileId 판정 불가라 제외 %s", uri)
+            continue
+        touched.add(fid)
+        state = store.get(fid)
+        if state and state.audience == Audience.STUDENT:
+            student_uris.append(uri)
+
+    rag = RagEngineClient(settings, corpus_name=settings.rag_corpus_name_student)
+    try:
+        rag.delete_files_by_ids(sorted(touched))
+    except Exception:  # noqa: BLE001
+        # 삭제가 실패한 채로 import 하면 옛 청크가 남는다. 학생 코퍼스에서 그것은
+        # '내려야 할 문서가 안 내려간' 상태이므로 조용히 넘기지 않는다.
+        logger.exception("학생 코퍼스 pre-delete 실패 files=%s", len(touched))
+        raise
+
+    imported = rag.import_from_gcs(student_uris) if student_uris else []
+    logger.info(
+        "학생 코퍼스 동기화: 대상 %s / 검토 %s URI", len(imported), len(gcs_uris)
+    )
+    return {"enabled": True, "imported": len(imported), "removed": len(touched)}
+
+
 @app.post("/sync/index-gcs")
 def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
     """GCS URI만 RAG Engine에 증분 import. Drive 커넥터 미사용."""
     if not body.gcs_uris:
         return {"imported": [], "count": 0, "status": "EMPTY"}
 
-    rag = RagEngineClient()
+    settings = get_settings()
+    rag = RagEngineClient(settings)
     store = DocStateStore()
 
     file_ids, bad_ids = _clean_file_ids(body.file_ids)
@@ -1091,19 +1220,18 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
     imported = rag.import_from_gcs(body.gcs_uris)
 
     for fid in file_ids:
-        existing = store.get(fid)
-        if existing:
-            existing.status = DocStatus.INDEXED
-            store.upsert(existing)
-        else:
-            store._col.document(fid).set(  # noqa: SLF001
-                {"fileId": fid, "status": DocStatus.INDEXED.value}, merge=True
-            )
+        store.mark_indexed(fid)
+
+    # 교직원 코퍼스가 끝난 뒤에 학생 코퍼스를 맞춘다. 순서가 중요하다 — 학생
+    # 코퍼스가 실패해도 교직원 쪽 색인과 doc_state 는 이미 확정돼 있어야
+    # 다음 배치가 같은 일을 처음부터 다시 하지 않는다.
+    student = _sync_student_corpus(body.gcs_uris, file_ids, settings, store)
 
     return {
         "imported": imported,
         "count": len(imported),
         "droppedFileIds": len(bad_ids),
+        "student": student,
         "status": "INDEXED",
     }
 
@@ -1169,25 +1297,24 @@ _INDEXABLE_SUFFIXES = (
 )
 
 
-def _normalized_uris_for_file(settings: Settings, file_id: str) -> list[str]:
-    """존재하는 정규화 객체 중 인덱싱 가능 URI만 반환. xlsx 원본은 제외(meta만)."""
-    from google.cloud import storage
+def _normalized_uris_for_file(
+    settings: Settings, file_id: str, gcs: GcsClient | None = None
+) -> list[str]:
+    """존재하는 정규화 객체 중 인덱싱 가능 URI만 반환. xlsx 원본은 제외(meta만).
 
-    client = storage.Client(project=settings.gcp_project_id)
-    bucket = client.bucket(settings.gcs_normalized_bucket)
-    prefix = f"normalized/{file_id}"
+    fileId 경계 검사는 GcsClient 쪽에 모아 두었다 — 삭제 경로와 같은 규칙을
+    써야 '색인은 됐는데 삭제는 안 되는' 확장자가 생기지 않는다.
+    """
+    client = gcs or GcsClient(settings)
     uris: list[str] = []
-    for blob in client.list_blobs(bucket, prefix=prefix):
-        name = blob.name
-        # fileId 접두 뒤에 다른 파일이 붙지 않게
-        rest = name[len(f"normalized/{file_id}") :]
-        if not rest.startswith(".") and rest != "":
-            continue
+    for name in client.list_blob_names_for_file(
+        settings.gcs_normalized_bucket, "normalized", file_id
+    ):
         lower = name.lower()
-        if lower.endswith(".xlsx") or lower.endswith(".xls"):
+        if lower.endswith((".xlsx", ".xls")):
             continue
         if any(lower.endswith(suf) for suf in _INDEXABLE_SUFFIXES):
-            uris.append(f"gs://{settings.gcs_normalized_bucket}/{name}")
+            uris.append(gs_uri(settings.gcs_normalized_bucket, name))
     return uris
 
 
@@ -1214,7 +1341,10 @@ def reindex_pending(
 def _run_reindex_job(job_id: str, body: ReindexPendingBody) -> None:
     try:
         result = _reindex_pending_sync(body)
-        _job_set(job_id, status="DONE", result=result)
+        # totals 는 루프 도중 스냅샷이라 완주해도 중간값이 남는다. 최종값으로
+        # 덮어써야 /sync/jobs/{id} 가 실패처럼 읽히지 않는다 (실측:
+        # reindex-0f06ea24ff7a 가 candidates=115 indexed=48 로 보였으나 완주였다).
+        _job_set(job_id, status="DONE", result=result, totals=result.get("totals"))
         logger.info("reindex job %s done: %s", job_id, result.get("totals"))
     except Exception as exc:  # noqa: BLE001
         logger.exception("reindex job %s failed", job_id)
@@ -1224,6 +1354,8 @@ def _run_reindex_job(job_id: str, body: ReindexPendingBody) -> None:
 def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
     settings = get_settings()
     store = DocStateStore()
+    # 문서마다 storage.Client 를 새로 만들면 200건에 200번 만든다 — 한 번만.
+    gcs = GcsClient(settings)
 
     targets: list[DocState] = []
     if body.force:
@@ -1260,18 +1392,14 @@ def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
                 idx = index_gcs(IndexGcsBody(gcsUris=uris, fileIds=uniq_ids))
                 totals["indexed"] += int(idx.get("count") or len(uris))
                 return
-            rag = RagEngineClient()
+            rag = RagEngineClient(settings)
             imported = rag.import_from_gcs(uris)
             for fid in uniq_ids:
-                existing = store.get(fid)
-                if existing:
-                    existing.status = DocStatus.INDEXED
-                    store.upsert(existing)
-                else:
-                    store._col.document(fid).set(  # noqa: SLF001
-                        {"fileId": fid, "status": DocStatus.INDEXED.value},
-                        merge=True,
-                    )
+                store.mark_indexed(fid)
+            # 교직원 쪽은 위처럼 pre-delete 를 생략하지만(대부분 코퍼스 미존재),
+            # 학생 코퍼스는 생략하지 않는다 — 소속 이동이 반영되는 지점이라
+            # 속도보다 정확성이 우선이다.
+            _sync_student_corpus(uris, uniq_ids, settings, store)
             totals["indexed"] += len(imported)
         except Exception:  # noqa: BLE001
             logger.exception("reindex-pending flush failed for %s uris", len(uris))
@@ -1279,7 +1407,7 @@ def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
             raise
 
     for doc in targets:
-        uris = _normalized_uris_for_file(settings, doc.file_id)
+        uris = _normalized_uris_for_file(settings, doc.file_id, gcs)
         if not uris:
             totals["skippedNoUri"] += 1
             continue
@@ -1398,33 +1526,55 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
 
 @app.post("/sync/delete")
 def delete_file(body: DeleteBody) -> dict[str, Any]:
-    rag = RagEngineClient()
     store = DocStateStore()
     settings = get_settings()
     gcs = GcsClient(settings)
 
-    ok = rag.delete_by_file_id(body.file_id)
-    # 정규화 객체 정리 (확장자 불명 → prefix 삭제는 서비스 계정 권한에 따라 제한될 수 있음)
-    for suffix in (
-        ".md",
-        ".meta.md",
-        ".pdf",
-        ".docx",
-        ".pptx",
-        ".xlsx",
-        ".txt",
-        ".html",
-        ".csv",
-        ".bin",
-    ):
+    ok = RagEngineClient(settings).delete_by_file_id(body.file_id)
+    # 학생 코퍼스에서도 반드시 빼야 한다. 여기를 빠뜨리면 Drive 에서 지운 문서가
+    # 학생에게만 계속 검색되는, 가장 알아채기 어려운 형태의 잔존이 된다.
+    if settings.audience_split_enabled:
         try:
-            gcs.delete(
-                f"gs://{settings.gcs_normalized_bucket}/normalized/{body.file_id}{suffix}"
-            )
+            RagEngineClient(
+                settings, corpus_name=settings.rag_corpus_name_student
+            ).delete_by_file_id(body.file_id)
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("학생 코퍼스 삭제 실패 fileId=%s", body.file_id)
+            raise
+
+    # 정규화 산출물 + raw 원본을 prefix 로 훑어 지운다.
+    #
+    # 예전에는 확장자 목록을 손으로 적었는데, 목록에 없는 것을 조용히 놓쳤다:
+    #   .partN.pdf  분할 PDF 조각이 전량 남는다(실측 6건 존재)
+    #   .rtf / .doc  FILE_COPY_MIME 에 있는데 목록에는 없었다
+    #
+    # raw 는 아예 건드리지도 않았다. 그래서 Drive 에서 지운 문서의 **원본이
+    # GCS 에 영구 잔존**했다(실측: DELETED 100건 중 52건의 .hwp 원본이 남아 있었다).
+    # raw 에는 명단·인사발령 같은 원문이 그대로 있어(docs/OPS_DEFERRED.md 6번)
+    # 삭제가 이행되지 않는 것 자체가 문제다.
+    removed: list[str] = []
+    for bucket in (settings.gcs_normalized_bucket, settings.gcs_raw_bucket):
+        if not bucket:
+            continue
+        prefix = "normalized" if bucket == settings.gcs_normalized_bucket else "raw"
+        try:
+            removed.extend(gcs.delete_for_file(bucket, prefix, body.file_id))
+        except Exception:  # noqa: BLE001
+            # GCS 정리 실패로 코퍼스·상태 정리를 막지는 않는다
+            logger.warning(
+                "GCS 정리 실패 bucket=%s fileId=%s", bucket, body.file_id, exc_info=True
+            )
+
     store.mark_deleted(body.file_id)
-    return {"fileId": body.file_id, "deleted": ok, "status": DocStatus.DELETED.value}
+    logger.info(
+        "deleted fileId=%s corpus=%s gcsObjects=%s", body.file_id, ok, len(removed)
+    )
+    return {
+        "fileId": body.file_id,
+        "deleted": ok,
+        "gcsDeleted": len(removed),
+        "status": DocStatus.DELETED.value,
+    }
 
 
 @app.post("/sync/reconcile")
@@ -1439,16 +1589,22 @@ def reconcile(body: ReconcileBody) -> dict[str, Any]:
         + body.deleted
         + body.unchanged
     )
+    # EXCLUDED 는 대상 폴더 밖이라 처리할 일이 없다. accounted 에 더하는 대신
+    # listed 에서 뺀다 — 그래야 남은 skipped 가 '대상인데 처리 못 한 것'만
+    # 가리킨다. (예전에는 폴더 밖 393건이 skipped 로 잡혀 그 신호를 덮었다)
+    listed = body.listed - body.excluded
     # indexed(=import된 URI 수)는 업로드된 URI 수의 하위 집합이어야 함.
     # gcs_uploaded 는 '파일 수' 라 파일당 URI가 2개(원본+.meta.md)면 어긋난다 →
     # uris(업로드된 URI 총수)와 비교. uris 미제공 시 gcs_uploaded 로 폴백.
     index_baseline = body.uris if body.uris > 0 else body.gcs_uploaded
     index_ok = body.indexed <= index_baseline
-    delta = body.listed - accounted
+    delta = listed - accounted
     ok = delta == 0 and index_ok
     summary = {
         "driveId": body.drive_id,
         "listed": body.listed,
+        "excluded": body.excluded,
+        "listedInScope": listed,
         "gcsUploaded": body.gcs_uploaded,
         "uris": body.uris,
         "indexed": body.indexed,

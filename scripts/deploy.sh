@@ -5,6 +5,11 @@ set -euo pipefail
 PROJECT_ID="${GCP_PROJECT_ID:?set GCP_PROJECT_ID}"
 REGION="${GCP_REGION:-asia-northeast3}"
 REPO="${ARTIFACT_REPO:-rag-mcp}"
+# rag-mcp 도 함께 배포하므로 여기서도 필수다. --set-env-vars 는 기존 env 를
+# 통째로 치환하니, 안 넘기면 운영 중인 키가 조용히 사라진다. 실제로 리비전
+# 00005~00013(7/25~7/28) 8개가 키 없이 떠서 코퍼스가 무인증 공개됐다
+# (docs/OPS_AUDIT.md Ⅱ.1). 빌드 전에 먼저 막는다.
+MCP_API_KEY="${MCP_API_KEY:?set MCP_API_KEY (rag-mcp 인증 키 — 누락 시 무인증 공개)}"
 
 gcloud config set project "${PROJECT_ID}"
 
@@ -46,21 +51,29 @@ gcloud run deploy rag-parser \
   --region="${REGION}" \
   --no-allow-unauthenticated \
   --set-env-vars="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_REGION=${REGION}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|DOCAI_PROCESSOR_ID=${DOCAI_PROCESSOR_ID:-}|QG_MODE=${QG_MODE:-log}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}" \
-  --memory=2Gi --cpu=2 --timeout=900
+  --memory=2Gi --cpu=2 --timeout=900 \
+  --concurrency="${PARSER_CONCURRENCY:-8}"
+# concurrency 를 낮게 두는 이유: 파서는 HWP 원본을 통째로 메모리에 올리고
+# 네이티브 확장(rhwp)으로 파싱한다. 2Gi 에 동시 요청이 몰리면 OOM 이다.
+# 실효 동시성은 어차피 RAW_UPLOAD_CONCURRENCY(=8) 로 묶여 있으니 그에 맞춘다.
+# (운영에 손으로 160 이 들어가 있었다 — 여태 안 터진 건 워크플로가 순차라서다)
 
 gcloud run deploy rag-sync \
   --image="${IMAGE_BASE}/sync:latest" \
   --region="${REGION}" \
   --no-allow-unauthenticated \
-  --set-env-vars="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_REGION=${REGION}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|DRIVE_IDS=${DRIVE_IDS}|SYNC_FOLDER_IDS=${SYNC_FOLDER_IDS:-}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|QG_MODE=${QG_MODE:-log}|RAW_UPLOAD_CONCURRENCY=${RAW_UPLOAD_CONCURRENCY:-8}" \
+  --set-env-vars="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_REGION=${REGION}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|DRIVE_IDS=${DRIVE_IDS}|SYNC_FOLDER_IDS=${SYNC_FOLDER_IDS:-}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|QG_MODE=${QG_MODE:-log}|RAW_UPLOAD_CONCURRENCY=${RAW_UPLOAD_CONCURRENCY:-8}|RAG_DELETE_PACING_SECONDS=${RAG_DELETE_PACING_SECONDS:-1.1}|RAG_DELETE_CONCURRENCY=${RAG_DELETE_CONCURRENCY:-1}|RAG_CORPUS_NAME_STUDENT=${RAG_CORPUS_NAME_STUDENT:-}|STUDENT_FOLDER_IDS=${STUDENT_FOLDER_IDS:-}" \
   --memory=2Gi --cpu=2 --timeout=3600
+# RAG_CORPUS_NAME_STUDENT / STUDENT_FOLDER_IDS 는 학생용 코퍼스 분리 스위치다.
+# 둘 중 하나라도 비면 분리가 꺼지고 단일 코퍼스로 동작한다(config.audience_split_enabled).
+# 여기서 넘기지 않으면 --set-env-vars 치환으로 조용히 꺼지므로 반드시 등록해 둘 것.
 
 # Cursor 등 IAM ID 토큰용. FactChat 커넥터는 scripts/deploy_mcp.ps1 (공개 URL + MCP_API_KEY) 사용.
 gcloud run deploy rag-mcp \
   --image="${IMAGE_BASE}/mcp:latest" \
   --region="${REGION}" \
   --no-allow-unauthenticated \
-  --set-env-vars="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_REGION=${REGION}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET:-unused}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET:-unused}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}" \
+  --set-env-vars="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_REGION=${REGION}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET:-unused}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET:-unused}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}|MCP_API_KEY=${MCP_API_KEY}|SEARCH_FETCH_MULTIPLIER=${SEARCH_FETCH_MULTIPLIER:-3}|SEARCH_FETCH_MAX=${SEARCH_FETCH_MAX:-60}" \
   --memory=1Gi --cpu=1 --timeout=60
 
 PARSER_URL=$(gcloud run services describe rag-parser --region="${REGION}" --format='value(status.url)')

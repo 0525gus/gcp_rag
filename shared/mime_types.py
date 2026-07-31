@@ -33,7 +33,11 @@ class RouteKind(str, Enum):
     # 파서 서비스를 안 거치고 Drive→GCS 로 직행. 이름과 달리 단순 복사만은
     # 아니다(PDF 분할·XLSX 표 변환 포함) — 처리는 _ingest_direct 참고.
     FILE_COPY = "FILE_COPY"
+    # 대상인데 처리할 방법이 없음 (미지원 MIME). 집계 대상.
     SKIP = "SKIP"
+    # 동기화 지정 폴더 밖 — 애초에 대상이 아님. 집계에서 뺀다.
+    # classify_route 는 폴더를 모르므로 이 값은 호출측(list_changes)이 붙인다.
+    EXCLUDE = "EXCLUDE"
     DELETE = "DELETE"
 
 
