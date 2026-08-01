@@ -25,6 +25,7 @@ if str(_ROOT) not in sys.path:
 from shared.config import get_settings  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
+from shared.models import DocStatus  # noqa: E402
 from shared.rag_engine import RagEngineClient  # noqa: E402
 from shared.search_postprocess import postprocess_hits  # noqa: E402
 
@@ -82,15 +83,26 @@ def search(
     logger.info("search query=%r top_k=%s drive_id=%s", query, k, drive_id)
 
     rag = RagEngineClient(settings)
-    # 여유분 retrieve 후 후처리(중복 제거·relevance)로 k개
+    # 여유분 retrieve 후 후처리(중복 제거)로 좁힌다.
     fetch_k = min(20, max(k * 3, k))
     raw_hits = rag.retrieve(query, top_k=fetch_k)
-    hits = postprocess_hits(raw_hits, top_k=k)
+    # 여기서 k 로 자르면 아래 필터(SKIPPED/DELETED/driveId)가 걷어낸 자리가 빈 채로
+    # 남아 top_k 보다 적게 반환된다. 자르기는 필터를 통과한 뒤에 한다.
+    hits = postprocess_hits(raw_hits, top_k=fetch_k)
 
     store = DocStateStore(settings)
     results: list[dict[str, Any]] = []
     for hit in hits:
         meta = store.get(hit.source.file_id)
+        if meta and (
+            meta.status in {DocStatus.SKIPPED, DocStatus.DELETED}
+            or (
+                meta.status == DocStatus.FAILED
+                and (meta.error or "").startswith("out_of_folder_scope_cleanup_failed")
+            )
+        ):
+            # Defense in depth while asynchronous corpus cleanup/retry converges.
+            continue
         if drive_id and meta and meta.drive_id != drive_id:
             continue
         display_name = (
@@ -129,6 +141,8 @@ def search(
                 "source": source,
             }
         )
+        if len(results) >= k:
+            break
     return results
 
 

@@ -18,6 +18,7 @@ _FILE_SUFFIXES = (
     ".html",
     ".htm",
     ".docx",
+    ".doc",
     ".pptx",
     ".xlsx",
     ".xls",
@@ -38,6 +39,22 @@ def extract_file_id(display: str, source_uri: str | None = None) -> str:
         if lower.endswith(suf):
             return base[: -len(suf)]
     return base
+
+
+_SIDECAR_SUFFIX = ".meta.md"
+
+
+def is_path_sidecar(display: str, source_uri: str | None = None) -> bool:
+    """경로·자료묶음만 담은 합성 문서(``{fileId}.meta.md``)인지.
+
+    바이너리(PDF/PPTX 등)는 본문과 sidecar 가 같은 fileId 로 함께 색인된다.
+    sidecar 본문은 "이 파일은 자료묶음 X 소속입니다" 안내문뿐이라 질의에 답하지
+    못한다 — 같은 파일의 본문 청크가 있으면 그쪽이 이겨야 한다.
+    """
+    for candidate in (display or "", source_uri or ""):
+        if candidate.rsplit("/", 1)[-1].strip().lower().endswith(_SIDECAR_SUFFIX):
+            return True
+    return False
 
 
 def unescape_chunk_text(text: str) -> str:
@@ -87,6 +104,7 @@ def postprocess_hits(
         return []
 
     prepared: list[SearchHit] = []
+    sidecar_flags: list[bool] = []
     for hit in hits:
         fid = extract_file_id(
             hit.source.file_id or hit.source.name,
@@ -95,12 +113,26 @@ def postprocess_hits(
         text = unescape_chunk_text(hit.text)
         src = replace(hit.source, file_id=fid)
         prepared.append(SearchHit(text=text, score=hit.score, source=src))
+        sidecar_flags.append(
+            is_path_sidecar(hit.source.name, hit.source.source_uri)
+        )
+
+    # 본문 청크가 함께 걸린 파일의 sidecar 는 버린다. 파일당 '먼저 나온 것'을
+    # 남기는 중복 제거 특성상, 제목·폴더명 질의에서 sidecar 가 상위에 오면 정작
+    # 답이 든 본문이 통째로 사라진다. sidecar 만 걸린 파일은 그대로 둔다.
+    files_with_content = {
+        hit.source.file_id
+        for hit, is_sidecar in zip(prepared, sidecar_flags, strict=True)
+        if not is_sidecar
+    }
 
     seen_files: set[str] = set()
     seen_text: set[str] = set()
     out: list[SearchHit] = []
-    for hit in prepared:
+    for hit, is_sidecar in zip(prepared, sidecar_flags, strict=True):
         fid = hit.source.file_id
+        if is_sidecar and fid in files_with_content:
+            continue
         if fid in seen_files:
             continue
         fp = _text_fingerprint(hit.text)

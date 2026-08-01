@@ -6,15 +6,41 @@ import logging
 import time
 from typing import Any
 
+import vertexai
 from google.api_core import exceptions as gcp_exceptions
 from vertexai import rag
-import vertexai
 
 from shared.config import Settings, get_settings
 from shared.models import SearchHit, SearchSource
 from shared.search_postprocess import extract_file_id, unescape_chunk_text
 
 logger = logging.getLogger(__name__)
+
+
+class RagImportError(RuntimeError):
+    """RAG import가 요청 전체를 확실히 처리하지 못했을 때 발생한다."""
+
+    def __init__(
+        self,
+        *,
+        requested: int,
+        imported: int,
+        failed: int,
+        skipped: int,
+        partial_failures: str | None = None,
+    ) -> None:
+        self.requested = requested
+        self.imported = imported
+        self.failed = failed
+        self.skipped = skipped
+        self.partial_failures = partial_failures
+        detail = (
+            f"requested={requested} imported={imported} "
+            f"failed={failed} skipped={skipped}"
+        )
+        if partial_failures:
+            detail += f" partialFailures={partial_failures}"
+        super().__init__(f"RAG import incomplete: {detail}")
 
 
 class RagEngineClient:
@@ -62,10 +88,38 @@ class RagEngineClient:
                     gcs_uris,
                     transformation_config=transformation,
                 )
-                imported = getattr(response, "imported_rag_files_count", None)
-                logger.info(
-                    "RAG import done: uris=%s imported=%s", len(gcs_uris), imported
+                imported = int(
+                    getattr(response, "imported_rag_files_count", 0) or 0
                 )
+                failed = int(getattr(response, "failed_rag_files_count", 0) or 0)
+                skipped = int(getattr(response, "skipped_rag_files_count", 0) or 0)
+                partial_failures = (
+                    getattr(response, "partial_failures_gcs_path", None)
+                    or getattr(response, "partial_failures_bigquery_table", None)
+                )
+                logger.info(
+                    "RAG import done: uris=%s imported=%s failed=%s skipped=%s "
+                    "partial_failures=%s",
+                    len(gcs_uris),
+                    imported,
+                    failed,
+                    skipped,
+                    partial_failures,
+                )
+
+                # import_files 는 파일 단위 부분 실패를 예외 대신 응답 카운트로
+                # 돌려줄 수 있다. 정확히 처리됐다고 확인된 배치만 후속 상태를
+                # INDEXED 로 전환한다. skipped 는 이미 같은 파일이 코퍼스에 있어
+                # 재사용된 정상 결과이므로 처리 완료로 센다.
+                requested = len(gcs_uris)
+                if failed > 0 or imported + skipped != requested:
+                    raise RagImportError(
+                        requested=requested,
+                        imported=imported,
+                        failed=failed,
+                        skipped=skipped,
+                        partial_failures=partial_failures,
+                    )
                 return list(gcs_uris)
             except gcp_exceptions.ResourceExhausted as exc:
                 last_err = exc
@@ -126,11 +180,13 @@ class RagEngineClient:
         deleted = 0
         for f in self.list_files():
             display = getattr(f, "display_name", "") or ""
+            source_uri = getattr(f, "source_uri", None)
             resource_name = getattr(f, "name", None)
             if not resource_name:
                 continue
-            # 정규화 md는 {fileId}.md, Drive 원본은 fileId가 이름에 포함될 수 있음
-            if any(fid in display or display.startswith(fid) for fid in wanted):
+            # GCS display name/URI에서 확장자를 제거한 정확한 fileId만 삭제한다.
+            # 부분문자열 비교는 f1 삭제 시 f10까지 지우는 조용한 유실을 만든다.
+            if extract_file_id(display, source_uri) in wanted:
                 rag.delete_file(name=resource_name)
                 deleted += 1
                 logger.info("Deleted RAG file: %s (%s)", resource_name, display)

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from google.cloud import firestore
+from google.cloud.firestore_v1.field_path import FieldPath
 
 from shared.config import Settings, get_settings
 from shared.models import DocState, DocStatus
+
+logger = logging.getLogger(__name__)
 
 
 class DocStateStore:
@@ -101,10 +105,84 @@ class DocStateStore:
             merge=True,
         )
 
-    def list_by_status(self, status: DocStatus, limit: int = 100) -> list[DocState]:
-        query = self._col.where("status", "==", status.value).limit(limit)
+    def list_by_status(
+        self,
+        status: DocStatus,
+        limit: int = 100,
+        *,
+        cursor_key: str | None = None,
+    ) -> list[DocState]:
+        """상태별 문서를 조회한다.
+
+        ``cursor_key``를 지정한 복구 작업은 문서 ID 순서의 영속 라운드로빈
+        페이지를 사용한다. 처리할 수 없는 문서가 상태를 계속 점유하더라도 다음
+        실행은 그 뒤에서 시작하므로 ``limit`` 뒤의 문서가 영구 고착되지 않는다.
+
+        커서는 반환할 페이지를 정한 직후 저장한다. 이후 작업이 중단되면 해당
+        페이지는 한 바퀴 뒤에 다시 선택될 수 있지만 영구 누락되지는 않는다.
+        """
+        query = self._col.where("status", "==", status.value).order_by(
+            FieldPath.document_id()
+        )
+
+        cursor_ref = None
+        last_file_id: str | None = None
+        if cursor_key:
+            cursor_ref = self._tokens.document(
+                f"__status_scan_cursor__{cursor_key}__{status.value}"
+            )
+            try:
+                cursor_snap = cursor_ref.get()
+                if cursor_snap.exists:
+                    raw_cursor = (cursor_snap.to_dict() or {}).get("lastFileId")
+                    if isinstance(raw_cursor, str) and raw_cursor:
+                        last_file_id = raw_cursor
+            except Exception:
+                # 커서 장애 때문에 복구 자체를 중단하지는 않는다. 이번 실행은
+                # 컬렉션 앞에서 시작하고 다음 성공한 쓰기부터 순환을 재개한다.
+                logger.exception(
+                    "failed to load status scan cursor key=%s status=%s",
+                    cursor_key,
+                    status.value,
+                )
+
+        snapshots: list[Any]
+        if last_file_id:
+            snapshots = list(query.start_after([last_file_id]).limit(limit).stream())
+            if len(snapshots) < limit:
+                # 컬렉션 끝에 닿으면 앞에서부터 남은 칸을 채운다. 두 구간이
+                # 겹칠 수 있으므로 ID로 중복을 제거한다.
+                seen = {snap.id for snap in snapshots}
+                for snap in query.limit(limit).stream():
+                    if snap.id in seen:
+                        continue
+                    snapshots.append(snap)
+                    seen.add(snap.id)
+                    if len(snapshots) >= limit:
+                        break
+        else:
+            snapshots = list(query.limit(limit).stream())
+
+        if cursor_ref is not None and snapshots:
+            try:
+                cursor_ref.set(
+                    {
+                        "cursorKey": cursor_key,
+                        "status": status.value,
+                        "lastFileId": snapshots[-1].id,
+                        "updatedAt": datetime.now(timezone.utc),
+                    },
+                    merge=True,
+                )
+            except Exception:
+                logger.exception(
+                    "failed to save status scan cursor key=%s status=%s",
+                    cursor_key,
+                    status.value,
+                )
+
         results: list[DocState] = []
-        for snap in query.stream():
+        for snap in snapshots:
             data = snap.to_dict() or {}
             data.setdefault("fileId", snap.id)
             results.append(DocState.from_firestore(data))

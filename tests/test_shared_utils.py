@@ -92,6 +92,29 @@ def test_allowlist_matches_file_id_itself() -> None:
     )
 
 
+def test_allowlist_parent_lookup_failure_is_not_out_of_scope() -> None:
+    def fail(_file_id: str) -> list[str]:
+        raise RuntimeError("Drive unavailable")
+
+    with pytest.raises(RuntimeError, match="cannot determine folder scope"):
+        is_under_folder_allowlist(
+            file_id="f",
+            parents=["unknown-parent"],
+            allowlist={"root"},
+            resolve_parents=fail,
+        )
+
+
+def test_drive_scope_initial_lookup_failure_propagates() -> None:
+    client = object.__new__(DriveClient)
+    client.get_parents = lambda _file_id: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError("Drive unavailable")
+    )
+
+    with pytest.raises(RuntimeError, match="Drive unavailable"):
+        client.is_in_sync_scope("f", ["root"])
+
+
 # ---------------------------------------------------------------- cleanup
 @pytest.mark.parametrize("line", ["- 3 -", "3 -", "12", "- 3", "iv"])
 def test_strip_noise_removes_page_numbers(line: str) -> None:
@@ -165,6 +188,7 @@ def test_is_hwpx_distinguishes_from_hwp() -> None:
         ("abc123.meta.md", "abc123"),
         ("normalized/abc123.pdf", "abc123"),
         ("gs://b/normalized/abc123.docx", "abc123"),
+        ("gs://b/normalized/abc123.doc", "abc123"),
         ("noext", "noext"),
     ],
 )

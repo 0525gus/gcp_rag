@@ -18,8 +18,15 @@ class _FakeStore:
         self.cleared: list[str] = []
         self.recorded: list[str] = []
 
-    def list_by_status(self, status: DocStatus, limit: int = 100) -> list[DocState]:
+    def list_by_status(
+        self,
+        status: DocStatus,
+        limit: int = 100,
+        *,
+        cursor_key: str | None = None,
+    ) -> list[DocState]:
         assert status == DocStatus.FAILED
+        assert cursor_key == "retry-failed"
         return self._docs[:limit]
 
     def get_dlq_attempts(self, file_id: str) -> int:
@@ -105,6 +112,10 @@ def test_exhausted_files_are_skipped_not_retried(wire) -> None:
     assert res["totals"]["retried"] == 0
     assert store.recorded == []
     assert store.cleared == []
+    # 영구 보류(parked)는 '이번 실행의 실패'가 아니다 — ok 를 내리면 손상된 문서
+    # 1건 때문에 배치가 매일 실패로 보고돼 진짜 장애가 묻힌다. 별도 지표로 올린다.
+    assert res["ok"] is True
+    assert res["parked"] == 1
 
 
 def test_under_cap_still_retries(wire) -> None:
@@ -169,6 +180,21 @@ def test_index_failure_does_not_abort_remaining_files(wire, monkeypatch) -> None
     # 색인이 죽어도 두 파일 모두 ingest 재시도는 완료되어야 한다
     assert res["totals"]["retried"] == 2
     assert res["totals"]["indexed"] == 0
+    assert res["totals"]["recovered"] == 0
+    assert res["totals"]["stillFailed"] == 2
+    assert res["ok"] is False
+
+
+def test_gcs_ready_without_uri_remains_failed(wire) -> None:
+    store, indexed = wire([_doc("f1")], {"f1": {"status": "GCS_READY", "gcsUris": []}})
+
+    res = retry_failed(RetryFailedBody())
+
+    assert res["totals"]["recovered"] == 0
+    assert res["totals"]["stillFailed"] == 1
+    assert res["ok"] is False
+    assert store.cleared == []
+    assert indexed == []
 
 
 def test_no_failed_docs_is_a_noop(wire) -> None:

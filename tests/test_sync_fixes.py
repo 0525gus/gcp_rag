@@ -16,12 +16,12 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from shared.firestore_state import DocStateStore  # noqa: E402
-from shared.models import DocState, DocStatus  # noqa: E402
-from shared import rag_engine  # noqa: E402
-from shared.rag_engine import RagEngineClient  # noqa: E402
 import services.sync.main as sync_main  # noqa: E402
 from services.sync.main import ReconcileBody, reconcile  # noqa: E402
+from shared import rag_engine  # noqa: E402
+from shared.firestore_state import DocStateStore  # noqa: E402
+from shared.models import DocState, DocStatus  # noqa: E402
+from shared.rag_engine import RagEngineClient  # noqa: E402
 
 
 # ---------------------------------------------------------------- #3
@@ -70,6 +70,8 @@ def test_delete_files_by_ids_single_list(monkeypatch) -> None:
             _FakeRagFile("f1.md", "rn1"),
             _FakeRagFile("f1.meta.md", "rn2"),
             _FakeRagFile("f2.pdf", "rn3"),
+            _FakeRagFile("f10.pdf", "rn-collision"),
+            _FakeRagFile("prefix-f1.md", "rn-substring"),
             _FakeRagFile("other.md", "rn4"),
         ]
 
@@ -126,6 +128,16 @@ def test_reconcile_uris_fallback_to_gcs() -> None:
     assert r["indexConsistent"] is True
 
 
+def test_reconcile_detects_missing_indexed_uri() -> None:
+    body = ReconcileBody(
+        driveId="d", listed=2, gcsUploaded=2, uris=2, indexed=1,
+        failed=0, skipped=0, deleted=0, unchanged=0,
+    )
+    r = reconcile(body)
+    assert r["indexConsistent"] is False
+    assert r["ok"] is False
+
+
 def test_reconcile_detects_real_gap() -> None:
     # listed=5, 실제 4만 계정 → 진짜 누락 1건은 여전히 잡아야 함
     body = ReconcileBody(
@@ -156,6 +168,9 @@ def test_ingest_out_of_scope_returns_uppercase_skipped(monkeypatch) -> None:
     monkeypatch.setattr(sync_main, "DocStateStore", lambda *a, **k: FakeStore())
     monkeypatch.setattr(sync_main, "GcsClient", lambda *a, **k: object())
     monkeypatch.setattr(sync_main, "DriveClient", lambda *a, **k: FakeDrive())
+    monkeypatch.setattr(
+        sync_main, "_cleanup_out_of_scope_file", lambda *a, **k: (False, 0, 0)
+    )
 
     res = ingest(IngestBody(fileId="f1", driveId="d", mimeType="application/pdf"))
     assert res["status"] == DocStatus.SKIPPED.value == "SKIPPED"
@@ -170,7 +185,8 @@ def test_workflow_yaml_parses_and_uses_uris_gate() -> None:
     txt = p.read_text(encoding="utf-8")
     data = yaml.safe_load(txt)
     assert "main" in data
-    assert "drive_indexed == drive_uris" in txt
+    assert "drive_failed == 0 and drive_indexed == drive_uris" in txt
+    assert "drive_reconciled == true" in txt
     assert "drive_indexed == drive_gcs" not in txt
     assert "uris: ${drive_uris}" in txt
 

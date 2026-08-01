@@ -38,7 +38,7 @@ class Settings:
     gcs_raw_bucket: str = ""
     gcs_normalized_bucket: str = ""
     firestore_collection: str = "doc_state"
-    firestore_database: str = "(default)"
+    firestore_database: str = "doc-state"
     sync_token_collection: str = "sync_tokens"
     rag_corpus_name: str = ""
     docai_processor_id: str = ""
@@ -68,6 +68,11 @@ class Settings:
     split_queue_collection: str = "doc_split_queue"
     # Drive→GCS ingest 병렬 워커 (무료/소형 인스턴스 기준 8 권장)
     raw_upload_concurrency: int = 8
+    # /sync/changes 가 한 번에 반환할 최대 변경 건수.
+    # Cloud Workflows 는 실행당 변수 누적 512KB 가 상한인데, 변경 1건이 응답·복사본·
+    # URI 까지 합쳐 워크플로우 변수를 ~900B 먹는다(≈586건에서 초과). 200건이면
+    # ~174KB 로 안전 마진이 남는다. 초과분은 hasMore 로 알리고 다음 호출에서 잇는다.
+    sync_max_changes: int = 200
 
     @property
     def drive_id_list(self) -> list[str]:
@@ -88,7 +93,7 @@ class Settings:
             gcs_raw_bucket=_env("GCS_RAW_BUCKET"),
             gcs_normalized_bucket=_env("GCS_NORMALIZED_BUCKET"),
             firestore_collection=os.environ.get("FIRESTORE_COLLECTION", "doc_state"),
-            firestore_database=os.environ.get("FIRESTORE_DATABASE", "(default)"),
+            firestore_database=os.environ.get("FIRESTORE_DATABASE", "doc-state"),
             sync_token_collection=os.environ.get(
                 "SYNC_TOKEN_COLLECTION", "sync_tokens"
             ),
@@ -115,6 +120,7 @@ class Settings:
             raw_upload_concurrency=max(
                 1, min(_env_int("RAW_UPLOAD_CONCURRENCY", 8), 32)
             ),
+            sync_max_changes=max(1, min(_env_int("SYNC_MAX_CHANGES", 200), 2000)),
         )
 
 
