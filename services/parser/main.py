@@ -41,7 +41,10 @@ from services.parser.engine import (  # noqa: E402
     parse_document_bytes,
 )
 from services.parser.hwpx_parser import ENGINE as HWPX_ENGINE  # noqa: E402
-from services.parser.quality_gate import evaluate_quality  # noqa: E402
+from services.parser.quality_gate import (  # noqa: E402
+    count_markdown_tables,
+    evaluate_quality,
+)
 
 setup_logging()
 logger = logging.getLogger("parser_service")
@@ -93,6 +96,8 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
         parsed = parse_document_bytes(raw, filename=filename)
         markdown = cleanup_markdown(parsed.markdown)
         parsed.metrics.text_length = len(markdown)
+        # 최종 본문 기준으로 잰다 — cleanup 이 표를 지웠다면 그것도 손실이다.
+        parsed.metrics.tables_rendered = count_markdown_tables(markdown)
     except Exception as exc:  # noqa: BLE001
         logger.exception("parse failed for %s", req.file_id)
         raise HTTPException(

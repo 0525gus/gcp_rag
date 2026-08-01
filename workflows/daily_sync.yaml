@@ -323,6 +323,8 @@ main:
                                         modifiedTime: ${change.modifiedTime}
                                         removed: false
                                         webViewLink: ${change.webViewLink}
+                                        # 다운로드 전에 크기를 거르기 위해 전달
+                                        sizeBytes: ${default(map.get(change, "sizeBytes"), null)}
                                         route: ${change.route}
                                         parserUrl: ${parser_url}
                                       timeout: 900

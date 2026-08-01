@@ -47,9 +47,21 @@ pageToken 이 커밋되지 않아 다음 실행의 델타가 더 커지고 — �
 
 ## 품질 게이트
 
+| 게이트 | 판정 | 설정 |
+|---|---|---|
+| G1 추출 밀도 | 텍스트 길이 / 원본 바이트 | `QG_DENSITY_THRESHOLD=0.0005` (이미지 많은 공문 오탐 완화) |
+| G2 표 손실률 | 문서 구조상 표 N개 중 마크다운에 안 남은 비율 | `QG_TABLE_LOSS_RATIO=0.3` |
+| EMPTY_TEXT | 추출 결과가 사실상 없음 | `QG_MIN_TEXT_LENGTH=20` |
+
 - 기본 `QG_MODE=log` — 미달해도 **색인 계속**, Cloud Logging 경고만
-- `QG_DENSITY_THRESHOLD=0.0005` (이미지 많은 공문 오탐 완화)
 - 전환: `reject` | `fallback`(+`ENABLE_DOCAI_FALLBACK`)
+- `EMPTY_TEXT` 만은 QG_MODE 와 무관하게 422 (색인할 내용이 없으므로)
+
+> 구 G2(셀 단위 실패율)·G3(이미지 면적비)는 **제거**했다. 두 판정이 읽던
+> `table_cell_failures` / `image_area_ratio` 를 채우는 파서가 없어 셀이 전부 비어도,
+> 이미지가 지면의 100%여도 통과했다. 셀 '실패'는 빈 셀이 정상이라 판별이 불가능하고
+> 이미지 면적비는 페이지 기하 정보가 없어 계산 경로가 없다. G3 조건은 실질적으로
+> G1 의 완화판이기도 했다.
 
 ## 로컬
 

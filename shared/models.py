@@ -185,4 +185,7 @@ class DriveChange:
     trashed: bool = False
     web_view_link: str | None = None
     md5_checksum: str | None = None
+    # Drive 가 주는 blob 크기. 다운로드 전에 거르는 데 쓴다.
+    # Google 네이티브(Docs/Sheets/Slides)는 blob 이 아니라 None.
+    size_bytes: int | None = None
     parents: list[str] = field(default_factory=list)

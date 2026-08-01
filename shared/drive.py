@@ -18,11 +18,22 @@ logger = logging.getLogger(__name__)
 
 FILE_FIELDS = (
     "id,name,mimeType,modifiedTime,trashed,md5Checksum,"
-    "webViewLink,parents,driveId"
+    # size 는 다운로드 '전에' 크기를 거르기 위해 필요하다. 받아 놓고 재면 이미
+    # 메모리를 점유한 뒤라, 백필의 병렬 워커가 큰 파일을 동시에 물면 OOM 이다.
+    # Google 네이티브(Docs/Sheets/Slides)는 blob 이 아니라서 이 필드가 없다.
+    "size,webViewLink,parents,driveId"
 )
 
 # googleapiclient 내장 재시도: 429/5xx·연결 오류에 지수 백오프 (커스텀 로직 불필요)
 NUM_RETRIES = 5
+
+
+def parse_drive_size(raw: Any) -> int | None:
+    """Drive 는 size 를 문자열로 준다. 없거나 이상하면 None(=크기 미상)."""
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 class DriveClient:
@@ -297,5 +308,6 @@ class DriveClient:
             trashed=trashed,
             web_view_link=file_meta.get("webViewLink"),
             md5_checksum=file_meta.get("md5Checksum"),
+            size_bytes=parse_drive_size(file_meta.get("size")),
             parents=list(file_meta.get("parents") or []),
         )

@@ -27,7 +27,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from shared.config import Settings, get_settings  # noqa: E402
-from shared.drive import DriveClient  # noqa: E402
+from shared.drive import DriveClient, parse_drive_size  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.gcs import GcsClient  # noqa: E402
 from shared.hashing import sha256_bytes, sha256_text  # noqa: E402
@@ -100,6 +100,8 @@ class IngestBody(BaseModel):
     modified_time: str | None = Field(default=None, alias="modifiedTime")
     removed: bool = False
     web_view_link: str | None = Field(default=None, alias="webViewLink")
+    # Drive 가 알려준 원본 크기. 다운로드 전에 거르는 데 쓴다(없으면 사후 검사만).
+    size_bytes: int | None = Field(default=None, alias="sizeBytes")
     route: str | None = None
     parser_url: str = Field(default="", alias="parserUrl")
 
@@ -170,6 +172,7 @@ def _route_file_meta(
         "modifiedTime": file_meta.get("modifiedTime"),
         "removed": False,
         "webViewLink": file_meta.get("webViewLink"),
+        "sizeBytes": parse_drive_size(file_meta.get("size")),
         "route": kind.value,
     }
     if skip_reason:
@@ -353,6 +356,7 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
             modifiedTime=ch.get("modifiedTime"),
             removed=False,
             webViewLink=ch.get("webViewLink"),
+            sizeBytes=ch.get("sizeBytes"),
             route=ch.get("route"),
             parserUrl=parser_url,
         )
@@ -498,6 +502,7 @@ def list_changes(body: ChangesBody) -> dict[str, Any]:
             "modifiedTime": ch.modified_time,
             "removed": ch.removed,
             "webViewLink": ch.web_view_link,
+            "sizeBytes": ch.size_bytes,
             "route": kind.value,
         }
         if skip_reason:
@@ -782,18 +787,24 @@ def _size_gate(
     store: DocStateStore,
     settings: Settings,
     body: IngestBody,
-    data: bytes,
+    size: int | None,
     *,
     splittable: bool,
     ext: str,
+    limit: int | None = None,
 ) -> dict[str, Any] | None:
-    """업로드 직전 크기 체크. 초과 시 FAILED/분할 큐. None이면 통과.
+    """크기 체크. 초과 시 FAILED/분할 큐. None이면 통과(크기 미상 포함).
 
     ``ext`` 는 **실제로 GCS 에 올라갈** 확장자다. 텍스트 FILE_COPY 는 breadcrumb 를
     붙여 .md 로 올라가므로 원본 MIME 이 아니라 업로드 형식으로 재야 한다.
+
+    ``limit`` 을 주면 RAG 한도 대신 그 값을 쓴다 — HWP 원본처럼 '업로드물이 아니라
+    메모리에 올릴 바이트'를 막을 때 사용한다.
     """
-    limit = _size_limit_for(settings, ext)
-    size = len(data)
+    if size is None:
+        return None
+    if limit is None:
+        limit = _size_limit_for(settings, ext)
     if size <= limit:
         return None
     reason = f"SIZE_EXCEEDED:{size}>{limit}({ext})"
@@ -910,9 +921,25 @@ def _ingest_hwp(
     if not body.parser_url:
         raise ValueError("parserUrl required for HWP_PARSE")
 
+    # 원본을 통째로 메모리에 올리기 전에 막는다. 여기 한도는 RAG import 상한이
+    # 아니라 운영 메모리 상한이다 — 60MB HWP 가 2MB 마크다운이 되는 일도 흔하다.
+    src_ext = ".hwpx" if is_hwpx(body.mime_type, body.name) else ".hwp"
+    gated = _size_gate(
+        store,
+        settings,
+        body,
+        body.size_bytes,
+        splittable=True,
+        ext=src_ext,
+        limit=settings.max_gcs_bytes,
+    )
+    if gated:
+        gated["route"] = "HWP_PARSE"
+        return gated
+
     path_ctx = _resolve_path_ctx(drive, body)
     raw = drive.download_file(body.file_id)
-    ext = ".hwpx" if is_hwpx(body.mime_type, body.name) else ".hwp"
+    ext = src_ext
     raw_uri = gcs.upload_raw(raw, body.file_id, ext)
 
     headers = _cloud_run_auth_headers(body.parser_url)
@@ -932,7 +959,15 @@ def _ingest_hwp(
                 if resp.headers.get("content-type", "").startswith("application/json")
                 else {"detail": resp.text}
             )
-            reason = f"QUALITY_GATE:{detail}"
+            # 파서는 서로 다른 4가지를 모두 422 로 낸다 — PARSE_FAILED(코드/라이브러리
+            # 결함), EMPTY_TEXT, QUALITY_GATE(임계 미달), FALLBACK_FAILED. 전부
+            # "QUALITY_GATE" 로 적으면 DLQ 에서 '파서가 깨진 것'과 '문서 품질이 낮은
+            # 것'을 구분할 수 없다. 파서가 준 분류를 그대로 쓴다.
+            kind = "PARSE_REJECTED"
+            if isinstance(detail, dict):
+                inner = detail.get("detail") if isinstance(detail.get("detail"), dict) else detail
+                kind = str(inner.get("error") or kind)
+            reason = f"{kind}:{detail}"
             store.enqueue_dlq(
                 body.file_id,
                 reason,
@@ -940,7 +975,13 @@ def _ingest_hwp(
                 name=body.name,
                 mimeType=body.mime_type,
                 modifiedTime=body.modified_time,
-                parseRoute=ParseRoute.RHWP.value,
+                # 하드코딩하면 HWPX 문서가 DLQ 에 RHWP 로 남는다.
+                parseRoute=(
+                    ParseRoute.HWPX.value
+                    if is_hwpx(body.mime_type, body.name)
+                    else ParseRoute.RHWP.value
+                ),
+                sourceUri=body.web_view_link,
                 path=path_ctx.path,
                 bundle=path_ctx.bundle,
             )
@@ -948,6 +989,7 @@ def _ingest_hwp(
                 "fileId": body.file_id,
                 "status": "DLQ",
                 "route": "HWP_PARSE",
+                "errorKind": kind,
                 "error": reason,
             }
         resp.raise_for_status()
@@ -966,7 +1008,7 @@ def _ingest_hwp(
     md_bytes = md_text.encode("utf-8")
     # 업로드 전에 잰다 — 파서가 이미 같은 경로에 써 둔 객체는 별개지만,
     # 한도 초과분을 다시 올릴 이유는 없다.
-    gated = _size_gate(store, settings, body, md_bytes, splittable=True, ext=".md")
+    gated = _size_gate(store, settings, body, len(md_bytes), splittable=True, ext=".md")
     if gated:
         gated["route"] = "HWP_PARSE"
         return gated
@@ -1024,7 +1066,7 @@ def _ingest_google_export(
     path_ctx = _resolve_path_ctx(drive, body)
     export_mime, ext = GOOGLE_EXPORT_MAP[body.mime_type]
     data = drive.export_file(body.file_id, export_mime)
-    gated = _size_gate(store, settings, body, data, splittable=True, ext=ext)
+    gated = _size_gate(store, settings, body, len(data), splittable=True, ext=ext)
     if gated:
         gated["route"] = "GOOGLE_EXPORT"
         return gated
@@ -1077,12 +1119,22 @@ def _ingest_file_copy(
     drive: DriveClient,
     settings: Settings,
 ) -> dict[str, Any]:
-    path_ctx = _resolve_path_ctx(drive, body)
-    data = drive.download_file(body.file_id)
-
     name = body.name or body.file_id
     mime = (body.mime_type or "").lower()
     ext = Path(name).suffix or _ext_for_mime(body.mime_type)
+    # 텍스트는 breadcrumb 를 붙여 .md 로 나가므로 상한도 .md 기준이다.
+    upload_ext = ".md" if mime in _TEXT_COPY_MIMES else ext
+
+    # 다운로드 전 1차 차단. 크기 미상이면 통과하고 아래 사후 검사가 잡는다.
+    gated = _size_gate(
+        store, settings, body, body.size_bytes, splittable=True, ext=upload_ext
+    )
+    if gated:
+        gated["route"] = "FILE_COPY"
+        return gated
+
+    path_ctx = _resolve_path_ctx(drive, body)
+    data = drive.download_file(body.file_id)
 
     if mime in _TEXT_COPY_MIMES:
         try:
@@ -1096,8 +1148,9 @@ def _ingest_file_copy(
             body=text,
         )
         # 텍스트는 원본 확장자와 무관하게 breadcrumb 를 붙여 .md 로 올라간다.
+        md_bytes = md_text.encode("utf-8")
         gated = _size_gate(
-            store, settings, body, md_text.encode("utf-8"), splittable=True, ext=".md"
+            store, settings, body, len(md_bytes), splittable=True, ext=".md"
         )
         if gated:
             gated["route"] = "FILE_COPY"
@@ -1115,7 +1168,7 @@ def _ingest_file_copy(
         gcs_uri = gcs.upload_normalized_md(md_text, body.file_id)
         uris = [gcs_uri]
     else:
-        gated = _size_gate(store, settings, body, data, splittable=True, ext=ext)
+        gated = _size_gate(store, settings, body, len(data), splittable=True, ext=ext)
         if gated:
             gated["route"] = "FILE_COPY"
             return gated

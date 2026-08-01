@@ -49,8 +49,10 @@ class Settings:
     # 품질 게이트 — 실측 코퍼스 기준 완화 (이미지 많은 공문 G1 오탐 방지)
     # 예: 업적평가 안내 ~0.00085, 개인정보 캠페인 rhwp ~0.00090
     qg_density_threshold: float = 0.0005
-    qg_table_fail_ratio: float = 0.3
-    qg_image_ratio: float = 0.5
+    # 문서 구조상 표 N개 중 마크다운에 남지 않은 비율의 허용 상한.
+    # (구 QG_TABLE_FAIL_RATIO 는 셀 단위 실패율이었으나 그 지표를 채우는 파서가
+    #  없어 발동한 적이 없다. 의미가 달라졌으므로 이름도 바꾼다.)
+    qg_table_loss_ratio: float = 0.3
     qg_min_text_length: int = 20
     # log: 경고만 / reject: 422·DLQ / fallback: Document AI(enable_docai_fallback 필요)
     qg_mode: str = "log"
@@ -103,8 +105,7 @@ class Settings:
             drive_ids=os.environ.get("DRIVE_IDS", ""),
             sync_folder_ids=os.environ.get("SYNC_FOLDER_IDS", ""),
             qg_density_threshold=_env_float("QG_DENSITY_THRESHOLD", 0.0005),
-            qg_table_fail_ratio=_env_float("QG_TABLE_FAIL_RATIO", 0.3),
-            qg_image_ratio=_env_float("QG_IMAGE_RATIO", 0.5),
+            qg_table_loss_ratio=_env_float("QG_TABLE_LOSS_RATIO", 0.3),
             qg_min_text_length=_env_int("QG_MIN_TEXT_LENGTH", 20),
             qg_mode=mode,
             top_k_default=_env_int("TOP_K_DEFAULT", 5),

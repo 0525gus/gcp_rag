@@ -327,3 +327,49 @@ def test_search_still_returns_top_k_after_filtering_hidden_docs(
     assert len(results) == 5, f"top_k=5 인데 {len(results)}개만 반환됐다"
     assert [r["source"]["fileId"] for r in results] == ["f2", "f3", "f4", "f5", "f6"]
     assert [r["rank"] for r in results] == [1, 2, 3, 4, 5]
+
+
+def test_search_fills_top_k_at_the_maximum_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """k 가 상한이면 여유분이 0 이라 필터가 걷어낸 자리를 못 채운다."""
+    import services.mcp_server.main as mcp_main
+    from shared.models import SearchHit, SearchSource
+
+    k = mcp_main.MAX_TOP_K
+    pool = [
+        SearchHit(
+            text=f"본문 {i}",
+            score=0.01 * i,
+            source=SearchSource(file_id=f"f{i}", name=f"f{i}.pdf"),
+        )
+        for i in range(k * 4)
+    ]
+    hidden = {
+        f"f{i}": DocState(file_id=f"f{i}", drive_id="d", status=DocStatus.DELETED)
+        for i in range(3)
+    }
+
+    class _Rag:
+        def __init__(self, *_a: Any) -> None:
+            pass
+
+        def retrieve(self, _q: str, *, top_k: int) -> list[SearchHit]:
+            return pool[:top_k]
+
+    class _Store:
+        def __init__(self, *_a: Any) -> None:
+            pass
+
+        def get(self, fid: str):
+            return hidden.get(fid) or DocState(
+                file_id=fid, drive_id="d", status=DocStatus.INDEXED
+            )
+
+    monkeypatch.setattr(mcp_main, "RagEngineClient", _Rag)
+    monkeypatch.setattr(mcp_main, "DocStateStore", _Store)
+
+    results = mcp_main.search(query="q", top_k=k)
+
+    assert len(results) == k, f"top_k={k} 인데 {len(results)}개만 반환됐다"
+    assert all(r["source"]["fileId"] not in hidden for r in results)

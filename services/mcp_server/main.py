@@ -35,6 +35,12 @@ logger = logging.getLogger("mcp_server")
 settings = get_settings()
 MCP_API_KEY = os.environ.get("MCP_API_KEY", "").strip()
 
+# search 가 노출하는 top_k 상한. 사용자 요청 k 는 이 값으로 clamp 된다.
+MAX_TOP_K = 20
+# 필터·중복 제거가 걷어낼 몫. k 가 커도 최소 이만큼은 더 받아 자리를 채운다.
+_FETCH_HEADROOM = 10
+_MAX_FETCH = MAX_TOP_K + _FETCH_HEADROOM
+
 mcp = FastMCP(
     "rag-search",
     host="0.0.0.0",
@@ -79,12 +85,15 @@ def search(
         drive_id: 특정 공유 드라이브로 필터 (선택)
     """
     k = top_k or settings.top_k_default
-    k = max(1, min(k, 20))
+    k = max(1, min(k, MAX_TOP_K))
     logger.info("search query=%r top_k=%s drive_id=%s", query, k, drive_id)
 
     rag = RagEngineClient(settings)
     # 여유분 retrieve 후 후처리(중복 제거)로 좁힌다.
-    fetch_k = min(20, max(k * 3, k))
+    # 아래 필터(SKIPPED/DELETED/driveId)와 파일 단위 중복 제거가 걷어낼 몫을 미리
+    # 확보해야 top_k 를 채울 수 있다. k 를 그대로 요청하면 여유분이 0 이라 큰 k 에서
+    # 항상 모자란다 — 상한(_MAX_FETCH)까지는 넉넉히 받는다.
+    fetch_k = min(_MAX_FETCH, max(k * 3, k + _FETCH_HEADROOM))
     raw_hits = rag.retrieve(query, top_k=fetch_k)
     # 여기서 k 로 자르면 아래 필터(SKIPPED/DELETED/driveId)가 걷어낸 자리가 빈 채로
     # 남아 top_k 보다 적게 반환된다. 자르기는 필터를 통과한 뒤에 한다.
