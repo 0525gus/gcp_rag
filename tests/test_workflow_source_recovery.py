@@ -94,4 +94,5 @@ def test_recovery_false_results_are_reported_as_errors() -> None:
     assert "severity: ERROR" in yaml.safe_dump(retry_check["steps"])
 
     summary = _named_step(top_steps, "return_summary")["return"]
-    assert summary["ok"] == "${totals.failed == 0}"
+    # 색인 실패는 별도 지표라, ok 에서 명시적으로 함께 봐야 묻히지 않는다.
+    assert summary["ok"] == "${totals.failed == 0 and totals.indexFailed == 0}"

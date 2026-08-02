@@ -291,3 +291,40 @@ def test_backfill_branch_terminates_the_page_loop() -> None:
     # backfill-run 이 드라이브 전체를 끝내므로 다시 돌면 무한 루프다
     assert assigned["drive_has_more"] is False
     assert assigned["drive_backfill"] is False
+
+
+def test_page_size_never_overshoots_the_requested_limit() -> None:
+    """한 페이지를 통째로 받은 뒤 재면 최대 pageSize-1 건을 초과해 돌려준다.
+
+    maxChanges 를 낮춰 잡으려는 조정이 반대로 도는 함정이었다 — 150 을 주면
+    100 을 받고 아직 모자라서 100 을 더 받아 200 이 나왔다.
+    """
+
+    class _SizeAwareApi(_FakeChangesApi):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.page_sizes: list[int] = []
+
+        def list(self, **kwargs: Any):
+            self.page_sizes.append(kwargs["pageSize"])
+            n = kwargs["pageSize"]
+            idx = len(self.page_sizes)
+            payload: dict[str, Any] = {
+                "changes": [
+                    {"fileId": f"p{idx}f{i}", "file": {"id": f"p{idx}f{i}"}}
+                    for i in range(n)
+                ],
+                "nextPageToken": f"t{idx}",
+            }
+            return _FakeExec(payload)
+
+    client = object.__new__(DriveClient)
+    api = _SizeAwareApi()
+    client._service = api  # noqa: SLF001
+
+    changes, token, has_more = client.list_changes("drive", "t0", max_changes=150)
+
+    assert len(changes) == 150, f"{len(changes)}건 — 요청한 150건을 넘겼다"
+    assert api.page_sizes == [100, 50]
+    assert has_more is True
+    assert token == "t2"

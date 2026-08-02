@@ -132,7 +132,11 @@ def test_backfill_index_failure_is_counted_and_token_is_not_committed(
         sync_main.BackfillRunBody(driveId="drive", indexBatchSize=3)
     )
 
-    assert result["totals"]["failed"] == 3
+    # 색인 실패는 indexFailed 로 센다 — failed 에 더하면 그 파일이 gcsUploaded 와
+    # 겹쳐 reconcile 의 listed 항등식이 깨진다(unaccounted 음수).
+    assert result["totals"]["indexFailed"] == 3
+    assert result["totals"]["failed"] == 0
+    assert result["totals"]["gcsUploaded"] == 3
     assert result["totals"]["indexed"] == 0
     assert result["ok"] is False
     assert store.committed == []

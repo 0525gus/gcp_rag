@@ -75,6 +75,12 @@ class DriveClient:
         new_start: str | None = None
 
         while token:
+            # 한 페이지를 통째로 받은 뒤에 한도를 재면 최대 pageSize-1 건을 초과해
+            # 돌려준다 — maxChanges=150 을 주면 200 건이 오는 식이라, 한도를 낮춰
+            # 잡으려는 조정이 반대로 돈다. 남은 몫만큼만 요청한다.
+            page_size = 100
+            if max_changes is not None:
+                page_size = max(1, min(page_size, max_changes - len(changes)))
             resp = (
                 self._service.changes()
                 .list(
@@ -83,7 +89,7 @@ class DriveClient:
                     includeItemsFromAllDrives=True,
                     supportsAllDrives=True,
                     spaces="drive",
-                    pageSize=100,
+                    pageSize=page_size,
                     fields=(
                         "nextPageToken,newStartPageToken,"
                         "changes(fileId,removed,file(" + FILE_FIELDS + "))"

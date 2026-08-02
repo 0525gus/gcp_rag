@@ -47,6 +47,46 @@ class DocStateStore:
         }
         self._col.document(file_id).set(payload, merge=True)
 
+    def mark_indexed(self, file_id: str) -> None:
+        """상태 문서가 없는 fileId 를 INDEXED 로 세운다(방어적 경로).
+
+        ingest 는 GCS_READY 를 돌려주기 전에 항상 upsert 하므로 정상 흐름에서는
+        일어나지 않는다. 여기까지 왔다는 건 상태가 유실됐다는 뜻이라 경고를 남긴다.
+        driveId 를 모르는 채로 만들어지므로 검색의 driveId 필터에서 빠질 수 있다.
+        """
+        logger.warning("indexed a file with no doc_state — creating a stub: %s", file_id)
+        self._col.document(file_id).set(
+            {
+                "fileId": file_id,
+                "status": DocStatus.INDEXED.value,
+                "lastSyncedAt": datetime.now(timezone.utc),
+            },
+            merge=True,
+        )
+
+    def touch_modified_time(self, file_id: str, modified_time: str | None) -> None:
+        """내용이 그대로일 때 modifiedTime 만 전진시킨다.
+
+        재파싱 결과가 이전과 같으면(HASH_UNCHANGED) 색인은 건드릴 게 없지만,
+        modifiedTime 을 남겨두지 않으면 ``should_reparse`` 가 매 실행 참이 되어
+        같은 파일을 매일 다시 내려받고 다시 파싱한다.
+
+        **status 를 쓰지 않는 것이 핵심이다.** 여기서 PARSED 를 쓰면 이미 색인된
+        문서가 '색인 누락'으로 강등돼 reindex-pending 이 매일 헛돌고, 복구 예산을
+        진짜 끊긴 문서 대신 이 문서들이 차지한다. sourceUri/path 도 건드리지
+        않는다 — merge 로 None 을 쓰면 기존 Drive 링크가 지워진다.
+        """
+        if not modified_time:
+            return
+        self._col.document(file_id).set(
+            {
+                "fileId": file_id,
+                "modifiedTime": modified_time,
+                "lastSyncedAt": datetime.now(timezone.utc),
+            },
+            merge=True,
+        )
+
     def mark_deleted(self, file_id: str) -> None:
         self._col.document(file_id).set(
             {

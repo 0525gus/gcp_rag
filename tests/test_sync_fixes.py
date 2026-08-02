@@ -216,7 +216,11 @@ def test_workflow_yaml_parses_and_uses_uris_gate() -> None:
     txt = p.read_text(encoding="utf-8")
     data = yaml.safe_load(txt)
     assert "main" in data
-    assert "drive_failed == 0 and drive_indexed == drive_uris" in txt
+    # 색인 실패는 failed 와 분리해 세지만(이중 집계 방지) 커밋은 똑같이 막아야 한다.
+    assert (
+        "drive_failed == 0 and drive_index_failed == 0 and drive_indexed == drive_uris"
+        in txt
+    )
     assert "drive_reconciled == true" in txt
     assert "drive_indexed == drive_gcs" not in txt
     assert "uris: ${drive_uris}" in txt

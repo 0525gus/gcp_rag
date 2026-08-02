@@ -316,10 +316,16 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
         "unchanged": 0,
         "dlq": 0,
         "splitQueued": 0,
+        # 색인 실패는 failed 와 분리한다 — 아래 커밋 게이트 주석 참고.
+        "indexFailed": 0,
     }
     pending_uris: list[str] = []
     pending_ids: list[str] = []
+    # lock: totals·pending 접근용(짧게). index_lock: import 직렬화용(길게).
+    # 하나로 합치면 import 가 도는 수십 초 동안 워커 8개가 집계조차 못 하고 멈춘다
+    # — 동시성이 사실상 1로 붕괴하고, 그 지연이 Cloud Run 타임아웃까지 이어진다.
     lock = threading.Lock()
+    index_lock = threading.Lock()
 
     # 스냅샷 전체를 미리 지우면 안 된다. 재백필에서는 대부분의 파일이 UNCHANGED 로
     # 빠져 재import 되지 않으므로, 미리 지운 청크가 그대로 유실된다 — 그러고도
@@ -327,14 +333,32 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
     # 한다(_import_and_mark). 클라이언트를 공유해 코퍼스 순회는 1회로 유지한다.
     rag = RagEngineClient()
 
-    def flush_index() -> None:
+    def _take_batch(min_size: int) -> tuple[list[str], list[str]] | None:
+        """조건을 만족하면 대기열을 통째로 떼어 온다. 반드시 lock 밖에서 import 할 것."""
         nonlocal pending_uris, pending_ids
-        if not pending_uris:
-            return
-        uris, ids = pending_uris, pending_ids
-        indexed = len(_import_and_mark(store, uris, ids, rag=rag))
-        totals["indexed"] += indexed
-        pending_uris, pending_ids = [], []
+        with lock:
+            if len(pending_uris) < min_size or not pending_uris:
+                return None
+            uris, ids = pending_uris, pending_ids
+            pending_uris, pending_ids = [], []
+            return uris, ids
+
+    def flush_index(min_size: int = 1) -> int:
+        """떼어 온 배치를 import 한다. 실패하면 그 배치의 파일 수를 돌려준다."""
+        batch = _take_batch(min_size)
+        if batch is None:
+            return 0
+        uris, ids = batch
+        try:
+            # import 는 직렬화하되(Vertex RPM), 집계 lock 은 쥐지 않는다.
+            with index_lock:
+                indexed = len(_import_and_mark(store, uris, ids, rag=rag))
+        except Exception:  # noqa: BLE001
+            logger.exception("backfill index flush failed")
+            return len(dict.fromkeys(ids))
+        with lock:
+            totals["indexed"] += indexed
+        return 0
 
     # googleapiclient 의 service 객체는 스레드 안전하지 않다(httplib2.Http 공유).
     # 워커마다 하나씩 두면 8개로 끝나고, 스레드 안에서 parents/name 캐시가 살아
@@ -396,13 +420,6 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
                         pending_ids.extend([ch["fileId"]] * len(uris))
                         totals["gcsUploaded"] += 1
                         totals["uris"] += len(uris)
-                        if len(pending_uris) >= body.index_batch_size:
-                            try:
-                                flush_index()
-                            except Exception:  # noqa: BLE001
-                                logger.exception("backfill index flush failed")
-                                totals["failed"] += len(pending_uris)
-                                pending_uris, pending_ids = [], []
                     else:
                         logger.error(
                             "backfill ingest returned GCS_READY without URI: %s",
@@ -422,15 +439,22 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
                 else:
                     totals["failed"] += 1
 
-    try:
-        with lock:
-            flush_index()
-    except Exception:  # noqa: BLE001
-        logger.exception("backfill final index failed")
-        with lock:
-            totals["failed"] += len(pending_uris)
+            index_failed = flush_index(body.index_batch_size)
+            if index_failed:
+                with lock:
+                    totals["indexFailed"] += index_failed
 
-    if pending_page_token and totals["failed"] == 0:
+    index_failed = flush_index()
+    if index_failed:
+        totals["indexFailed"] += index_failed
+
+    # 색인 실패를 failed 에 더하면 이중 집계다 — 그 파일은 이미 gcsUploaded 로
+    # 세어져 있어서 reconcile 의 listed 항등식이 깨진다(unaccounted 가 음수).
+    # 별도 지표로 두고, 커밋 게이트에서는 워크플로우와 같은 항등식으로 막는다.
+    index_complete = totals["indexed"] == totals["uris"]
+    ok = totals["failed"] == 0 and totals["indexFailed"] == 0 and index_complete
+
+    if pending_page_token and ok:
         store.set_start_page_token(body.drive_id, pending_page_token)
 
     logger.info("backfill-run done drive=%s totals=%s", body.drive_id, totals)
@@ -440,7 +464,7 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
         "pendingPageToken": pending_page_token,
         "workers": workers,
         "totals": totals,
-        "ok": totals["failed"] == 0,
+        "ok": ok,
     }
 
 
@@ -1014,6 +1038,13 @@ def _ingest_hwp(
                 path=path_ctx.path,
                 bundle=path_ctx.bundle,
             )
+            # 거부된 원본은 아무도 다시 읽지 않는다 — 재시도도 Drive 에서 새로
+            # 내려받아 같은 경로를 덮어쓴다. 안 지우면 영구 실패 문서만큼 raw/ 가
+            # 단조 증가한다. 실패해도 DLQ 결과를 뒤집지는 않는다.
+            try:
+                gcs.delete(raw_uri)
+            except Exception:  # noqa: BLE001
+                logger.warning("raw cleanup after parse rejection failed: %s", raw_uri)
             return {
                 "fileId": body.file_id,
                 "status": "DLQ",
@@ -1046,16 +1077,9 @@ def _ingest_hwp(
     md_uri = gcs.upload_normalized_md(md_text, body.file_id)
 
     if store.should_skip_reindex(body.file_id, content_hash):
-        store.upsert(
-            _state_fields(
-                body,
-                content_hash=content_hash,
-                status=DocStatus.PARSED,
-                parse_route=route,
-                source_uri=body.web_view_link or md_uri,
-                path_ctx=path_ctx,
-            )
-        )
+        # 이미 INDEXED 이고 내용도 그대로다 — modifiedTime 만 전진시킨다.
+        # 여기서 PARSED 로 덮어쓰면 색인된 문서가 '색인 누락'으로 강등된다.
+        store.touch_modified_time(body.file_id, body.modified_time)
         return {
             "fileId": body.file_id,
             "status": "HASH_UNCHANGED",
@@ -1107,6 +1131,9 @@ def _ingest_google_export(
     )
     content_hash = sha256_text(f"{sha256_bytes(data)}|{path_ctx.path}|{sidecar}")
     if store.should_skip_reindex(body.file_id, content_hash):
+        # 전진시키지 않으면 should_reparse 가 매 실행 참이 되어 같은 문서를
+        # 매일 다시 export 한다(내용이 그대로인 걸 확인하려고).
+        store.touch_modified_time(body.file_id, body.modified_time)
         return {
             "fileId": body.file_id,
             "status": "HASH_UNCHANGED",
@@ -1186,6 +1213,7 @@ def _ingest_file_copy(
             return gated
         content_hash = sha256_text(md_text)
         if store.should_skip_reindex(body.file_id, content_hash):
+            store.touch_modified_time(body.file_id, body.modified_time)
             return {
                 "fileId": body.file_id,
                 "status": "HASH_UNCHANGED",
@@ -1208,6 +1236,7 @@ def _ingest_file_copy(
         )
         content_hash = sha256_text(f"{sha256_bytes(data)}|{path_ctx.path}|{sidecar}")
         if store.should_skip_reindex(body.file_id, content_hash):
+            store.touch_modified_time(body.file_id, body.modified_time)
             return {
                 "fileId": body.file_id,
                 "status": "HASH_UNCHANGED",
@@ -1295,9 +1324,7 @@ def _import_and_mark(
             existing.status = DocStatus.INDEXED
             store.upsert(existing)
         else:
-            store._col.document(fid).set(  # noqa: SLF001
-                {"fileId": fid, "status": DocStatus.INDEXED.value}, merge=True
-            )
+            store.mark_indexed(fid)
     return imported
 
 

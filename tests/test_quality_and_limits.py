@@ -251,3 +251,71 @@ def test_drive_size_string_is_parsed() -> None:
     assert parse_drive_size("12345") == 12345
     assert parse_drive_size(None) is None
     assert parse_drive_size("") is None  # Google 네이티브는 size 가 없다
+
+
+# --------------------------------------------- 내용 동일 재파싱이 상태를 깎지 않게
+class _HashUnchangedStore:
+    """이미 INDEXED 이고 해시도 같은 문서."""
+
+    def __init__(self) -> None:
+        self.upserts: list[Any] = []
+        self.touched: list[tuple[str, str | None]] = []
+
+    def should_skip_reindex(self, *_a: Any, **_k: Any) -> bool:
+        return True
+
+    def upsert(self, state: Any) -> None:
+        self.upserts.append(state)
+
+    def touch_modified_time(self, file_id: str, modified_time: str | None) -> None:
+        self.touched.append((file_id, modified_time))
+
+
+def _hash_unchanged_drive():
+    class _D:
+        def download_file(self, _fid: str) -> bytes:
+            return b"hello world"
+
+        def export_file(self, _fid: str, _mime: str) -> bytes:
+            return b"hello world"
+
+        def resolve_path_context(self, _fid: str, name: str):
+            from shared.path_context import build_path_context
+
+            return build_path_context([], name)
+
+    return _D()
+
+
+@pytest.mark.parametrize(
+    ("mime", "ingest_fn"),
+    [
+        ("text/plain", "_ingest_file_copy"),
+        ("application/pdf", "_ingest_file_copy"),
+        ("application/vnd.google-apps.document", "_ingest_google_export"),
+    ],
+)
+def test_hash_unchanged_never_downgrades_indexed_state(mime: str, ingest_fn: str) -> None:
+    """내용이 그대로면 modifiedTime 만 전진 — status 는 건드리지 않는다.
+
+    PARSED 로 덮어쓰면 색인된 문서가 '색인 누락'으로 강등돼 reindex-pending 이
+    매일 헛돌고, 복구 예산을 진짜 끊긴 문서 대신 이 문서들이 차지한다.
+    """
+    import services.sync.main as sync_main
+
+    store = _HashUnchangedStore()
+    body = sync_main.IngestBody(
+        fileId="f1",
+        driveId="d",
+        name="doc.txt",
+        mimeType=mime,
+        modifiedTime="2026-08-02T00:00:00Z",
+    )
+
+    res = getattr(sync_main, ingest_fn)(
+        body, store, object(), _hash_unchanged_drive(), _Settings()
+    )
+
+    assert res["status"] == "HASH_UNCHANGED"
+    assert store.upserts == [], "HASH_UNCHANGED 는 status 를 다시 쓰면 안 된다"
+    assert store.touched == [("f1", "2026-08-02T00:00:00Z")]

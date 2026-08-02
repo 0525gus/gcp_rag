@@ -43,6 +43,7 @@ main:
               unchanged: 0
               dlq: 0
               splitQueued: 0
+              indexFailed: 0
 
     - for_each_drive:
         for:
@@ -69,6 +70,7 @@ main:
                   - drive_uris: 0
                   - drive_indexed: 0
                   - drive_failed: 0
+                  - drive_index_failed: 0
                   - drive_reconciled: false
                   - drive_skipped: 0
                   - drive_deleted: 0
@@ -125,6 +127,7 @@ main:
                             - drive_uris: ${default(backfill_resp.body.totals.uris, 0)}
                             - drive_indexed: ${default(backfill_resp.body.totals.indexed, 0)}
                             - drive_failed: ${default(backfill_resp.body.totals.failed, 0)}
+                            - drive_index_failed: ${default(backfill_resp.body.totals.indexFailed, 0)}
                             - drive_skipped: ${default(backfill_resp.body.totals.skipped, 0)}
                             - drive_unchanged: ${default(backfill_resp.body.totals.unchanged, 0)}
                             - drive_dlq: ${default(backfill_resp.body.totals.dlq, 0)}
@@ -140,6 +143,7 @@ main:
                             - totals.gcsUploaded: ${totals.gcsUploaded + default(backfill_resp.body.totals.gcsUploaded, 0)}
                             - totals.indexed: ${totals.indexed + default(backfill_resp.body.totals.indexed, 0)}
                             - totals.failed: ${totals.failed + default(backfill_resp.body.totals.failed, 0)}
+                            - totals.indexFailed: ${totals.indexFailed + default(backfill_resp.body.totals.indexFailed, 0)}
                             - totals.skipped: ${totals.skipped + default(backfill_resp.body.totals.skipped, 0)}
                             - totals.unchanged: ${totals.unchanged + default(backfill_resp.body.totals.unchanged, 0)}
                             - totals.dlq: ${totals.dlq + default(backfill_resp.body.totals.dlq, 0)}
@@ -437,7 +441,11 @@ main:
                         assign:
                           - _: null
 
-            # ----- 3) GCS → RAG Engine 증분 import (배치 throttle) -----
+            # ----- 3) GCS → RAG Engine 증분 import -----
+            # 페이지 하나가 모은 URI 를 한 번에 보낸다. indexBatchSize 는 여기 쓰이지
+            # 않는다(서버 안에서 도는 backfill-run/복구 전용). 델타의 실질 배치 크기는
+            # maxChanges 다 — 나눠 보내면 호출마다 코퍼스를 다시 순회하게 되므로,
+            # 색인 부하를 줄이려면 maxChanges 를 낮춰야 한다.
             - index_if_needed:
                 switch:
                   - condition: ${len(pending_uris) > 0}
@@ -464,10 +472,14 @@ main:
                           except:
                             as: index_err
                             steps:
+                              # 색인 실패를 failed 에 더하면 이중 집계다 — 그 파일은
+                              # 이미 gcsUploaded 로 세어져 reconcile 의 listed 항등식이
+                              # 깨진다(unaccounted 가 음수). 별도 지표로 두고, 커밋은
+                              # 아래 drive_indexed == drive_uris 가 막는다.
                               - index_fail:
                                   assign:
-                                    - drive_failed: ${drive_failed + len(pending_uris)}
-                                    - totals.failed: ${totals.failed + len(pending_uris)}
+                                    - drive_index_failed: ${drive_index_failed + len(pending_uris)}
+                                    - totals.indexFailed: ${totals.indexFailed + len(pending_uris)}
                               - index_log:
                                   call: sys.log
                                   args:
@@ -526,7 +538,7 @@ main:
             # ----- 5) pageToken 커밋 (전체 처리·색인·정합성 검증 성공 시에만) -----
             - commit_token:
                 switch:
-                  - condition: ${pending_page_token != "" and drive_failed == 0 and drive_indexed == drive_uris and drive_reconciled == true}
+                  - condition: ${pending_page_token != "" and drive_failed == 0 and drive_index_failed == 0 and drive_indexed == drive_uris and drive_reconciled == true}
                     steps:
                       - do_commit:
                           try:
@@ -568,14 +580,14 @@ main:
                           call: sys.log
                           args:
                             severity: "WARNING"
-                            text: ${"pageToken NOT committed drive=" + drive_id + " failed=" + string(drive_failed) + " reconciled=" + string(drive_reconciled) + " gcs=" + string(drive_gcs) + " uris=" + string(drive_uris) + " indexed=" + string(drive_indexed)}
+                            text: ${"pageToken NOT committed drive=" + drive_id + " failed=" + string(drive_failed) + " indexFailed=" + string(drive_index_failed) + " reconciled=" + string(drive_reconciled) + " gcs=" + string(drive_gcs) + " uris=" + string(drive_uris) + " indexed=" + string(drive_indexed)}
 
             # ----- 6) 다음 페이지 -----
             # 커밋 조건과 동일해야 한다. 토큰이 커밋되지 않았는데 되돌아가면 같은
             # 페이지를 무한히 다시 받는다. 남은 분량은 다음 실행이 이어받는다.
             - next_page:
                 switch:
-                  - condition: ${drive_has_more == true and pending_page_token != "" and drive_failed == 0 and drive_indexed == drive_uris and drive_reconciled == true and drive_page < max_pages}
+                  - condition: ${drive_has_more == true and pending_page_token != "" and drive_failed == 0 and drive_index_failed == 0 and drive_indexed == drive_uris and drive_reconciled == true and drive_page < max_pages}
                     next: sync_page
                   - condition: ${drive_has_more == true}
                     steps:
@@ -699,7 +711,7 @@ main:
 
     - return_summary:
         return:
-          ok: ${totals.failed == 0}
+          ok: ${totals.failed == 0 and totals.indexFailed == 0}
           totals: ${totals}
           region: ${region}
           projectId: ${project_id}
