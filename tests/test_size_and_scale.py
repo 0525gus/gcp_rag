@@ -200,6 +200,12 @@ def test_backfill_reuses_one_drive_client_per_worker(
         def __init__(self) -> None:
             self.committed: list[tuple[str, str]] = []
 
+        def try_acquire_lock(self, _n: str, *, ttl_seconds: int) -> bool:
+            return True
+
+        def release_lock(self, _n: str) -> None:
+            pass
+
         def get_start_page_token(self, _d: str) -> None:
             return None
 
@@ -247,6 +253,12 @@ def test_backfill_scans_the_corpus_only_once(monkeypatch: pytest.MonkeyPatch) ->
                 }
 
     class _Store:
+        def try_acquire_lock(self, _n: str, *, ttl_seconds: int) -> bool:
+            return True
+
+        def release_lock(self, _n: str) -> None:
+            pass
+
         def get_start_page_token(self, _d: str) -> None:
             return None
 

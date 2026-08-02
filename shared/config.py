@@ -63,7 +63,6 @@ class Settings:
     # 768 이상은 개선이 1%p 대로 평평해지며, 문서의 81% 는 768/1024 결과가 동일하다.
     rag_chunk_size: int = 1024
     rag_chunk_overlap: int = 256
-    mcp_auth_audience: str = ""
     max_gcs_bytes: int = 50 * 1024 * 1024
     enable_docai_fallback: bool = False
     dlq_collection: str = "doc_dlq"
@@ -111,7 +110,6 @@ class Settings:
             top_k_default=_env_int("TOP_K_DEFAULT", 5),
             rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 1024),
             rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 256),
-            mcp_auth_audience=os.environ.get("MCP_AUTH_AUDIENCE", ""),
             max_gcs_bytes=_env_int("MAX_GCS_BYTES", 50 * 1024 * 1024),
             enable_docai_fallback=_env_bool("ENABLE_DOCAI_FALLBACK", False),
             dlq_collection=os.environ.get("DLQ_COLLECTION", "doc_dlq"),

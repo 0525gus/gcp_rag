@@ -21,7 +21,17 @@ class _Settings:
     rag_chunk_overlap = 256
 
 
-class _BackfillStore:
+class _LockableStore:
+    """backfill-run 은 드라이브당 하나만 돌도록 잠금을 잡는다."""
+
+    def try_acquire_lock(self, _name: str, *, ttl_seconds: int) -> bool:
+        return True
+
+    def release_lock(self, _name: str) -> None:
+        pass
+
+
+class _BackfillStore(_LockableStore):
     def __init__(self) -> None:
         self.committed: list[tuple[str, str]] = []
 
@@ -337,10 +347,11 @@ def test_reindex_failure_is_counted_for_threshold_and_final_flush(
     monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
     monkeypatch.setattr(sync_main, "DocStateStore", FakeStore)
     monkeypatch.setattr(sync_main, "RagEngineClient", FailingRag)
+    monkeypatch.setattr(sync_main, "_new_storage_client", lambda _s: object())
     monkeypatch.setattr(
         sync_main,
         "_normalized_uris_for_file",
-        lambda _settings, file_id: [f"gs://normalized/{file_id}.txt"],
+        lambda _settings, file_id, _c=None: [f"gs://normalized/{file_id}.txt"],
     )
 
     result = sync_main.reindex_pending(
@@ -368,6 +379,8 @@ def test_reindex_no_uri_is_not_reported_ok(monkeypatch: pytest.MonkeyPatch) -> N
     store = FakeStore()
     monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
     monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
+    monkeypatch.setattr(sync_main, "_new_storage_client", lambda _s: object())
+    monkeypatch.setattr(sync_main, "_new_storage_client", lambda _s: object())
     monkeypatch.setattr(sync_main, "_normalized_uris_for_file", lambda *_args: [])
 
     result = sync_main.reindex_pending(sync_main.ReindexPendingBody(limit=1))
@@ -402,3 +415,52 @@ def test_reindex_replays_original_office_uri_with_sidecar(
         "gs://normalized/normalized/f1.xlsx",
         "gs://normalized/normalized/f1.meta.md",
     ]
+
+
+# ------------------------------------------------- 백필 단일 실행 잠금
+def test_backfill_rejects_a_second_concurrent_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """워크플로우 스텝 타임아웃이 Cloud Run 요청보다 짧으면 재시도가 겹친다.
+
+    첫 요청이 아직 살아 있는데 두 번째가 들어오면 같은 드라이브를 두 번 훑고
+    같은 코퍼스에 삭제·import 를 교차시킨다. 서버가 스스로 막아야 한다.
+    """
+
+    class _Busy(_BackfillStore):
+        def try_acquire_lock(self, _name: str, *, ttl_seconds: int) -> bool:
+            return False
+
+    store = _Busy()
+    monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
+
+    with pytest.raises(sync_main.HTTPException) as exc_info:
+        sync_main.backfill_run(sync_main.BackfillRunBody(driveId="drive"))
+
+    assert exc_info.value.status_code == 409
+
+
+def test_backfill_releases_the_lock_even_when_it_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[str] = []
+
+    class _Tracking(_BackfillStore):
+        def release_lock(self, name: str) -> None:
+            released.append(name)
+
+    store = _Tracking()
+    monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
+    monkeypatch.setattr(sync_main, "GcsClient", lambda _s=None: object())
+    monkeypatch.setattr(sync_main, "RagEngineClient", _NoopRag)
+    monkeypatch.setattr(
+        sync_main,
+        "DriveClient",
+        lambda: (_ for _ in ()).throw(RuntimeError("drive down")),
+    )
+
+    with pytest.raises(RuntimeError):
+        sync_main.backfill_run(sync_main.BackfillRunBody(driveId="drive"))
+
+    assert released == ["backfill:drive"], "실패해도 잠금은 풀려야 한다"

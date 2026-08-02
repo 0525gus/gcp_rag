@@ -11,7 +11,6 @@ from shared.gcs import parse_gs_uri
 from shared.mime_types import RouteKind, classify_route, is_hwp_family, is_hwpx
 from shared.models import SearchHit, SearchSource
 from shared.search_postprocess import (
-    distance_to_relevance,
     extract_file_id,
     postprocess_hits,
     unescape_chunk_text,
@@ -200,18 +199,6 @@ def test_extract_file_id_falls_back_to_source_uri() -> None:
     assert extract_file_id("", "gs://b/normalized/xyz.md") == "xyz"
 
 
-def test_distance_to_relevance_is_monotonic_decreasing() -> None:
-    # 거리가 멀수록 relevance는 낮아야 함
-    assert distance_to_relevance(0.0) > distance_to_relevance(0.5)
-    assert distance_to_relevance(0.5) > distance_to_relevance(1.0)
-
-
-def test_distance_to_relevance_clamps_range() -> None:
-    assert distance_to_relevance(-1.0) == 0.0
-    assert 0.0 <= distance_to_relevance(0.0) <= 1.0
-    assert 0.0 <= distance_to_relevance(100.0) <= 1.0
-
-
 def test_unescape_chunk_text_normalizes_entities_and_newlines() -> None:
     assert unescape_chunk_text("a &amp; b\r\n\r\n\r\n\r\nc") == "a & b\n\nc"
 
@@ -297,3 +284,21 @@ def test_to_change_handles_removed_without_file_payload() -> None:
     assert change.file_id == "f1"
     assert change.drive_id == "d"
     assert change.removed is True
+
+
+def test_mcp_refuses_to_serve_without_any_authentication(monkeypatch) -> None:
+    """키가 없으면 미들웨어가 통째로 무력화된다 — 조용히 열리지 말고 기동을 거부한다."""
+    import services.mcp_server.main as mcp_main
+
+    monkeypatch.setattr(mcp_main, "MCP_API_KEY", "")
+    monkeypatch.setattr(mcp_main, "MCP_ALLOW_NO_AUTH", False)
+    with pytest.raises(RuntimeError, match="without authentication"):
+        mcp_main.build_app()
+
+
+def test_mcp_allows_no_auth_only_as_an_explicit_opt_in(monkeypatch) -> None:
+    import services.mcp_server.main as mcp_main
+
+    monkeypatch.setattr(mcp_main, "MCP_API_KEY", "")
+    monkeypatch.setattr(mcp_main, "MCP_ALLOW_NO_AUTH", True)
+    assert mcp_main.build_app() is not None

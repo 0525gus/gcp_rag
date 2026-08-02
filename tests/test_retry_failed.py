@@ -58,7 +58,9 @@ def wire(monkeypatch):
         store = _FakeStore(docs, attempts)
         indexed: list[list[str]] = []
 
-        def fake_ingest(body):
+        # retry_failed 는 클라이언트를 run 당 하나만 만들려고 _ingest_with 를 직접
+        # 부른다(문서마다 ingest() 를 부르면 DriveClient discovery build 가 반복된다).
+        def fake_ingest(body, **_clients):
             res = ingest_results[body.file_id]
             if isinstance(res, Exception):
                 raise res
@@ -69,7 +71,10 @@ def wire(monkeypatch):
             return {"count": len(body.gcs_uris)}
 
         monkeypatch.setattr(sync_main, "DocStateStore", lambda *a, **k: store)
-        monkeypatch.setattr(sync_main, "ingest", fake_ingest)
+        monkeypatch.setattr(sync_main, "get_settings", lambda: object())
+        monkeypatch.setattr(sync_main, "GcsClient", lambda *a, **k: object())
+        monkeypatch.setattr(sync_main, "DriveClient", lambda *a, **k: object())
+        monkeypatch.setattr(sync_main, "_ingest_with", fake_ingest)
         monkeypatch.setattr(sync_main, "index_gcs", fake_index_gcs)
         return store, indexed
 

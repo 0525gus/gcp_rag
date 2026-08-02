@@ -377,10 +377,11 @@ def test_reindex_deletes_existing_chunks_before_importing(
     monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
     monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
     monkeypatch.setattr(sync_main, "RagEngineClient", _Rag)
+    monkeypatch.setattr(sync_main, "_new_storage_client", lambda _s: object())
     monkeypatch.setattr(
         sync_main,
         "_normalized_uris_for_file",
-        lambda _s, fid: [f"gs://norm/normalized/{fid}.md"],
+        lambda _s, fid, _c=None: [f"gs://norm/normalized/{fid}.md"],
     )
 
     result = sync_main.reindex_pending(sync_main.ReindexPendingBody())
@@ -426,10 +427,11 @@ def test_reindex_scans_the_corpus_only_once_for_the_whole_run(
     monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
     monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
     monkeypatch.setattr(sync_main, "RagEngineClient", _Rag)
+    monkeypatch.setattr(sync_main, "_new_storage_client", lambda _s: object())
     monkeypatch.setattr(
         sync_main,
         "_normalized_uris_for_file",
-        lambda _s, fid: [f"gs://norm/normalized/{fid}.md"],
+        lambda _s, fid, _c=None: [f"gs://norm/normalized/{fid}.md"],
     )
 
     sync_main.reindex_pending(sync_main.ReindexPendingBody(indexBatchSize=2))

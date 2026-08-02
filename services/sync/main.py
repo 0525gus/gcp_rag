@@ -282,8 +282,29 @@ class BackfillRunBody(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+# Cloud Run 요청 타임아웃(1800s)보다 넉넉히 잡되, 프로세스가 죽었을 때 다음 실행이
+# 하루 안에는 반드시 들어올 수 있어야 한다.
+_BACKFILL_LOCK_TTL_SECONDS = 3600
+
+
 @app.post("/sync/backfill-run")
 def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
+    """드라이브당 하나만 돌도록 잠근 뒤 실제 백필을 수행한다."""
+    store = DocStateStore()
+    lock_name = f"backfill:{body.drive_id}"
+    if not store.try_acquire_lock(lock_name, ttl_seconds=_BACKFILL_LOCK_TTL_SECONDS):
+        logger.warning("backfill already running drive=%s — rejecting", body.drive_id)
+        raise HTTPException(
+            status_code=409,
+            detail=f"backfill already running for drive {body.drive_id}",
+        )
+    try:
+        return _backfill_run_locked(body, store)
+    finally:
+        store.release_lock(lock_name)
+
+
+def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[str, Any]:
     """초기 전체 적재: Drive 스냅샷 → ingest(병렬) → index-gcs 배치.
 
     Workflow에 수천 개 change를 올리면 메모리 한도에 걸리므로 init은 여기서 수행.
@@ -292,7 +313,6 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     settings = get_settings()
-    store = DocStateStore()
     drive = DriveClient()
     # Firestore/Storage 클라이언트는 스레드 안전하므로 워커들이 공유한다.
     gcs = GcsClient(settings)
@@ -1371,11 +1391,22 @@ _INDEXABLE_SUFFIXES = (
 )
 
 
-def _normalized_uris_for_file(settings: Settings, file_id: str) -> list[str]:
-    """존재하는 정규화 객체 중 최초 ingest가 방출한 형식의 URI를 반환."""
+def _new_storage_client(settings: Settings) -> Any:
     from google.cloud import storage
 
-    client = storage.Client(project=settings.gcp_project_id)
+    return storage.Client(project=settings.gcp_project_id)
+
+
+def _normalized_uris_for_file(
+    settings: Settings, file_id: str, client: Any | None = None
+) -> list[str]:
+    """존재하는 정규화 객체 중 최초 ingest가 방출한 형식의 URI를 반환.
+
+    ``client`` 를 넘기면 재사용한다 — 문서마다 storage.Client 를 새로 만들면
+    복구 한 번(limit 200)에 클라이언트 200개를 생성한다.
+    """
+    if client is None:
+        client = _new_storage_client(settings)
     bucket = client.bucket(settings.gcs_normalized_bucket)
     prefix = f"normalized/{file_id}"
     uris: list[str] = []
@@ -1454,9 +1485,12 @@ def reindex_pending(body: ReindexPendingBody) -> dict[str, Any]:
         totals["indexed"] += indexed
         pending_uris, pending_ids = [], []
 
+    # 문서마다 만들면 limit 200 에 클라이언트 200개다 — run 당 하나만 쓴다.
+    storage_client = _new_storage_client(settings) if targets else None
+
     resolved: list[tuple[str, list[str]]] = []
     for doc in targets:
-        uris = _normalized_uris_for_file(settings, doc.file_id)
+        uris = _normalized_uris_for_file(settings, doc.file_id, storage_client)
         if not uris:
             totals["skippedNoUri"] += 1
             totals["failed"] += 1
@@ -1550,6 +1584,13 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
         cursor_key="retry-failed",
     )
 
+    # 문서마다 ingest() 를 부르면 그때마다 DriveClient 를 새로 만든다 — 인증 +
+    # discovery build 가 문서 수만큼 돌고, parents/name 캐시가 인스턴스 단위라
+    # 같은 폴더의 조상을 문서마다 다시 조회한다. run 당 하나씩만 만든다.
+    settings = get_settings()
+    gcs = GcsClient(settings)
+    drive = DriveClient()
+
     totals = {
         "candidates": len(targets),
         "retried": 0,
@@ -1590,7 +1631,7 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
         store.record_dlq_attempt(doc.file_id)
         totals["retried"] += 1
         try:
-            res = ingest(
+            res = _ingest_with(
                 IngestBody(
                     fileId=doc.file_id,
                     driveId=doc.drive_id,
@@ -1599,7 +1640,11 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
                     modifiedTime=doc.modified_time,
                     webViewLink=_drive_link(doc.source_uri),
                     parserUrl=body.parser_url,
-                )
+                ),
+                store=store,
+                settings=settings,
+                gcs=gcs,
+                drive=drive,
             )
         except Exception:  # noqa: BLE001
             logger.exception("retry-failed ingest raised: %s", doc.file_id)

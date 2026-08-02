@@ -32,7 +32,7 @@ gcloud run deploy "${SERVICE}" \
   --image="${IMAGE}" \
   --region="${REGION}" \
   ${AUTH_FLAG} \
-  --set-env-vars="GCP_PROJECT_ID=${PROJECT_ID},GCP_REGION=${REGION},RAG_CORPUS_NAME=${RAG_CORPUS_NAME:?set RAG_CORPUS_NAME},GCS_RAW_BUCKET=${GCS_RAW_BUCKET:-unused},GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET:-unused},MCP_API_KEY=${MCP_API_KEY},MCP_TRANSPORT=streamable-http,TOP_K_DEFAULT=${TOP_K_DEFAULT:-5}" \
+  --set-env-vars="GCP_PROJECT_ID=${PROJECT_ID},GCP_REGION=${REGION},RAG_CORPUS_NAME=${RAG_CORPUS_NAME:?set RAG_CORPUS_NAME},GCS_RAW_BUCKET=${GCS_RAW_BUCKET:-unused},GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET:-unused},MCP_API_KEY=${MCP_API_KEY},TOP_K_DEFAULT=${TOP_K_DEFAULT:-5}" \
   --memory=1Gi --cpu=1 --timeout=60 --concurrency=40
 
 MCP_URL=$(gcloud run services describe "${SERVICE}" --region="${REGION}" --format='value(status.url)')

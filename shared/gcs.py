@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from google.cloud import storage
 
 from shared.config import Settings, get_settings
@@ -41,14 +39,6 @@ class GcsClient:
         bucket_name, blob_name = parse_gs_uri(uri)
         blob = self._client.bucket(bucket_name).blob(blob_name)
         return blob.download_as_bytes()
-
-    def download_to_path(self, uri: str, path: str | Path) -> Path:
-        dest = Path(path)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        bucket_name, blob_name = parse_gs_uri(uri)
-        blob = self._client.bucket(bucket_name).blob(blob_name)
-        blob.download_to_filename(str(dest))
-        return dest
 
     def upload_bytes(
         self,

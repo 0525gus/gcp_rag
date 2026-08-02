@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from google.cloud import firestore
@@ -109,10 +109,6 @@ class DocStateStore:
             return True
         return change_modified_time > existing.modified_time
 
-    def content_unchanged(self, file_id: str, content_hash: str) -> bool:
-        existing = self.get(file_id)
-        return bool(existing and existing.content_hash == content_hash)
-
     def should_skip_reindex(self, file_id: str, content_hash: str) -> bool:
         """색인 스킵 판단: 내용이 같고 '이미 INDEXED' 인 경우에만 True.
 
@@ -144,6 +140,45 @@ class DocStateStore:
             },
             merge=True,
         )
+
+    # --- 단일 실행 잠금 ---
+
+    def try_acquire_lock(self, name: str, *, ttl_seconds: int) -> bool:
+        """이미 살아 있는 잠금이 없을 때만 잡는다. 트랜잭션으로 경합을 막는다.
+
+        워크플로우 스텝 타임아웃이 Cloud Run 요청 타임아웃보다 짧으면, 워크플로우가
+        포기한 뒤에도 서버는 계속 돌고 그 위에 재시도가 새 요청을 얹는다 — 같은
+        드라이브에 백필이 둘 돈다. 타임아웃을 정렬해도 수동 실행·스케줄러 중복은
+        남으므로 서버가 스스로 막는다.
+
+        ``ttl_seconds`` 는 프로세스가 죽어 release 를 못 했을 때 영구 잠김을 막는
+        안전판이다. 정상 종료는 release_lock 이 즉시 푼다.
+        """
+        ref = self._tokens.document(f"__lock__{name}")
+        now = datetime.now(timezone.utc)
+        expires = now + timedelta(seconds=ttl_seconds)
+
+        @firestore.transactional
+        def _acquire(txn: Any) -> bool:
+            snap = ref.get(transaction=txn)
+            if snap.exists:
+                held = (snap.to_dict() or {}).get("expiresAt")
+                if held is not None and held > now:
+                    return False
+            txn.set(
+                ref,
+                {"name": name, "acquiredAt": now, "expiresAt": expires},
+            )
+            return True
+
+        return bool(_acquire(self._db.transaction()))
+
+    def release_lock(self, name: str) -> None:
+        try:
+            self._tokens.document(f"__lock__{name}").delete()
+        except Exception:
+            # 놓지 못해도 TTL 이 만료시킨다 — 본 작업 결과를 뒤집지는 않는다.
+            logger.exception("failed to release lock: %s", name)
 
     def list_by_status(
         self,

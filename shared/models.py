@@ -124,21 +124,6 @@ class DocState:
 
 
 @dataclass
-class ParseRequest:
-    gcs_uri: str
-    mime_type: str
-    file_id: str
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ParseRequest:
-        return cls(
-            gcs_uri=data.get("gcsUri") or data["gcs_uri"],
-            mime_type=data.get("mimeType") or data["mime_type"],
-            file_id=data.get("fileId") or data["file_id"],
-        )
-
-
-@dataclass
 class ParseResult:
     gcs_markdown_uri: str
     route: ParseRoute

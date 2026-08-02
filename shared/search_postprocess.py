@@ -67,21 +67,6 @@ def unescape_chunk_text(text: str) -> str:
     return out.strip()
 
 
-def distance_to_relevance(raw_score: float) -> float:
-    """(사용 안 함) 거리 → relevance 변환.
-
-    score 가 거리인지 유사도인지 추측해 뒤집는 방식이라, 유사도였을 경우
-    순위를 정확히 거꾸로 만든다. 순위는 Vertex 가 준 순서를 그대로 쓰므로
-    더 이상 정렬에 쓰지 않는다. 점수 의미가 확정되면 그때 다시 검토할 것.
-    """
-    s = float(raw_score)
-    if s < 0:
-        return 0.0
-    if s > 1.5:
-        return min(s / 10.0, 1.0) if s > 10 else min(s, 1.0)
-    return 1.0 / (1.0 + s)
-
-
 def _text_fingerprint(text: str, n: int = 180) -> str:
     t = re.sub(r"\s+", " ", (text or "").lower()).strip()
     return t[:n]

@@ -10,7 +10,6 @@ COPY services /app/services
 
 ENV PYTHONPATH=/app
 ENV PORT=8080
-ENV MCP_TRANSPORT=streamable-http
 
 EXPOSE 8080
 CMD ["python", "-m", "services.mcp_server.main"]

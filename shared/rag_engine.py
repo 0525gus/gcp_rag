@@ -158,39 +158,12 @@ class RagEngineClient:
                 raise
         raise RuntimeError(f"RAG import failed after retries: {last_err}")
 
-    def import_drive_files(
-        self,
-        drive_folder_or_file_ids: list[str],
-        *,
-        chunk_size: int = 512,
-        chunk_overlap: int = 100,
-    ) -> Any:
-        """네이티브 Drive 커넥터 경로 (기타 지원 포맷)."""
-        transformation = rag.TransformationConfig(
-            chunking_config=rag.ChunkingConfig(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-            )
-        )
-        return rag.import_files(
-            self.corpus_name,
-            drive_folder_or_file_ids,
-            transformation_config=transformation,
-        )
-
     def list_files(self) -> list[Any]:
         return list(
             _with_throttle_retry(
                 lambda: rag.list_files(corpus_name=self.corpus_name), what="list_files"
             )
         )
-
-    def find_rag_file_by_display_name(self, display_name: str) -> Any | None:
-        for f in self.list_files():
-            name = getattr(f, "display_name", "") or ""
-            if name == display_name or display_name in name:
-                return f
-        return None
 
     def delete_by_file_id(self, file_id: str) -> bool:
         """fileId 기반 청크 제거 (display_name / 메타데이터 매칭)."""

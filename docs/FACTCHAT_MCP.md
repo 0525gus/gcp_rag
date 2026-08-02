@@ -172,6 +172,6 @@ SaaS 도 있고, 그러면 allowlist 자체가 불가능하다. 이것부터 확
 
 ## 참고
 
-- Transport: Streamable HTTP (`MCP_TRANSPORT=streamable-http`)
+- Transport: Streamable HTTP (코드에 고정 — 설정으로 바꾸지 않는다)
 - 리전: `asia-northeast3`
 - parser/sync는 이 연동에 **필수 아님** (색인 데이터가 있을 때 MCP만으로 검색 가능)

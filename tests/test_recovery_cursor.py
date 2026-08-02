@@ -160,12 +160,16 @@ def test_retry_failed_moves_past_exhausted_first_page(monkeypatch) -> None:
     )
     ingested: list[str] = []
 
-    def fake_ingest(body: Any) -> dict[str, str]:
+    def fake_ingest(body: Any, **_clients: Any) -> dict[str, str]:
         ingested.append(body.file_id)
         return {"status": "SKIPPED"}
 
     monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
-    monkeypatch.setattr(sync_main, "ingest", fake_ingest)
+    # retry_failed 는 클라이언트를 run 당 하나만 만들려고 _ingest_with 를 직접 부른다.
+    monkeypatch.setattr(sync_main, "get_settings", lambda: object())
+    monkeypatch.setattr(sync_main, "GcsClient", lambda *a, **k: object())
+    monkeypatch.setattr(sync_main, "DriveClient", lambda *a, **k: object())
+    monkeypatch.setattr(sync_main, "_ingest_with", fake_ingest)
 
     first = retry_failed(RetryFailedBody(limit=2, maxAttempts=3))
     second = retry_failed(RetryFailedBody(limit=2, maxAttempts=3))
@@ -193,10 +197,13 @@ def test_reindex_pending_moves_past_no_uri_first_page(monkeypatch) -> None:
     monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
     monkeypatch.setattr(sync_main, "get_settings", lambda: object())
     monkeypatch.setattr(sync_main, "RagEngineClient", FakeRag)
+    monkeypatch.setattr(sync_main, "_new_storage_client", lambda _s: object())
     monkeypatch.setattr(
         sync_main,
         "_normalized_uris_for_file",
-        lambda settings, file_id: ["gs://bucket/f3.pdf"] if file_id == "f3" else [],
+        lambda settings, file_id, _c=None: (
+            ["gs://bucket/f3.pdf"] if file_id == "f3" else []
+        ),
     )
 
     first = reindex_pending(ReindexPendingBody(limit=2))
