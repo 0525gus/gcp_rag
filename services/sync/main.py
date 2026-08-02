@@ -1587,9 +1587,10 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
     # 문서마다 ingest() 를 부르면 그때마다 DriveClient 를 새로 만든다 — 인증 +
     # discovery build 가 문서 수만큼 돌고, parents/name 캐시가 인스턴스 단위라
     # 같은 폴더의 조상을 문서마다 다시 조회한다. run 당 하나씩만 만든다.
-    settings = get_settings()
-    gcs = GcsClient(settings)
-    drive = DriveClient()
+    # 회수할 게 없는 날(대부분)에는 아예 만들지 않는다.
+    settings = get_settings() if targets else None
+    gcs = GcsClient(settings) if targets else None
+    drive = DriveClient() if targets else None
 
     totals = {
         "candidates": len(targets),

@@ -212,3 +212,27 @@ def test_reindex_pending_moves_past_no_uri_first_page(monkeypatch) -> None:
     assert first["totals"]["skippedNoUri"] == 2
     assert second["totals"]["withUris"] == 1
     assert imported == ["gs://bucket/f3.pdf"]
+
+
+def test_retry_failed_builds_no_clients_when_there_is_nothing_to_retry(
+    monkeypatch,
+) -> None:
+    """회수할 문서가 없는 날(대부분)에 인증 + discovery build 를 치르면 안 된다."""
+    built: list[str] = []
+
+    class _EmptyStore:
+        def list_by_status(self, *_a, **_k):
+            return []
+
+    def _boom(*_a, **_k):
+        built.append("client")
+        raise AssertionError("대상이 없는데 클라이언트를 만들었다")
+
+    monkeypatch.setattr(sync_main, "DocStateStore", lambda: _EmptyStore())
+    monkeypatch.setattr(sync_main, "DriveClient", _boom)
+    monkeypatch.setattr(sync_main, "GcsClient", _boom)
+
+    res = retry_failed(RetryFailedBody())
+
+    assert built == []
+    assert res["totals"]["candidates"] == 0

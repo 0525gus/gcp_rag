@@ -50,15 +50,17 @@ gcloud run deploy rag-parser \
   --set-env-vars="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_REGION=${REGION}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|DOCAI_PROCESSOR_ID=${DOCAI_PROCESSOR_ID:-}|QG_MODE=${QG_MODE:-log}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}" \
   --memory=2Gi --cpu=2 --timeout=600
 
-# --timeout 은 워크플로우가 sync 에 거는 가장 긴 스텝(backfill-run/retry-failed
-# = 1800s) 이하여야 한다. 서버가 더 길면 워크플로우가 포기한 뒤에도 요청이 살아
-# 있고, 그 위에 재시도가 새 요청을 얹어 같은 드라이브에 백필이 두 개 돈다.
+# --timeout 을 워크플로우 스텝(1800s)에 맞추면 안 된다. backfill-run 은 끝에서
+# 스스로 pageToken 을 커밋하므로, 워크플로우가 1800s 에 포기해도 서버가 2500s 에
+# 끝내면 그 작업은 유효하게 남는다. 서버를 1800s 로 깎으면 30분을 넘기는 드라이브는
+# 매번 중간에 죽어 토큰을 못 남기고 — 다음 실행도 같은 지점에서 죽어 영영 못 끝낸다.
+# 중복 실행은 타임아웃 정렬이 아니라 backfill-run 의 단일 실행 잠금이 막는다.
 gcloud run deploy rag-sync \
   --image="${IMAGE_BASE}/sync:latest" \
   --region="${REGION}" \
   --no-allow-unauthenticated \
   --set-env-vars="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_REGION=${REGION}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|DRIVE_IDS=${DRIVE_IDS}|SYNC_FOLDER_IDS=${SYNC_FOLDER_IDS:-}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|QG_MODE=${QG_MODE:-log}|RAW_UPLOAD_CONCURRENCY=${RAW_UPLOAD_CONCURRENCY:-8}" \
-  --memory=2Gi --cpu=2 --timeout=1800
+  --memory=2Gi --cpu=2 --timeout=3600
 
 # Cursor 등 IAM ID 토큰용. FactChat 커넥터는 scripts/deploy_mcp.ps1 (공개 URL + MCP_API_KEY) 사용.
 gcloud run deploy rag-mcp \
