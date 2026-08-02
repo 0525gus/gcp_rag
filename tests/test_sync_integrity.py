@@ -121,7 +121,7 @@ def test_backfill_index_failure_is_counted_and_token_is_not_committed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _wire_backfill(monkeypatch)
-    # 백필은 사전 일괄 삭제 후 _import_and_mark 로 직접 import 한다.
+    # 백필은 배치마다 _import_and_mark 로 (삭제 → import) 를 함께 수행한다.
     monkeypatch.setattr(
         sync_main,
         "_import_and_mark",
@@ -143,7 +143,7 @@ def test_backfill_commits_candidate_only_after_complete_index(
 ) -> None:
     store = _wire_backfill(monkeypatch)
     monkeypatch.setattr(
-        sync_main, "_import_and_mark", lambda _store, uris, _ids: list(uris)
+        sync_main, "_import_and_mark", lambda _store, uris, _ids, **_k: list(uris)
     )
 
     result = sync_main.backfill_run(
@@ -152,6 +152,44 @@ def test_backfill_commits_candidate_only_after_complete_index(
 
     assert result["ok"] is True
     assert store.committed == [("drive", "candidate-token")]
+
+
+def test_backfill_does_not_delete_chunks_of_documents_it_will_not_reimport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """재백필에서 UNCHANGED 로 빠지는 문서의 청크를 지우면 그대로 유실된다.
+
+    스냅샷 전체를 미리 지우던 시절, 3천 건 재백필은 코퍼스를 비우고도
+    totals.unchanged 로 세어 ok=true 로 보고했다 — ERROR 로그 한 줄 없이.
+    """
+    deleted: list[list[str]] = []
+    imported: list[list[str]] = []
+
+    class _Rag:
+        def delete_files_by_ids(self, file_ids: list[str]) -> int:
+            deleted.append(sorted(file_ids))
+            return len(file_ids)
+
+        def import_from_gcs(self, uris: list[str]) -> list[str]:
+            imported.append(list(uris))
+            return list(uris)
+
+    store = _BackfillStore()
+    monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
+    monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
+    monkeypatch.setattr(sync_main, "DriveClient", _BackfillDrive)
+    monkeypatch.setattr(sync_main, "GcsClient", lambda _s=None: object())
+    monkeypatch.setattr(sync_main, "RagEngineClient", _Rag)
+    # 이미 INDEXED 이고 modifiedTime 이 그대로면 ingest 는 UNCHANGED 를 돌려준다.
+    monkeypatch.setattr(
+        sync_main, "_ingest_with", lambda body, **_c: {"status": "UNCHANGED"}
+    )
+
+    result = sync_main.backfill_run(sync_main.BackfillRunBody(driveId="drive"))
+
+    assert deleted == [], "재import 하지 않을 문서의 청크를 지웠다"
+    assert imported == []
+    assert result["totals"]["unchanged"] == 3
 
 
 def _rag_client() -> RagEngineClient:

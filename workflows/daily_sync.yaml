@@ -291,6 +291,17 @@ main:
                                         parserUrl: ${parser_url}
                                       timeout: 120
                                     result: skip_resp
+                                  # 범위 밖 파일의 정리는 fail closed(500)라 일시적
+                                  # 오류도 실패로 온다. 재시도가 없으면 그 1건이
+                                  # drive_failed 를 세워 pageToken 을 영구 미커밋으로
+                                  # 굳히고, 다음 실행이 같은 페이지를 다시 받는다.
+                                  retry:
+                                    predicate: ${http.default_retry_predicate}
+                                    max_retries: 3
+                                    backoff:
+                                      initial_delay: 2
+                                      max_delay: 30
+                                      multiplier: 2
                                   except:
                                     as: skip_err
                                     steps:
@@ -298,6 +309,11 @@ main:
                                           assign:
                                             - drive_failed: ${drive_failed + 1}
                                             - totals.failed: ${totals.failed + 1}
+                                      - skip_log:
+                                          call: sys.log
+                                          args:
+                                            severity: "ERROR"
+                                            text: ${"skip/ingest failed fileId=" + change.fileId + " " + json.encode_to_string(skip_err)}
                                       - skip_continue:
                                           next: process_each_end
                               - skip_ok:

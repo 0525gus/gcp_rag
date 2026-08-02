@@ -393,16 +393,30 @@ def test_reindex_deletes_existing_chunks_before_importing(
 def test_reindex_scans_the_corpus_only_once_for_the_whole_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 배치마다 지우면 코퍼스를 배치 수만큼 전수 순회한다.
+    """삭제는 배치마다(지우는 집합 = 넣는 집합), 코퍼스 순회는 run 당 1회.
+
+    미리 전체를 지우면 뒤 배치가 실패했을 때 그 문서가 청크 없이 남는다. 그렇다고
+    배치마다 코퍼스를 새로 순회하면 배치 수만큼 전수 순회가 붙는다. 클라이언트를
+    공유해 첫 순회 스냅샷을 재사용하는 것으로 둘 다 만족시킨다.
+    """
     docs = [
         DocState(file_id=f"f{i}", drive_id="d", status=DocStatus.PARSED)
         for i in range(6)
     ]
     store = _StaleStore(docs)
     deletes: list[list[str]] = []
+    scans: list[int] = []
 
     class _Rag:
+        """실제 RagEngineClient 처럼 첫 삭제에서만 코퍼스를 순회한다."""
+
+        def __init__(self) -> None:
+            self._scanned = False
+
         def delete_files_by_ids(self, file_ids: list[str]) -> int:
+            if not self._scanned:
+                self._scanned = True
+                scans.append(1)
             deletes.append(sorted(file_ids))
             return len(file_ids)
 
@@ -420,5 +434,6 @@ def test_reindex_scans_the_corpus_only_once_for_the_whole_run(
 
     sync_main.reindex_pending(sync_main.ReindexPendingBody(indexBatchSize=2))
 
-    assert len(deletes) == 1, f"코퍼스를 {len(deletes)}회 순회했다 — 1회여야 한다"
-    assert deletes[0] == sorted(f"f{i}" for i in range(6))
+    assert len(scans) == 1, f"코퍼스를 {len(scans)}회 순회했다 — 1회여야 한다"
+    # 삭제는 배치 단위로, 그 배치가 import 할 파일만 대상으로.
+    assert deletes == [["f0", "f1"], ["f2", "f3"], ["f4", "f5"]]

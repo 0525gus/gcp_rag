@@ -43,7 +43,31 @@ class RagImportError(RuntimeError):
         super().__init__(f"RAG import incomplete: {detail}")
 
 
+def _with_throttle_retry(fn: Any, *, what: str, max_retries: int = 5) -> Any:
+    """RPM 초과(429)만 지수 백오프로 재시도한다.
+
+    import 에만 재시도가 걸려 있었다. list/delete 는 배치 하나가 수십 번 부르는데도
+    무방비라, 쿼터를 넘기면 그대로 호출측까지 튀어 500 이 되고 — SKIP 분기처럼
+    워크플로우 재시도가 없는 경로에서는 pageToken 이 영구 미커밋으로 굳는다.
+    """
+    delay = 1.0
+    last: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except gcp_exceptions.ResourceExhausted as exc:
+            last = exc
+            logger.warning("RAG %s throttled (attempt %s): %s", what, attempt + 1, exc)
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+    raise RuntimeError(f"RAG {what} failed after {max_retries} retries: {last}")
+
+
 class RagEngineClient:
+    # 코퍼스 스냅샷 {fileId: [ragFile resourceName]}. 클래스 속성으로 두면
+    # object.__new__ 로 만든 인스턴스(테스트)에서도 안전하게 읽힌다.
+    _file_index: dict[str, list[str]] | None = None
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         vertexai.init(
@@ -155,7 +179,11 @@ class RagEngineClient:
         )
 
     def list_files(self) -> list[Any]:
-        return list(rag.list_files(corpus_name=self.corpus_name))
+        return list(
+            _with_throttle_retry(
+                lambda: rag.list_files(corpus_name=self.corpus_name), what="list_files"
+            )
+        )
 
     def find_rag_file_by_display_name(self, display_name: str) -> Any | None:
         for f in self.list_files():
@@ -172,25 +200,45 @@ class RagEngineClient:
         """여러 fileId를 코퍼스 1회 순회로 일괄 제거.
 
         파일마다 list_files()를 부르면 O(N×코퍼스)라 코퍼스가 커질수록 느리고
-        list RPM을 소모한다. 여기서는 list_files()를 한 번만 호출한다.
+        list RPM을 소모한다. **인스턴스 하나를 재사용하면** 첫 호출에서 뜬 스냅샷을
+        이후 호출이 그대로 쓰므로, 배치를 몇 번 돌든 순회는 1회로 끝난다.
+
+        스냅샷이 스테일해지지 않는 근거: 한 run 안에서 같은 파일을 두 번 import
+        하지 않는다. 따라서 '이번에 지워야 할 기존 청크'는 전부 첫 순회 시점에
+        이미 존재하고, run 중 새로 들어간 청크는 애초에 삭제 대상이 아니다.
         """
         wanted = {fid for fid in file_ids if fid}
         if not wanted:
             return 0
+        if self._file_index is None:
+            self._file_index = self._snapshot_file_index()
         deleted = 0
+        for fid in wanted:
+            # pop: 같은 fileId 를 다시 지우라고 해도 이미 지운 것은 건너뛴다.
+            for resource_name in self._file_index.pop(fid, []):
+                _with_throttle_retry(
+                    lambda name=resource_name: rag.delete_file(name=name),
+                    what="delete_file",
+                )
+                deleted += 1
+                logger.info("Deleted RAG file: %s (%s)", resource_name, fid)
+        return deleted
+
+    def _snapshot_file_index(self) -> dict[str, list[str]]:
+        """코퍼스를 한 번 순회해 {fileId: [resourceName]} 으로 접는다."""
+        index: dict[str, list[str]] = {}
         for f in self.list_files():
-            display = getattr(f, "display_name", "") or ""
-            source_uri = getattr(f, "source_uri", None)
             resource_name = getattr(f, "name", None)
             if not resource_name:
                 continue
-            # GCS display name/URI에서 확장자를 제거한 정확한 fileId만 삭제한다.
+            display = getattr(f, "display_name", "") or ""
+            source_uri = getattr(f, "source_uri", None)
+            # GCS display name/URI에서 확장자를 제거한 정확한 fileId만 키로 쓴다.
             # 부분문자열 비교는 f1 삭제 시 f10까지 지우는 조용한 유실을 만든다.
-            if extract_file_id(display, source_uri) in wanted:
-                rag.delete_file(name=resource_name)
-                deleted += 1
-                logger.info("Deleted RAG file: %s (%s)", resource_name, display)
-        return deleted
+            index.setdefault(extract_file_id(display, source_uri), []).append(
+                resource_name
+            )
+        return index
 
     def retrieve(
         self,

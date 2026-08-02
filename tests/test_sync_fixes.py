@@ -86,6 +86,34 @@ def test_delete_files_by_ids_single_list(monkeypatch) -> None:
     assert set(calls["deleted"]) == {"rn1", "rn2", "rn3"}
 
 
+def test_shared_client_scans_the_corpus_once_across_batches(monkeypatch) -> None:
+    """배치마다 지우되(지우는 집합 = 넣는 집합) 순회는 첫 배치에서 한 번만."""
+    client = object.__new__(RagEngineClient)
+    calls = {"list": 0, "deleted": []}
+
+    def fake_list() -> list[_FakeRagFile]:
+        calls["list"] += 1
+        return [
+            _FakeRagFile("f1.md", "rn1"),
+            _FakeRagFile("f2.pdf", "rn2"),
+            _FakeRagFile("f3.md", "rn3"),
+        ]
+
+    client.list_files = fake_list  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        rag_engine.rag, "delete_file", lambda name: calls["deleted"].append(name)
+    )
+
+    assert client.delete_files_by_ids(["f1"]) == 1
+    assert client.delete_files_by_ids(["f2"]) == 1
+    assert client.delete_files_by_ids(["f3"]) == 1
+    assert calls["list"] == 1
+    assert calls["deleted"] == ["rn1", "rn2", "rn3"]
+    # 이미 지운 파일을 다시 지우라고 해도 재순회하지 않는다.
+    assert client.delete_files_by_ids(["f1"]) == 0
+    assert calls["list"] == 1
+
+
 def test_delete_files_by_ids_empty(monkeypatch) -> None:
     client = object.__new__(RagEngineClient)
 
@@ -157,6 +185,9 @@ def test_ingest_out_of_scope_returns_uppercase_skipped(monkeypatch) -> None:
         sync_folder_id_list = ["folderX"]
 
     class FakeStore:
+        def get(self, _file_id):
+            return None
+
         def upsert(self, *a, **k) -> None:
             pass
 

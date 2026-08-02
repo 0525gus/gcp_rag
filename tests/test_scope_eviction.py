@@ -172,6 +172,54 @@ def test_missing_state_still_cleans_orphaned_scope_artifacts(monkeypatch) -> Non
     assert rag_calls == ["f1"]
 
 
+def test_already_evicted_file_does_not_rescan_the_corpus(monkeypatch) -> None:
+    """정리를 마친 범위 밖 파일이 다시 델타에 실려도 코퍼스를 또 순회하지 않는다.
+
+    delete_by_file_id 는 파일 하나를 찾으려고 코퍼스를 전수 순회한다. 범위 밖
+    파일은 바뀔 때마다 델타에 다시 오므로, 생략하지 않으면 그 비용이 매 실행
+    반복되고 대량 변경 시 list 쿼터를 넘겨 SKIP 분기를 실패시킨다.
+    """
+    gcs = _FakeGcs({"normalized-bucket": [], "raw-bucket": []})
+    store = _FakeStore(
+        DocState(
+            file_id="f1",
+            drive_id="drive-1",
+            status=DocStatus.SKIPPED,
+            error="out_of_folder_scope",
+        )
+    )
+    rag_calls: list[str] = []
+    _patch_ingest_dependencies(
+        monkeypatch, store=store, gcs=gcs, rag=_FakeRag(rag_calls)
+    )
+
+    result = ingest(_body())
+
+    assert result["status"] == "SKIPPED"
+    assert result["cleanupSkipped"] is True
+    assert rag_calls == []
+    assert gcs._client.calls == []
+
+
+def test_skipped_for_another_reason_still_cleans_the_corpus(monkeypatch) -> None:
+    """SKIPPED 만으로 생략하면 안 된다 — 미지원 MIME 로 바뀐 문서는 청크가 남는다."""
+    blob = _FakeBlob("normalized/f1.pdf")
+    gcs = _FakeGcs({"normalized-bucket": [blob], "raw-bucket": []})
+    store = _FakeStore(
+        DocState(file_id="f1", drive_id="drive-1", status=DocStatus.SKIPPED)
+    )
+    rag_calls: list[str] = []
+    _patch_ingest_dependencies(
+        monkeypatch, store=store, gcs=gcs, rag=_FakeRag(rag_calls)
+    )
+
+    result = ingest(_body())
+
+    assert result["status"] == "SKIPPED"
+    assert rag_calls == ["f1"]
+    assert blob.deleted is True
+
+
 def test_rag_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) -> None:
     blob = _FakeBlob("normalized/f1.pdf")
     gcs = _FakeGcs({"normalized-bucket": [blob], "raw-bucket": []})

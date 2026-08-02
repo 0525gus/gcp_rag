@@ -321,17 +321,18 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
     pending_ids: list[str] = []
     lock = threading.Lock()
 
-    # 기존 청크를 배치마다 지우면 코퍼스를 배치 수만큼 전수 순회한다
-    # (3000개 · batch 10 → 300회). run 시작 시 한 번만 지운다.
-    if changes:
-        RagEngineClient().delete_files_by_ids([c["fileId"] for c in changes])
+    # 스냅샷 전체를 미리 지우면 안 된다. 재백필에서는 대부분의 파일이 UNCHANGED 로
+    # 빠져 재import 되지 않으므로, 미리 지운 청크가 그대로 유실된다 — 그러고도
+    # totals 는 unchanged 로 세고 ok=true 로 보고했다. 삭제는 import 하는 배치에서만
+    # 한다(_import_and_mark). 클라이언트를 공유해 코퍼스 순회는 1회로 유지한다.
+    rag = RagEngineClient()
 
     def flush_index() -> None:
         nonlocal pending_uris, pending_ids
         if not pending_uris:
             return
         uris, ids = pending_uris, pending_ids
-        indexed = len(_import_and_mark(store, uris, ids))
+        indexed = len(_import_and_mark(store, uris, ids, rag=rag))
         totals["indexed"] += indexed
         pending_uris, pending_ids = [], []
 
@@ -529,6 +530,21 @@ def commit_token(body: CommitTokenBody) -> dict[str, str]:
 
 
 _OUT_OF_SCOPE_CLEANUP_ERROR = "out_of_folder_scope_cleanup_failed"
+_OUT_OF_SCOPE_REASON = "out_of_folder_scope"
+
+
+def _already_evicted(existing: DocState | None) -> bool:
+    """이 파일의 범위 밖 정리가 이미 성공적으로 끝났는가.
+
+    ``SKIPPED`` 만으로는 판단할 수 없다 — 지원하지 않는 MIME 으로 바뀐 문서도
+    코퍼스에 청크를 남긴 채 SKIPPED 가 된다. 정리를 마친 뒤에만 찍히는
+    ``error=out_of_folder_scope`` 마커까지 맞을 때만 생략한다.
+    """
+    return bool(
+        existing
+        and existing.status == DocStatus.SKIPPED
+        and (existing.error or "") == _OUT_OF_SCOPE_REASON
+    )
 
 
 def _delete_gcs_prefix_for_file(gcs: GcsClient, bucket: str, prefix: str) -> int:
@@ -636,6 +652,19 @@ def _ingest_with(
         rag_deleted = False
         normalized_deleted = 0
         raw_deleted = 0
+        if _already_evicted(store.get(body.file_id)):
+            # 이미 이 사유로 정리를 마친 파일이다. 다시 부르면 코퍼스를 파일마다
+            # 전수 순회하는데(정리할 것도 없이), 범위 밖 파일은 바뀔 때마다 델타에
+            # 다시 실려 오므로 그 비용이 매 실행 반복된다.
+            return {
+                "fileId": body.file_id,
+                "status": DocStatus.SKIPPED.value,
+                "reason": _OUT_OF_SCOPE_REASON,
+                "ragDeleted": False,
+                "normalizedDeleted": 0,
+                "rawDeleted": 0,
+                "cleanupSkipped": True,
+            }
         try:
             rag_deleted, normalized_deleted, raw_deleted = (
                 _cleanup_out_of_scope_file(gcs, settings, body.file_id)
@@ -673,7 +702,7 @@ def _ingest_with(
                 status=DocStatus.SKIPPED,
                 parse_route=ParseRoute.NONE,
                 source_uri=body.web_view_link,
-                error="out_of_folder_scope",
+                error=_OUT_OF_SCOPE_REASON,
             )
         )
         return {
@@ -1234,14 +1263,27 @@ def _ext_for_mime(mime: str | None) -> str:
 
 
 def _import_and_mark(
-    store: DocStateStore, gcs_uris: list[str], file_ids: list[str]
+    store: DocStateStore,
+    gcs_uris: list[str],
+    file_ids: list[str],
+    *,
+    rag: Any | None = None,
 ) -> list[str]:
-    """import 후 성공한 것만 INDEXED 로 전환. 기존 청크 삭제는 호출측 책임.
+    """이번 배치의 기존 청크만 제거 → import → 성공분만 INDEXED 로 전환.
 
-    삭제를 배치마다 돌리면 코퍼스를 배치 수만큼 전수 순회한다 — 대량 경로는
-    run 시작 시 한 번만 일괄 삭제하고 여기서는 import 만 한다.
+    **삭제 대상은 반드시 이번에 import 할 파일과 같아야 한다.** 실행 시작 시
+    전체를 미리 지우면, 중간에 UNCHANGED 로 빠져 재import 되지 않는 문서까지
+    코퍼스에서 사라진다(백필이 정상 코퍼스를 비우고 성공으로 보고했다).
+    삭제를 import 바로 앞에 두면 지우는 집합과 넣는 집합이 정의상 같아진다.
+
+    ``rag`` 를 넘겨 **run 전체가 클라이언트 하나를 공유**하면 코퍼스 순회는
+    첫 배치에서 한 번만 일어난다(RagEngineClient.delete_files_by_ids 참고).
+    넘기지 않으면 이 호출만의 클라이언트를 쓴다.
     """
-    imported = RagEngineClient().import_from_gcs(gcs_uris)
+    client = rag if rag is not None else RagEngineClient()
+    # 삭제 실패 뒤 import 를 계속하면 이전 청크와 새 청크가 함께 남으므로 fail closed.
+    client.delete_files_by_ids(list(dict.fromkeys(file_ids)))
+    imported = client.import_from_gcs(gcs_uris)
     if len(imported) != len(gcs_uris):
         raise RuntimeError(
             "RAG import result mismatch: "
@@ -1266,11 +1308,8 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
         return {"imported": [], "count": 0, "status": "EMPTY"}
 
     store = DocStateStore()
-
-    # upsert: 동일 fileId 기존 청크 제거 후 import (코퍼스 1회 순회로 일괄 삭제).
-    # 삭제 실패 뒤 import를 계속하면 이전 청크와 새 청크가 함께 남으므로 fail closed.
-    RagEngineClient().delete_files_by_ids(body.file_ids)
-
+    # 기존 청크 제거는 _import_and_mark 안에서 import 바로 앞에 한다. 여기서 한 번
+    # 더 지우면 같은 배치에 코퍼스를 두 번 순회하게 된다.
     imported = _import_and_mark(store, body.gcs_uris, body.file_ids)
     return {"imported": imported, "count": len(imported), "status": "INDEXED"}
 
@@ -1370,14 +1409,16 @@ def reindex_pending(body: ReindexPendingBody) -> dict[str, Any]:
         "failed": 0,
     }
 
+    # run 전체가 공유 → 코퍼스 순회는 첫 배치에서 1회.
+    rag = RagEngineClient()
+
     def flush() -> None:
         nonlocal pending_uris, pending_ids
         if not pending_uris:
             return
         uris, ids = pending_uris, pending_ids
         uniq_ids = list(dict.fromkeys(ids))
-        # 기존 청크는 아래에서 일괄 제거했으므로 여기서는 import 만 한다.
-        indexed = len(_import_and_mark(store, uris, uniq_ids))
+        indexed = len(_import_and_mark(store, uris, uniq_ids, rag=rag))
         for fid in uniq_ids:
             try:
                 store.clear_dlq(fid)
@@ -1412,13 +1453,12 @@ def reindex_pending(body: ReindexPendingBody) -> dict[str, Any]:
         totals["withUris"] += 1
         resolved.append((doc.file_id, uris))
 
-    # 기존 청크 일괄 제거 — 코퍼스를 1회만 순회한다.
-    # 생략하면 '과거 INDEXED → 재파싱 → 색인 실패' 문서에서 Vertex 가 같은 파일을
-    # skip 하고, import_from_gcs 는 skipped 를 성공으로 세므로 구버전 내용인 채
-    # INDEXED 로 확정된다(조용한 스테일). 배치마다 지우는 것보다 오히려 빠르다.
-    if resolved:
-        RagEngineClient().delete_files_by_ids([fid for fid, _ in resolved])
-
+    # 기존 청크 제거는 배치마다 _import_and_mark 가 한다 — 지우는 집합과 넣는
+    # 집합이 항상 같아야 하기 때문이다. 여기서 resolved 전체를 미리 지우면 뒤에서
+    # 플러시가 실패한 배치의 문서가 청크 없이 남는다.
+    # 삭제 자체를 생략해선 안 된다: '과거 INDEXED → 재파싱 → 색인 실패' 문서에서
+    # Vertex 가 같은 파일을 skip 하고, import_from_gcs 는 skipped 를 성공으로 세므로
+    # 구버전 내용인 채 INDEXED 로 확정된다(조용한 스테일).
     for file_id, uris in resolved:
         pending_uris.extend(uris)
         pending_ids.extend([file_id] * len(uris))

@@ -213,7 +213,7 @@ def test_backfill_reuses_one_drive_client_per_worker(
     monkeypatch.setattr(
         sync_main, "RagEngineClient", lambda: type("R", (), {"delete_files_by_ids": lambda _s, _i: 0})()
     )
-    monkeypatch.setattr(sync_main, "_import_and_mark", lambda _s, uris, _i: list(uris))
+    monkeypatch.setattr(sync_main, "_import_and_mark", lambda _s, uris, _i, **_k: list(uris))
     monkeypatch.setattr(
         sync_main,
         "_ingest_with",
@@ -253,17 +253,35 @@ def test_backfill_scans_the_corpus_only_once(monkeypatch: pytest.MonkeyPatch) ->
         def set_start_page_token(self, _d: str, _t: str) -> None:
             pass
 
+        def get(self, file_id: str):
+            return DocState(file_id=file_id, drive_id="drive")
+
+        def upsert(self, _state) -> None:
+            pass
+
+    scans: list[int] = []
+
     class _Rag:
+        """실제 RagEngineClient 처럼 첫 삭제에서만 코퍼스를 순회한다."""
+
+        def __init__(self) -> None:
+            self._scanned = False
+
         def delete_files_by_ids(self, file_ids: list[str]) -> int:
+            if not self._scanned:
+                self._scanned = True
+                scans.append(1)
             deletes.append(sorted(file_ids))
             return 0
+
+        def import_from_gcs(self, uris: list[str]) -> list[str]:
+            return list(uris)
 
     monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
     monkeypatch.setattr(sync_main, "DocStateStore", _Store)
     monkeypatch.setattr(sync_main, "DriveClient", _Drive)
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s=None: object())
     monkeypatch.setattr(sync_main, "RagEngineClient", _Rag)
-    monkeypatch.setattr(sync_main, "_import_and_mark", lambda _s, uris, _i: list(uris))
     monkeypatch.setattr(
         sync_main,
         "_ingest_with",
@@ -277,8 +295,12 @@ def test_backfill_scans_the_corpus_only_once(monkeypatch: pytest.MonkeyPatch) ->
         sync_main.BackfillRunBody(driveId="drive", indexBatchSize=2)
     )
 
-    assert len(deletes) == 1, f"코퍼스를 {len(deletes)}회 순회했다 — 1회여야 한다"
-    assert deletes[0] == sorted(f"f{i}" for i in range(6))
+    assert len(scans) == 1, f"코퍼스를 {len(scans)}회 순회했다 — 1회여야 한다"
+    # 삭제 대상은 그 배치가 실제로 import 하는 파일뿐이어야 한다.
+    assert sorted(fid for batch in deletes for fid in batch) == sorted(
+        f"f{i}" for i in range(6)
+    )
+    assert all(len(batch) <= 2 for batch in deletes)
 
 
 # ------------------------------------------------------- #8 search top_k
