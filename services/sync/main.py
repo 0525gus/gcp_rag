@@ -298,6 +298,9 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
         "unchanged": 0,
         "dlq": 0,
         "splitQueued": 0,
+        # 색인이 덜 된 URI 수. reconcile 로 가는 값들과 단위가 달라 따로 둔다
+        # (아래 flush_index 주석 참고). pageToken 커밋 판단에만 쓴다.
+        "indexFailedUris": 0,
         # 백필은 범위 밖 파일을 목록에 넣지 않으므로 스냅샷 집계를 그대로 쓴다
         "excluded": int(snapshot.get("skippedOutOfScope") or 0),
     }
@@ -314,7 +317,14 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
         # 실패 카운트는 uris 를 비우기 전이 아니라 여기서 직접 세야 한다.
         try:
             idx = index_gcs(IndexGcsBody(gcsUris=uris, fileIds=ids))
-            totals["indexed"] += int(idx.get("count") or len(uris))
+            # `or len(uris)` 로 폴백하면 안 된다 — count 가 0(전량 거부)일 때
+            # 0 이 falsy 라 보낸 수로 되돌아가, 전량 실패가 전량 성공으로 잡힌다.
+            indexed = int(idx.get("count") or 0)
+            totals["indexed"] += indexed
+            # 색인 부족분은 **failed 에 더하지 않는다.** 이 totals 는 그대로
+            # reconcile 로 흘러가는데 거기서 accounted 는 '파일 수' 기준이다.
+            # URI 수(파일당 최대 2)를 섞으면 없는 불일치가 보고된다.
+            totals["indexFailedUris"] += max(0, len(uris) - indexed)
         except Exception:  # noqa: BLE001
             logger.exception("backfill index flush failed for %s uris", len(uris))
             totals["failed"] += len(uris)
@@ -385,7 +395,9 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
 
-    if pending_page_token and totals["failed"] == 0:
+    # 색인이 덜 된 채 토큰을 커밋하면 그 변경분을 다시 볼 기회가 사라진다.
+    # failed 와 단위가 달라 따로 세지만, 커밋 판단에서는 똑같이 막는다.
+    if pending_page_token and totals["failed"] == 0 and totals["indexFailedUris"] == 0:
         store.set_start_page_token(body.drive_id, pending_page_token)
 
     logger.info("backfill-run done drive=%s totals=%s", body.drive_id, totals)
@@ -395,7 +407,7 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
         "pendingPageToken": pending_page_token,
         "workers": workers,
         "totals": totals,
-        "ok": totals["failed"] == 0,
+        "ok": totals["failed"] == 0 and totals["indexFailedUris"] == 0,
     }
 
 
@@ -1188,11 +1200,25 @@ def _sync_student_corpus(
         logger.exception("학생 코퍼스 pre-delete 실패 files=%s", len(touched))
         raise
 
-    imported = rag.import_from_gcs(student_uris) if student_uris else []
+    outcome = rag.import_from_gcs(student_uris) if student_uris else None
+    if outcome and not outcome.ok:
+        # 교직원 쪽과 달리 여기서는 상태를 되돌릴 대상이 없다(audience 는
+        # doc_state 에 이미 확정돼 있다). 남길 수 있는 건 신호뿐이다.
+        logger.error(
+            "학생 코퍼스 import 부분 실패 uris=%s imported=%s failed=%s skipped=%s",
+            len(student_uris), outcome.imported, outcome.failed, outcome.skipped,
+        )
     logger.info(
-        "학생 코퍼스 동기화: 대상 %s / 검토 %s URI", len(imported), len(gcs_uris)
+        "학생 코퍼스 동기화: 대상 %s / 검토 %s URI",
+        outcome.imported if outcome else 0,
+        len(gcs_uris),
     )
-    return {"enabled": True, "imported": len(imported), "removed": len(touched)}
+    return {
+        "enabled": True,
+        "imported": outcome.imported if outcome else 0,
+        "removed": len(touched),
+        "ok": outcome.ok if outcome else True,
+    }
 
 
 @app.post("/sync/index-gcs")
@@ -1217,10 +1243,23 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         logger.warning("pre-delete failed for batch %s", file_ids)
 
-    imported = rag.import_from_gcs(body.gcs_uris)
+    outcome = rag.import_from_gcs(body.gcs_uris)
 
-    for fid in file_ids:
-        store.mark_indexed(fid)
+    if outcome.ok:
+        for fid in file_ids:
+            store.mark_indexed(fid)
+    else:
+        # 어느 URI 가 거부됐는지는 응답 카운트로 알 수 없다(파일 단위 사유는
+        # import_result_sink 를 걸어야 나온다). 그래서 배치 전체를 PARSED 로
+        # 남긴다 — INDEXED 로 찍으면 reindex-pending 이 PARSED 만 보므로
+        # **자동 회수 경로가 영영 닫힌다.** 성공분을 한 번 더 import 하는
+        # 비용이, 실패분을 영구히 잃는 것보다 싸다.
+        logger.error(
+            "index-gcs 부분 실패 — INDEXED 로 올리지 않는다 "
+            "files=%s uris=%s imported=%s failed=%s skipped=%s",
+            len(file_ids), len(body.gcs_uris),
+            outcome.imported, outcome.failed, outcome.skipped,
+        )
 
     # 교직원 코퍼스가 끝난 뒤에 학생 코퍼스를 맞춘다. 순서가 중요하다 — 학생
     # 코퍼스가 실패해도 교직원 쪽 색인과 doc_state 는 이미 확정돼 있어야
@@ -1228,11 +1267,18 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
     student = _sync_student_corpus(body.gcs_uris, file_ids, settings, store)
 
     return {
-        "imported": imported,
-        "count": len(imported),
+        # 하위 호환: 예전부터 '보낸 URI 목록'이었다. 성공 목록이 아니다.
+        "imported": outcome.uris,
+        # 예전에는 보낸 URI 수였다. 이제 **실제 색인 건수**다 — 워크플로의
+        # 커밋 조건(drive_indexed == drive_uris)이 이 값을 쓰므로, 부분 실패가
+        # 나면 pageToken 이 커밋되지 않고 다음 주기가 같은 변경을 재생한다.
+        "count": outcome.imported,
+        "failed": outcome.failed,
+        "skipped": outcome.skipped,
+        "ok": outcome.ok,
         "droppedFileIds": len(bad_ids),
         "student": student,
-        "status": "INDEXED",
+        "status": "INDEXED" if outcome.ok else "PARTIAL",
     }
 
 
@@ -1390,17 +1436,30 @@ def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
             # PARSED 복구는 대부분 코퍼스 미존재 → 전량 list+delete 생략(속도)
             if body.force:
                 idx = index_gcs(IndexGcsBody(gcsUris=uris, fileIds=uniq_ids))
-                totals["indexed"] += int(idx.get("count") or len(uris))
+                indexed = int(idx.get("count") or 0)  # 0 폴백 금지 — flush_index 주석 참고
+                totals["indexed"] += indexed
+                totals["failed"] += max(0, len(uris) - indexed)
                 return
             rag = RagEngineClient(settings)
-            imported = rag.import_from_gcs(uris)
-            for fid in uniq_ids:
-                store.mark_indexed(fid)
+            outcome = rag.import_from_gcs(uris)
+            if outcome.ok:
+                for fid in uniq_ids:
+                    store.mark_indexed(fid)
+            else:
+                # PARSED 로 남겨 둔다 — 다음 주기가 다시 집는다. 여기서
+                # INDEXED 로 올리면 이 복구 경로 자체가 그 문서를 두 번 다시
+                # 보지 못한다(PARSED 만 대상이므로).
+                logger.error(
+                    "reindex-pending 부분 실패 — INDEXED 로 올리지 않는다 "
+                    "uris=%s imported=%s failed=%s skipped=%s",
+                    len(uris), outcome.imported, outcome.failed, outcome.skipped,
+                )
             # 교직원 쪽은 위처럼 pre-delete 를 생략하지만(대부분 코퍼스 미존재),
             # 학생 코퍼스는 생략하지 않는다 — 소속 이동이 반영되는 지점이라
             # 속도보다 정확성이 우선이다.
             _sync_student_corpus(uris, uniq_ids, settings, store)
-            totals["indexed"] += len(imported)
+            totals["indexed"] += outcome.imported
+            totals["failed"] += max(0, len(uris) - outcome.imported)
         except Exception:  # noqa: BLE001
             logger.exception("reindex-pending flush failed for %s uris", len(uris))
             totals["failed"] += len(uris)
@@ -1471,7 +1530,14 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
         uris, ids = pending_uris, pending_ids
         pending_uris, pending_ids = [], []
         idx = index_gcs(IndexGcsBody(gcsUris=uris, fileIds=list(dict.fromkeys(ids))))
-        totals["indexed"] += int(idx.get("count") or len(uris))
+        indexed = int(idx.get("count") or 0)  # 0 폴백 금지 — flush_index 주석 참고
+        totals["indexed"] += indexed
+        if indexed < len(uris):
+            # 색인이 덜 됐으면 회복으로 세면 안 된다. DLQ 를 비우지 않았으므로
+            # (clear_dlq 는 GCS_READY 시점에 이미 불렸다) 다음 주기가 다시 집는다.
+            logger.error(
+                "retry-failed 색인 부분 실패 uris=%s indexed=%s", len(uris), indexed
+            )
 
     for doc in targets:
         if store.get_dlq_attempts(doc.file_id) >= body.max_attempts:

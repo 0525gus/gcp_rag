@@ -113,8 +113,12 @@ class _Rag:
         return len(ids)
 
     def import_from_gcs(self, uris):
+        from shared.rag_engine import ImportOutcome
+
         _Rag.calls.append(("import", self.corpus_name, list(uris)))
-        return list(uris)
+        return ImportOutcome(
+            uris=list(uris), imported=len(uris), failed=0, skipped=0
+        )
 
 
 class _Store:

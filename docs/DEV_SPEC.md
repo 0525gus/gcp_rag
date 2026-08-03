@@ -216,6 +216,35 @@ RAG Engine 기본 파서는 xlsx 를 읽지 못한다. 예전에는 경로 사�
 - □ 색인 방식: 동일 fileId 기존 청크 **선삭제 후 import**(중복 방지)
 - □ 전량 재색인 실측: 1,211건 / 약 50분 / 실패 0건
 
+#### 색인 결과 검증
+
+`rag.import_files` 는 **호출 자체가 실패할 때만** 예외를 던진다. 파일 단위 거부는
+예외가 아니라 응답의 카운트로 온다.
+
+| 응답 필드 | 의미 |
+|---|---|
+| `imported_rag_files_count` | 실제 색인된 건수 |
+| `failed_rag_files_count` | 거부된 건수 |
+| `skipped_rag_files_count` | 건너뛴 건수 |
+
+- □ 예전에는 이 카운트를 로그로만 흘리고 **보낸 URI 목록을 그대로 성공으로 반환**했다.
+  그래서 거부된 파일이 `doc_state` 에 `INDEXED` 로 기록됐다
+  - ○ 실측 사례: xlsx 27건이 상시 import 거부 중이었으나 집계에는 전량 성공으로 잡힘
+  - ○ `INDEXED` 로 찍히면 `reindex-pending`(PARSED 만 대상)이 다시 집지 않아 **영구 고착**
+- □ 현재: `RagEngineClient.import_from_gcs` 가 `ImportOutcome`(보낸 URI + 실제 카운트)을 반환
+  - ○ `ok` 판정: `failed == 0 and (imported + skipped) >= len(uris)`
+  - ○ `skipped` 를 **성공으로 세는** 이유: 유력한 해석이 '이미 코퍼스에 있어 건너뜀'이고,
+    실패로 세면 pre-delete 를 생략하는 `reindex-pending` 비-force 경로에서 그 문서가
+    영영 `PARSED` 에 머물며 매일 다시 import 된다(회수 장치가 무한 루프가 됨).
+    관측은 WARNING 로그로 유지되므로 손실이 없다
+  - ○ 부분 실패 시 해당 배치를 **`INDEXED` 로 올리지 않는다**(PARSED 유지 → 다음 주기 자동 회수)
+  - ○ 어느 URI 가 거부됐는지는 카운트로 알 수 없어 **배치 단위**로 판정한다.
+    파일 단위 사유가 필요하면 `import_result_sink` 를 걸어야 함
+- □ `POST /sync/index-gcs` 응답
+  - ○ `count` — **실제 색인 건수**(예전에는 보낸 URI 수였음). 워크플로 커밋 조건이 이 값을 쓴다
+  - ○ `failed` / `skipped` / `ok` 추가, `status` 는 부분 실패 시 `PARTIAL`
+  - ○ `imported` 는 하위 호환으로 **보낸 URI 목록**을 유지(성공 목록 아님)
+
 ### 4. 검색
 
 - □ 처리 순서

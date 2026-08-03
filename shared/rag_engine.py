@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from google.api_core import exceptions as gcp_exceptions
@@ -25,6 +26,44 @@ _CORPUS_INDEX_CACHE: dict[str, tuple[float, dict[str, list[str]]]] = {}
 # 인덱스를 만든 뒤 import 된 fileId — 이 id 를 건드릴 때만 다시 만든다
 _CORPUS_DIRTY_IDS: dict[str, set[str]] = {}
 _INDEX_TTL_SECONDS = 300.0
+
+
+@dataclass(frozen=True)
+class ImportOutcome:
+    """import 한 번의 실제 결과.
+
+    `uris` 는 우리가 **보낸** 것이고 나머지 셋은 Vertex 가 **돌려준** 것이다.
+    이 둘을 구분하지 않은 것이 오래된 결함이었다 — 예전에는 보낸 목록을 그대로
+    성공으로 돌려줘서, import 에서 거부된 파일이 그대로 INDEXED 로 기록됐다.
+    실측 사례: xlsx 27건이 상시 import 거부 중이었는데 집계에는 전부 성공으로
+    잡혀 있었다(services/sync/main.py `_ingest_direct` 주석). 그때는 xlsx 라는
+    증상만 개별 차단했고 **검출 능력은 생기지 않았다.** 이 타입이 그 자리다.
+
+    `rag.import_files` 는 호출 자체가 실패할 때만 예외를 던진다. 파일 단위
+    실패는 예외가 아니라 응답의 카운트로 오므로, 여기서 읽지 않으면 볼 방법이 없다.
+    """
+
+    uris: list[str]
+    imported: int
+    failed: int
+    skipped: int
+
+    @property
+    def ok(self) -> bool:
+        """보낸 것이 코퍼스에 들어가 있는가.
+
+        `skipped` 는 **성공 쪽으로 센다.** 의미가 확정돼 있지 않은데, 유력한
+        해석은 '이미 코퍼스에 있어 건너뜀'이고 그건 우리가 원하는 최종 상태다.
+        실패로 세면 pre-delete 를 생략하는 경로(`reindex-pending` 비-force)에서
+        **그 문서가 영원히 PARSED 에 머물며 매일 다시 import 된다** — 회수하려고
+        만든 장치가 무한 루프가 되는 것이다.
+
+        `skipped` 가 사실은 '지원하지 않아 건너뜀'이더라도 손실은 없다. 이
+        작업의 본질은 **관측**이고, skipped 는 아래 로그에 WARNING 으로 그대로
+        남는다. 상태 전이 가드는 부차적이며, 틀리더라도 루프를 만드는 쪽으로
+        틀려서는 안 된다.
+        """
+        return self.failed == 0 and (self.imported + self.skipped) >= len(self.uris)
 
 
 class RagEngineClient:
@@ -54,13 +93,16 @@ class RagEngineClient:
         chunk_size: int | None = None,
         chunk_overlap: int | None = None,
         max_retries: int = 5,
-    ) -> list[str]:
+    ) -> ImportOutcome:
         """GCS 마크다운을 코퍼스로 증분 import. RPM 제한 대비 재시도.
 
         청킹 값은 RAG_CHUNK_SIZE / RAG_CHUNK_OVERLAP 로 조정한다(인자 우선).
+
+        반환값은 **보낸 목록이 아니라 실제 결과**다(`ImportOutcome`). 호출측은
+        `ok` 를 보고 상태 전이를 결정할 것 — 그러라고 있는 값이다.
         """
         if not gcs_uris:
-            return []
+            return ImportOutcome(uris=[], imported=0, failed=0, skipped=0)
 
         size = chunk_size if chunk_size is not None else self.settings.rag_chunk_size
         overlap = (
@@ -74,23 +116,58 @@ class RagEngineClient:
         )
         logger.info("RAG import chunking size=%s overlap=%s", size, overlap)
 
-        imported: list[str] = []
+        batches: list[ImportOutcome] = []
         for i in range(0, len(gcs_uris), _MAX_IMPORT_URIS):
             batch = gcs_uris[i : i + _MAX_IMPORT_URIS]
-            imported.extend(self._import_batch(batch, transformation, max_retries))
+            batches.append(self._import_batch(batch, transformation, max_retries))
             if i + _MAX_IMPORT_URIS < len(gcs_uris):
                 time.sleep(2.0)  # 서브배치 사이 쿼터 여유 확보
+
+        total = ImportOutcome(
+            uris=[u for b in batches for u in b.uris],
+            imported=sum(b.imported for b in batches),
+            failed=sum(b.failed for b in batches),
+            skipped=sum(b.skipped for b in batches),
+        )
         # 캐시를 통째로 버리면 다음 배치가 또 코퍼스를 훑는다.
-        # 이번에 올린 id 만 dirty 로 두고 나머지 캐시는 살린다.
-        self._mark_dirty({extract_file_id(u) for u in imported})
-        return imported
+        # 이번에 건드린 id 만 dirty 로 두고 나머지 캐시는 살린다.
+        # (실패분도 포함한다 — 코퍼스에 반쯤 들어갔을 수 있어 인덱스를 믿으면 안 된다)
+        self._mark_dirty({extract_file_id(u) for u in total.uris})
+        return total
+
+    @staticmethod
+    def _read_outcome(gcs_uris: list[str], response: Any) -> ImportOutcome:
+        """응답에서 실제 색인 결과를 꺼낸다.
+
+        예전에는 `imported_rag_files_count` 를 로그로 흘리고 버렸다. 응답에는
+        `failed_rag_files_count` / `skipped_rag_files_count` 도 함께 실려 있다.
+        """
+
+        def _count(field: str) -> int | None:
+            raw = getattr(response, field, None)
+            return int(raw) if raw is not None else None
+
+        imported = _count("imported_rag_files_count")
+        if imported is None:
+            # 카운트를 못 읽으면 예전처럼 낙관하되 그 사실을 남긴다. 여기서
+            # 비관하면 SDK 가 바뀌었을 때 파이프라인이 통째로 멈춘다.
+            logger.warning(
+                "import 응답에 카운트가 없다 — 성공으로 가정한다 uris=%s", len(gcs_uris)
+            )
+            imported = len(gcs_uris)
+        return ImportOutcome(
+            uris=list(gcs_uris),
+            imported=imported,
+            failed=_count("failed_rag_files_count") or 0,
+            skipped=_count("skipped_rag_files_count") or 0,
+        )
 
     def _import_batch(
         self,
         gcs_uris: list[str],
         transformation: Any,
         max_retries: int,
-    ) -> list[str]:
+    ) -> ImportOutcome:
         delay = 1.0
         last_err: Exception | None = None
         for attempt in range(max_retries):
@@ -100,11 +177,33 @@ class RagEngineClient:
                     gcs_uris,
                     transformation_config=transformation,
                 )
-                imported = getattr(response, "imported_rag_files_count", None)
-                logger.info(
-                    "RAG import done: uris=%s imported=%s", len(gcs_uris), imported
-                )
-                return list(gcs_uris)
+                outcome = self._read_outcome(gcs_uris, response)
+                if outcome.skipped:
+                    # ok 판정에는 성공으로 세지만(위 docstring) 정상 경로에서
+                    # 나올 값이 아니다 — pre-delete 가 놓친 것이 있다는 뜻이다.
+                    logger.warning(
+                        "RAG import skipped=%s corpus=%s uris=%s — pre-delete 누락 의심",
+                        outcome.skipped, self.corpus_name, len(gcs_uris),
+                    )
+                if outcome.ok:
+                    logger.info(
+                        "RAG import done: uris=%s imported=%s",
+                        len(gcs_uris),
+                        outcome.imported,
+                    )
+                else:
+                    # 여기가 유일한 신호다. 예외가 아니므로 위로 안 올라간다.
+                    logger.error(
+                        "RAG import 부분 실패 corpus=%s uris=%s imported=%s "
+                        "failed=%s skipped=%s sample=%s",
+                        self.corpus_name,
+                        len(gcs_uris),
+                        outcome.imported,
+                        outcome.failed,
+                        outcome.skipped,
+                        [u.rsplit("/", 1)[-1] for u in gcs_uris[:5]],
+                    )
+                return outcome
             except Exception as exc:  # noqa: BLE001
                 # vertexai SDK가 내부에서 원인 예외를 잡아 RuntimeError 로
                 # 재포장하므로(__cause__ 에 원본이 남음), 타입 매칭만으로는 못 잡는다.

@@ -395,5 +395,179 @@ def test_import_retries_on_corpus_busy(monkeypatch) -> None:
     client.corpus_name = "corpora/x"  # type: ignore[attr-defined]
     out = client._import_batch(["gs://b/a.md"], None, max_retries=5)
 
-    assert out == ["gs://b/a.md"]
+    assert out.uris == ["gs://b/a.md"]
+    assert out.ok
     assert len(calls) == 3, "재시도 없이 즉시 실패하면 안 된다"
+
+
+# ------------------------------------------------- import 결과 검증 (조용한 실패)
+# `rag.import_files` 는 **호출 자체가 실패할 때만** 예외를 던진다. 파일 단위
+# 거부는 응답의 failed/skipped 카운트로 온다. 예전에는 그 카운트를 로그로만
+# 흘리고 보낸 목록을 그대로 성공으로 돌려줘서, 거부된 파일이 INDEXED 로 찍혔다
+# (실측: xlsx 27건이 상시 거부 중이었는데 집계는 전부 성공).
+def _fake_response(imported: int, failed: int = 0, skipped: int = 0):
+    return type(
+        "R",
+        (),
+        {
+            "imported_rag_files_count": imported,
+            "failed_rag_files_count": failed,
+            "skipped_rag_files_count": skipped,
+        },
+    )()
+
+
+def _client() -> RagEngineClient:
+    client = RagEngineClient.__new__(RagEngineClient)
+    client.corpus_name = "corpora/x"  # type: ignore[attr-defined]
+    return client
+
+
+def test_import_reports_partial_failure(monkeypatch) -> None:
+    uris = [f"gs://b/f{i}.md" for i in range(3)]
+    monkeypatch.setattr(
+        rag_engine.rag, "import_files",
+        lambda *a, **k: _fake_response(imported=2, failed=1),
+    )
+    out = _client()._import_batch(uris, None, max_retries=1)
+
+    assert out.imported == 2
+    assert out.failed == 1
+    assert not out.ok, "거부된 파일이 있는데 성공으로 보고하면 안 된다"
+
+
+def test_import_counts_skipped_as_ok(monkeypatch) -> None:
+    """skipped 를 실패로 세면 pre-delete 생략 경로가 무한 루프에 빠진다.
+
+    `reindex-pending` 비-force 는 속도 때문에 pre-delete 를 생략한다. 이미
+    코퍼스에 있는 문서를 다시 import 하면 skipped 로 잡힐 수 있는데, 이걸
+    실패로 보면 그 문서는 INDEXED 가 되지 못하고 매일 다시 import 된다.
+    """
+    monkeypatch.setattr(
+        rag_engine.rag, "import_files",
+        lambda *a, **k: _fake_response(imported=0, skipped=1),
+    )
+    assert _client()._import_batch(["gs://b/a.md"], None, max_retries=1).ok
+
+
+def test_import_failure_still_not_ok_despite_skipped(monkeypatch) -> None:
+    # skipped 를 관대하게 세더라도 failed 는 그대로 실패다
+    monkeypatch.setattr(
+        rag_engine.rag, "import_files",
+        lambda *a, **k: _fake_response(imported=1, failed=1, skipped=1),
+    )
+    out = _client()._import_batch(
+        ["gs://b/a.md", "gs://b/b.md", "gs://b/c.md"], None, max_retries=1
+    )
+    assert not out.ok
+
+
+def test_import_outcome_survives_missing_counts(monkeypatch) -> None:
+    # SDK 가 카운트를 안 주면 비관하지 않는다 — 여기서 실패로 처리하면
+    # 필드명이 바뀌는 날 파이프라인이 통째로 멈춘다.
+    monkeypatch.setattr(
+        rag_engine.rag, "import_files", lambda *a, **k: type("R", (), {})()
+    )
+    out = _client()._import_batch(["gs://b/a.md"], None, max_retries=1)
+    assert out.imported == 1
+    assert out.ok
+
+
+def test_import_aggregates_across_subbatches(monkeypatch) -> None:
+    # URI 25개 상한으로 쪼개지는데, 뒤 배치의 실패가 앞 배치에 묻히면 안 된다
+    seen: list[int] = []
+
+    def _import(corpus, uris, transformation_config=None):
+        seen.append(len(uris))
+        # 두 번째 서브배치에서만 실패
+        return _fake_response(imported=len(uris) - (1 if len(seen) == 2 else 0),
+                              failed=1 if len(seen) == 2 else 0)
+
+    monkeypatch.setattr(rag_engine.rag, "import_files", _import)
+    monkeypatch.setattr(rag_engine.time, "sleep", lambda *_: None)
+
+    client = _client()
+    client.settings = Settings(gcp_project_id="p", rag_corpus_name="corpora/x")
+    out = client.import_from_gcs([f"gs://b/f{i}.md" for i in range(30)])
+
+    assert seen == [25, 5], "25개 상한으로 쪼개져야 한다"
+    assert out.failed == 1
+    assert not out.ok
+    assert len(out.uris) == 30
+
+
+def test_index_gcs_keeps_parsed_on_partial_failure(monkeypatch) -> None:
+    """부분 실패 시 INDEXED 로 올리면 reindex-pending 이 영영 못 집는다."""
+    marked: list[str] = []
+
+    class _Rag:
+        def __init__(self, settings=None, *, corpus_name=None) -> None:
+            pass
+
+        def delete_files_by_ids(self, ids):
+            return 0
+
+        def import_from_gcs(self, uris):
+            return rag_engine.ImportOutcome(
+                uris=list(uris), imported=len(uris) - 1, failed=1, skipped=0
+            )
+
+    class _Store:
+        def mark_indexed(self, fid):
+            marked.append(fid)
+
+    monkeypatch.setattr(sync_main, "RagEngineClient", _Rag)
+    monkeypatch.setattr(sync_main, "DocStateStore", lambda *a, **k: _Store())
+    monkeypatch.setattr(
+        sync_main, "get_settings",
+        lambda: Settings(gcp_project_id="p", rag_corpus_name="corpora/x"),
+    )
+
+    res = sync_main.index_gcs(
+        sync_main.IndexGcsBody(
+            gcsUris=["gs://b/aaaaaaaaaaaa.md", "gs://b/bbbbbbbbbbbb.md"],
+            fileIds=["aaaaaaaaaaaa", "bbbbbbbbbbbb"],
+        )
+    )
+
+    assert marked == [], "부분 실패인데 INDEXED 로 찍으면 안 된다"
+    assert res["ok"] is False
+    assert res["status"] == "PARTIAL"
+    assert res["count"] == 1, "count 는 보낸 수가 아니라 실제 색인 수여야 한다"
+
+
+def test_index_gcs_marks_indexed_on_full_success(monkeypatch) -> None:
+    marked: list[str] = []
+
+    class _Rag:
+        def __init__(self, settings=None, *, corpus_name=None) -> None:
+            pass
+
+        def delete_files_by_ids(self, ids):
+            return 0
+
+        def import_from_gcs(self, uris):
+            return rag_engine.ImportOutcome(
+                uris=list(uris), imported=len(uris), failed=0, skipped=0
+            )
+
+    class _Store:
+        def mark_indexed(self, fid):
+            marked.append(fid)
+
+    monkeypatch.setattr(sync_main, "RagEngineClient", _Rag)
+    monkeypatch.setattr(sync_main, "DocStateStore", lambda *a, **k: _Store())
+    monkeypatch.setattr(
+        sync_main, "get_settings",
+        lambda: Settings(gcp_project_id="p", rag_corpus_name="corpora/x"),
+    )
+
+    res = sync_main.index_gcs(
+        sync_main.IndexGcsBody(
+            gcsUris=["gs://b/aaaaaaaaaaaa.md"], fileIds=["aaaaaaaaaaaa"]
+        )
+    )
+
+    assert marked == ["aaaaaaaaaaaa"]
+    assert res["ok"] is True
+    assert res["status"] == "INDEXED"
