@@ -17,7 +17,12 @@ REPO="${ARTIFACT_REPO:-rag-mcp}"
 # 통째로 치환하니, 안 넘기면 운영 중인 키가 조용히 사라진다. 실제로 리비전
 # 00005~00013(7/25~7/28) 8개가 키 없이 떠서 코퍼스가 무인증 공개됐다
 # (docs/OPS_AUDIT.md Ⅱ.1). 빌드 전에 먼저 막는다.
-MCP_API_KEY="${MCP_API_KEY:?set MCP_API_KEY (rag-mcp 인증 키 — 누락 시 무인증 공개)}"
+# .env 는 '출처' 이름(_STAFF/_STUDENT)을, 서비스는 '역할' 이름(MCP_API_KEY)을 쓴다.
+# MCP 서버는 어느 대상을 서빙하든 MCP_API_KEY 하나만 읽기 때문이다
+# (services/mcp_server/main.py). 여기서 출처 → 역할로 옮긴다.
+# 앞에 붙여 준 MCP_API_KEY 가 있으면 그쪽이 이긴다(학생용 배포 경로).
+MCP_API_KEY="${MCP_API_KEY:-${MCP_API_KEY_STAFF:-}}"
+: "${MCP_API_KEY:?set MCP_API_KEY_STAFF (rag-mcp 인증 키 — 누락 시 무인증 공개)}"
 
 gcloud config set project "${PROJECT_ID}"
 

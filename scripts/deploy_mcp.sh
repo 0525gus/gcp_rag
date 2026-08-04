@@ -16,7 +16,10 @@ PROJECT_ID="${GCP_PROJECT_ID:?set GCP_PROJECT_ID}"
 REGION="${GCP_REGION:-asia-northeast3}"
 REPO="${ARTIFACT_REPO:-rag-mcp}"
 SERVICE="${MCP_SERVICE_NAME:-rag-mcp}"
-MCP_API_KEY="${MCP_API_KEY:?set MCP_API_KEY (FactChat 커넥터 Authorization에 사용)}"
+# .env 의 출처 이름(_STAFF) → 서비스가 읽는 이름(MCP_API_KEY). deploy.sh 와 동일.
+# 학생용은 앞에 MCP_API_KEY="${MCP_API_KEY_STUDENT}" 를 붙여 도므로 그쪽이 이긴다.
+MCP_API_KEY="${MCP_API_KEY:-${MCP_API_KEY_STAFF:-}}"
+: "${MCP_API_KEY:?set MCP_API_KEY_STAFF (FactChat 커넥터 Authorization에 사용)}"
 
 # FactChat은 브라우저/서버에서 공개 HTTPS를 호출하므로 allow-unauthenticated + API 키
 ALLOW_UNAUTH="${ALLOW_UNAUTH:-true}"
