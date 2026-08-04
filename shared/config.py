@@ -38,7 +38,7 @@ class Settings:
     gcs_raw_bucket: str = ""
     gcs_normalized_bucket: str = ""
     firestore_collection: str = "doc_state"
-    firestore_database: str = "(default)"
+    firestore_database: str = "doc-state"
     sync_token_collection: str = "sync_tokens"
     rag_corpus_name: str = ""
     # 학생 공개용 코퍼스. **비우면 분리 기능 자체가 꺼진다**(현행 단일 코퍼스 동작).
@@ -56,8 +56,10 @@ class Settings:
     # 품질 게이트 — 실측 코퍼스 기준 완화 (이미지 많은 공문 G1 오탐 방지)
     # 예: 업적평가 안내 ~0.00085, 개인정보 캠페인 rhwp ~0.00090
     qg_density_threshold: float = 0.0005
-    qg_table_fail_ratio: float = 0.3
-    qg_image_ratio: float = 0.5
+    # 문서 구조상 표 N개 중 마크다운에 남지 않은 비율의 허용 상한.
+    # (구 QG_TABLE_FAIL_RATIO 는 셀 단위 실패율이었으나 그 지표를 채우는 파서가
+    #  없어 발동한 적이 없다. 의미가 달라졌으므로 이름도 바꾼다.)
+    qg_table_loss_ratio: float = 0.3
     qg_min_text_length: int = 20
     # log: 경고만 / reject: 422·DLQ / fallback: Document AI(enable_docai_fallback 필요)
     qg_mode: str = "log"
@@ -112,13 +114,17 @@ class Settings:
     # 실측 소모율 ≈ 동시수 / (0.4 + 페이싱) 건/초. 300rpm(=5건/초) 기준
     # 동시 4 + 페이싱 0.25 면 약 6건/초라 여유가 빠듯하니 그보다 낮게 잡을 것.
     rag_delete_concurrency: int = 1
-    mcp_auth_audience: str = ""
     max_gcs_bytes: int = 50 * 1024 * 1024
     enable_docai_fallback: bool = False
     dlq_collection: str = "doc_dlq"
     split_queue_collection: str = "doc_split_queue"
     # Drive→GCS ingest 병렬 워커 (무료/소형 인스턴스 기준 8 권장)
     raw_upload_concurrency: int = 8
+    # /sync/changes 가 한 번에 반환할 최대 변경 건수.
+    # Cloud Workflows 는 실행당 변수 누적 512KB 가 상한인데, 변경 1건이 응답·복사본·
+    # URI 까지 합쳐 워크플로우 변수를 ~900B 먹는다(≈586건에서 초과). 200건이면
+    # ~174KB 로 안전 마진이 남는다. 초과분은 hasMore 로 알리고 다음 호출에서 잇는다.
+    sync_max_changes: int = 200
 
     @property
     def drive_id_list(self) -> list[str]:
@@ -152,7 +158,7 @@ class Settings:
             gcs_raw_bucket=_env("GCS_RAW_BUCKET"),
             gcs_normalized_bucket=_env("GCS_NORMALIZED_BUCKET"),
             firestore_collection=os.environ.get("FIRESTORE_COLLECTION", "doc_state"),
-            firestore_database=os.environ.get("FIRESTORE_DATABASE", "(default)"),
+            firestore_database=os.environ.get("FIRESTORE_DATABASE", "doc-state"),
             sync_token_collection=os.environ.get(
                 "SYNC_TOKEN_COLLECTION", "sync_tokens"
             ),
@@ -164,8 +170,7 @@ class Settings:
             sync_folder_ids=os.environ.get("SYNC_FOLDER_IDS", ""),
             student_folder_ids=os.environ.get("STUDENT_FOLDER_IDS", ""),
             qg_density_threshold=_env_float("QG_DENSITY_THRESHOLD", 0.0005),
-            qg_table_fail_ratio=_env_float("QG_TABLE_FAIL_RATIO", 0.3),
-            qg_image_ratio=_env_float("QG_IMAGE_RATIO", 0.5),
+            qg_table_loss_ratio=_env_float("QG_TABLE_LOSS_RATIO", 0.3),
             qg_min_text_length=_env_int("QG_MIN_TEXT_LENGTH", 20),
             qg_mode=mode,
             top_k_default=_env_int("TOP_K_DEFAULT", 5),
@@ -186,7 +191,6 @@ class Settings:
             rag_delete_concurrency=max(
                 1, min(_env_int("RAG_DELETE_CONCURRENCY", 1), 16)
             ),
-            mcp_auth_audience=os.environ.get("MCP_AUTH_AUDIENCE", ""),
             max_gcs_bytes=_env_int("MAX_GCS_BYTES", 50 * 1024 * 1024),
             enable_docai_fallback=_env_bool("ENABLE_DOCAI_FALLBACK", False),
             dlq_collection=os.environ.get("DLQ_COLLECTION", "doc_dlq"),
@@ -196,6 +200,7 @@ class Settings:
             raw_upload_concurrency=max(
                 1, min(_env_int("RAW_UPLOAD_CONCURRENCY", 8), 32)
             ),
+            sync_max_changes=max(1, min(_env_int("SYNC_MAX_CHANGES", 200), 2000)),
         )
 
 

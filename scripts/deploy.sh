@@ -46,18 +46,25 @@ gcloud builds submit --config=cloudbuild.mcp.yaml \
 
 echo "== Deploy Cloud Run =="
 # 콤마가 값에 포함될 수 있어(DRIVE_IDS/SYNC_FOLDER_IDS) 구분자를 | 로 지정 (^|^...)
+# --timeout 은 sync 가 파서를 기다리는 httpx 타임아웃(600s) 이하여야 한다.
+# 더 길면 sync 가 포기한 뒤에도 파서가 계속 돌며 아무도 읽지 않을 MD 를 GCS 에 쓴다.
 gcloud run deploy rag-parser \
   --image="${IMAGE_BASE}/parser:latest" \
   --region="${REGION}" \
   --no-allow-unauthenticated \
   --set-env-vars="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_REGION=${REGION}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|DOCAI_PROCESSOR_ID=${DOCAI_PROCESSOR_ID:-}|QG_MODE=${QG_MODE:-log}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}" \
-  --memory=2Gi --cpu=2 --timeout=900 \
+  --memory=2Gi --cpu=2 --timeout=600 \
   --concurrency="${PARSER_CONCURRENCY:-8}"
 # concurrency 를 낮게 두는 이유: 파서는 HWP 원본을 통째로 메모리에 올리고
 # 네이티브 확장(rhwp)으로 파싱한다. 2Gi 에 동시 요청이 몰리면 OOM 이다.
 # 실효 동시성은 어차피 RAW_UPLOAD_CONCURRENCY(=8) 로 묶여 있으니 그에 맞춘다.
 # (운영에 손으로 160 이 들어가 있었다 — 여태 안 터진 건 워크플로가 순차라서다)
 
+# --timeout 을 워크플로우 스텝(1800s)에 맞추면 안 된다. backfill-run 은 끝에서
+# 스스로 pageToken 을 커밋하므로, 워크플로우가 1800s 에 포기해도 서버가 2500s 에
+# 끝내면 그 작업은 유효하게 남는다. 서버를 1800s 로 깎으면 30분을 넘기는 드라이브는
+# 매번 중간에 죽어 토큰을 못 남기고 — 다음 실행도 같은 지점에서 죽어 영영 못 끝낸다.
+# 중복 실행은 타임아웃 정렬이 아니라 backfill-run 의 단일 실행 잠금이 막는다.
 gcloud run deploy rag-sync \
   --image="${IMAGE_BASE}/sync:latest" \
   --region="${REGION}" \

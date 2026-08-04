@@ -57,6 +57,22 @@ def extract_file_id(display: str, source_uri: str | None = None) -> str:
     return _PART_SUFFIX.sub("", base)
 
 
+_SIDECAR_SUFFIX = ".meta.md"
+
+
+def is_path_sidecar(display: str, source_uri: str | None = None) -> bool:
+    """경로·자료묶음만 담은 합성 문서(``{fileId}.meta.md``)인지.
+
+    바이너리(PDF/PPTX 등)는 본문과 sidecar 가 같은 fileId 로 함께 색인된다.
+    sidecar 본문은 "이 파일은 자료묶음 X 소속입니다" 안내문뿐이라 질의에 답하지
+    못한다 — 같은 파일의 본문 청크가 있으면 그쪽이 이겨야 한다.
+    """
+    for candidate in (display or "", source_uri or ""):
+        if candidate.rsplit("/", 1)[-1].strip().lower().endswith(_SIDECAR_SUFFIX):
+            return True
+    return False
+
+
 def unescape_chunk_text(text: str) -> str:
     """PDF 추출 HTML 엔티티·과도한 \\r 정리."""
     if not text:
@@ -65,21 +81,6 @@ def unescape_chunk_text(text: str) -> str:
     out = out.replace("\r\n", "\n").replace("\r", "\n")
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
-
-
-def distance_to_relevance(raw_score: float) -> float:
-    """(사용 안 함) 거리 → relevance 변환.
-
-    score 가 거리인지 유사도인지 추측해 뒤집는 방식이라, 유사도였을 경우
-    순위를 정확히 거꾸로 만든다. 순위는 Vertex 가 준 순서를 그대로 쓰므로
-    더 이상 정렬에 쓰지 않는다. 점수 의미가 확정되면 그때 다시 검토할 것.
-    """
-    s = float(raw_score)
-    if s < 0:
-        return 0.0
-    if s > 1.5:
-        return min(s / 10.0, 1.0) if s > 10 else min(s, 1.0)
-    return 1.0 / (1.0 + s)
 
 
 def _text_fingerprint(text: str, n: int = 180) -> str:
@@ -220,6 +221,7 @@ def postprocess_hits(
         return []
 
     prepared: list[SearchHit] = []
+    sidecar_flags: list[bool] = []
     for hit in hits:
         fid = extract_file_id(
             hit.source.file_id or hit.source.name,
@@ -228,13 +230,27 @@ def postprocess_hits(
         text = unescape_chunk_text(hit.text)
         src = replace(hit.source, file_id=fid)
         prepared.append(SearchHit(text=text, score=hit.score, source=src))
+        sidecar_flags.append(
+            is_path_sidecar(hit.source.name, hit.source.source_uri)
+        )
+
+    # 본문 청크가 함께 걸린 파일의 sidecar 는 버린다. 파일당 '먼저 나온 것'을
+    # 남기는 중복 제거 특성상, 제목·폴더명 질의에서 sidecar 가 상위에 오면 정작
+    # 답이 든 본문이 통째로 사라진다. sidecar 만 걸린 파일은 그대로 둔다.
+    files_with_content = {
+        hit.source.file_id
+        for hit, is_sidecar in zip(prepared, sidecar_flags, strict=True)
+        if not is_sidecar
+    }
 
     # 문서별로 묶되 처음 나온 순서(=관련도 순)를 보존한다
     order: list[str] = []
     grouped: dict[str, list[SearchHit]] = {}
     seen_text: set[str] = set()
-    for hit in prepared:
+    for hit, is_sidecar in zip(prepared, sidecar_flags, strict=True):
         fid = hit.source.file_id
+        if is_sidecar and fid in files_with_content:
+            continue
         fp = _text_fingerprint(hit.text)
         if fp and fp in seen_text:
             continue  # 같은 본문이 다른 파일로 중복 색인된 경우

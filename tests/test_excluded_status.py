@@ -134,3 +134,67 @@ def test_excluded_round_trips() -> None:
 def test_unknown_status_still_falls_back_to_pending() -> None:
     state = DocState.from_firestore({"fileId": "f1", "status": "WAT"})
     assert state.status is DocStatus.PENDING
+
+
+# ------------------------------------------------------- EXCLUDE 라우트 처리
+def test_exclude_route_evicts_without_asking_drive_again(monkeypatch) -> None:
+    """워크플로가 EXCLUDE 로 넘긴 문서도 잔존물 회수까지 마치고 EXCLUDED 가 된다.
+
+    list_changes 가 이미 같은 folder_ids 로 판정해 붙인 라우트라 범위 판정을
+    다시 물으면 Drive 호출만 더 든다. 한때 이 분기가 지워진 헬퍼를 부르고 있어
+    EXCLUDE 로 들어온 문서가 NameError 로 죽었다 — 정상 경로라 조용했다.
+    """
+    import services.sync.main as sync_main
+    from services.sync.main import IngestBody, _ingest_with
+
+    class _Settings:
+        sync_folder_id_list = ["folderX"]
+        student_folder_id_list: list[str] = []
+        audience_split_enabled = False
+        rag_corpus_name_student = ""
+        gcs_normalized_bucket = "nb"
+        gcs_raw_bucket = "rb"
+
+    class _Store:
+        def __init__(self) -> None:
+            self.upserts: list[DocState] = []
+
+        def get(self, _fid):
+            return None
+
+        def upsert(self, state: DocState) -> None:
+            self.upserts.append(state)
+
+    class _Drive2:
+        def is_in_sync_scope(self, *_a, **_k):  # noqa: ANN002
+            raise AssertionError("EXCLUDE 라우트에서 범위를 다시 묻지 않는다")
+
+    store = _Store()
+    monkeypatch.setattr(
+        sync_main,
+        "_cleanup_out_of_scope_file",
+        lambda _gcs, _settings, _fid: (True, 2, 1),
+    )
+
+    result = _ingest_with(
+        IngestBody(
+            fileId="f1",
+            driveId="d1",
+            name="a.pdf",
+            mimeType="application/pdf",
+            route=RouteKind.EXCLUDE.value,
+        ),
+        store=store,
+        settings=_Settings(),
+        gcs=object(),
+        drive=_Drive2(),
+    )
+
+    assert result["status"] == DocStatus.EXCLUDED.value
+    assert result["reason"] == "out_of_folder_scope"
+    assert (result["ragDeleted"], result["normalizedDeleted"], result["rawDeleted"]) == (
+        True,
+        2,
+        1,
+    )
+    assert [s.status for s in store.upserts] == [DocStatus.EXCLUDED]

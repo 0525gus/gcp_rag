@@ -148,7 +148,6 @@ def test_path_breadcrumb_bundle():
 def test_search_postprocess():
     from shared.models import SearchHit, SearchSource
     from shared.search_postprocess import (
-        distance_to_relevance,
         extract_file_id,
         postprocess_hits,
         unescape_chunk_text,
@@ -160,9 +159,6 @@ def test_search_postprocess():
     assert extract_file_id("1abc.txt") == "1abc"
     assert "&lt;표1&gt;" not in unescape_chunk_text("아래 &lt;표1&gt; 참고")
     assert "표1" in unescape_chunk_text("아래 &lt;표1&gt; 참고")
-
-    # 거리형: 작을수록 유사 → relevance는 클수록 관련
-    assert distance_to_relevance(0.19) > distance_to_relevance(0.24)
 
     hits = [
         SearchHit(

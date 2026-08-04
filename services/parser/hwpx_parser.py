@@ -9,7 +9,7 @@ from __future__ import annotations
 import io
 import logging
 
-from services.parser.quality_gate import ParseMetrics
+from services.parser.quality_gate import ParseMetrics, count_markdown_tables
 from services.parser.rhwp_parser import ParseOutput
 
 logger = logging.getLogger(__name__)
@@ -41,15 +41,17 @@ def parse_hwpx_bytes(data: bytes, *, filename: str = "doc.hwpx") -> ParseOutput:
     doc = hwpx.HwpxDocument.open(io.BytesIO(data))
     markdown = doc.export_markdown()
 
-    table_count, cells_total = _table_metrics(doc, warnings)
+    table_count = _table_count(doc, warnings)
+    if table_count is None:
+        # 기준값이 없으면 손실을 판정할 수 없다 — 마크다운 개수를 그대로 써서
+        # G2 를 무력화한다(근거 없이 실패로 몰지 않는다).
+        table_count = count_markdown_tables(markdown)
+        warnings.append("TABLE_COUNT_UNAVAILABLE")
 
     metrics = ParseMetrics(
         text_length=len(markdown),
         source_bytes=len(data),
         table_count=table_count,
-        # python-hwpx 는 셀 단위 추출 실패 신호를 주지 않는다 — 총계만 채우고
-        # failures 는 0 으로 둔다(= G2 는 이 엔진에서 발동하지 않음).
-        table_cells_total=cells_total,
         warnings=warnings,
     )
     return ParseOutput(markdown=markdown, metrics=metrics, engine=ENGINE)
@@ -64,22 +66,14 @@ def hwpx_available() -> bool:
         return False
 
 
-def _table_metrics(doc: object, warnings: list[str]) -> tuple[int, int]:
-    """(표 개수, 셀 총수). 실패해도 파싱 자체는 살린다."""
+def _table_count(doc: object, warnings: list[str]) -> int | None:
+    """OWPML 구조가 말하는 표 개수. 셀 수 없으면 None (파싱 자체는 살린다)."""
     try:
         get_table_map = getattr(doc, "get_table_map", None)
         if not callable(get_table_map):
-            return 0, 0
-        tables = (get_table_map() or {}).get("tables") or []
-        cells = 0
-        for t in tables:
-            explicit = t.get("cells")
-            if explicit:
-                cells += len(explicit)
-            else:
-                cells += int(t.get("rows") or 0) * int(t.get("cols") or 0)
-        return len(tables), cells
+            return None
+        return len((get_table_map() or {}).get("tables") or [])
     except Exception as exc:  # noqa: BLE001
         logger.warning("hwpx table map failed: %s", exc)
         warnings.append(f"TABLE_MAP_FAIL:{exc}")
-        return 0, 0
+        return None

@@ -26,6 +26,7 @@ def is_under_folder_allowlist(
 
     queue = list(parents)
     seen: set[str] = set()
+    resolution_error: Exception | None = None
     while queue:
         pid = queue.pop()
         if not pid or pid in seen:
@@ -36,5 +37,12 @@ def is_under_folder_allowlist(
         try:
             queue.extend(resolve_parents(pid))
         except Exception as exc:  # noqa: BLE001
-            logger.debug("parent resolve failed id=%s: %s", pid, exc)
+            # 다른 parent 경로가 allowlist에 닿을 수 있으므로 끝까지 확인하되,
+            # 어느 경로라도 조회하지 못했다면 '범위 밖'으로 단정하지 않는다.
+            resolution_error = exc
+            logger.warning("parent resolve failed id=%s: %s", pid, exc)
+    if resolution_error is not None:
+        raise RuntimeError(
+            f"cannot determine folder scope for {file_id}: parent lookup failed"
+        ) from resolution_error
     return False

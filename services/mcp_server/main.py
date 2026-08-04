@@ -30,6 +30,7 @@ from shared.config import get_settings  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
 from shared.lexical_rerank import query_terms, rrf_rerank, term_coverage  # noqa: E402
+from shared.models import DocStatus  # noqa: E402
 from shared.rag_engine import RagEngineClient  # noqa: E402
 from shared.search_postprocess import (  # noqa: E402
     build_answer_payload,
@@ -42,6 +43,21 @@ logger = logging.getLogger("mcp_server")
 
 settings = get_settings()
 MCP_API_KEY = os.environ.get("MCP_API_KEY", "").strip()
+# 키가 없으면 ApiKeyMiddleware 가 통째로 무력화된다(401 이 아니라 그냥 통과).
+# 배포가 공개(allUsers)로 바뀌는 순간 코퍼스 전체가 무인증 노출이므로, 인증 없이
+# 뜨는 것은 반드시 의도한 선택이어야 한다 — 명시적 opt-in 없이는 기동을 거부한다.
+# IAM(ID 토큰) 으로만 여는 scripts/deploy.sh 경로에서 이 값을 켠다.
+MCP_ALLOW_NO_AUTH = os.environ.get("MCP_ALLOW_NO_AUTH", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+# search 가 노출하는 top_k 상한. 사용자 요청 k 는 이 값으로 clamp 된다.
+MAX_TOP_K = 20
+# 필터·중복 제거가 걷어낼 몫. k 가 커도 최소 이만큼은 더 받아 자리를 채운다.
+_FETCH_HEADROOM = 10
+_MAX_FETCH = MAX_TOP_K + _FETCH_HEADROOM
 
 mcp = FastMCP(
     "rag-search",
@@ -165,7 +181,7 @@ def search(
         return cached
 
     rag = RagEngineClient(settings)
-    # 여유분 retrieve 후 후처리(파일당 1청크 중복 제거)로 k개.
+    # 여유분 retrieve 후 후처리(파일당 청크 병합)로 k개.
     # 상한을 k*배수보다 낮게 두면 큰 k 에서 여유분이 사라져 k 개를 못 채운다.
     fetch_k = min(
         settings.search_fetch_max,
@@ -184,6 +200,37 @@ def search(
     if settings.search_lexical_rerank and len(raw_hits) > 1:
         order = rrf_rerank(query, [h.text for h in raw_hits])
         raw_hits = [raw_hits[i] for i in order]
+
+    store = DocStateStore(settings)
+    # 상태·드라이브 필터는 **postprocess 앞**에 둔다. 뒤에 두면 postprocess 가 이미
+    # k 개 문서로 잘라 놓은 뒤라, 걸러낸 자리가 빈 채로 남아 top_k 보다 적게 나간다.
+    # 앞에서 걷어내면 청크 병합 예산(max_total_chunks)도 살아남을 문서에만 쓰인다.
+    meta_cache: dict[str, Any] = {}
+
+    def _meta(file_id: str) -> Any:
+        if file_id not in meta_cache:
+            meta_cache[file_id] = store.get(file_id)
+        return meta_cache[file_id]
+
+    def _servable(hit: Any) -> bool:
+        meta = _meta(hit.source.file_id)
+        if meta and (
+            # EXCLUDED = 대상 폴더 밖. 코퍼스 정리가 비동기라 청크가 남아 있을 수
+            # 있으므로 검색 단에서도 막는다.
+            meta.status in {DocStatus.SKIPPED, DocStatus.EXCLUDED, DocStatus.DELETED}
+            or (
+                meta.status == DocStatus.FAILED
+                and (meta.error or "").startswith("out_of_folder_scope_cleanup_failed")
+            )
+        ):
+            # 비동기 코퍼스 정리·재시도가 수렴하는 동안의 이중 방어.
+            return False
+        if drive_id and meta and meta.drive_id != drive_id:
+            return False
+        return True
+
+    raw_hits = [h for h in raw_hits if _servable(h)]
+
     hits = postprocess_hits(
         raw_hits,
         top_k=k,
@@ -197,16 +244,15 @@ def search(
             query, len(raw_hits), threshold,
         )
 
-    store = DocStateStore(settings)
     # 질의어별 근거 유무를 청크마다 붙인다. 지시문은 무시당해도 데이터는
     # 남으므로, 호출 LLM 이 '이 문서는 질의의 어느 부분을 덮는가'를 스스로
     # 판단할 수 있어야 서로 다른 문서를 하나로 합치는 답이 줄어든다.
     terms = query_terms(query)
     results: list[dict[str, Any]] = []
     for hit in hits:
-        meta = store.get(hit.source.file_id)
-        if drive_id and meta and meta.drive_id != drive_id:
-            continue
+        # 상태·드라이브 필터는 postprocess 전에 이미 걸렀다(_servable). 여기서는
+        # 그때 읽어 둔 메타를 재사용만 한다 — 같은 문서를 두 번 조회하지 않는다.
+        meta = _meta(hit.source.file_id)
         display_name = (
             (meta.name if meta and meta.name else None)
             or hit.source.name
@@ -287,7 +333,17 @@ async def health(_request: Request):  # type: ignore[no-untyped-def]
 
 
 def build_app():
-    """ASGI 앱 (+ API 키 미들웨어)."""
+    """ASGI 앱 (+ API 키 미들웨어). 인증이 없으면 기동을 거부한다."""
+    if not MCP_API_KEY and not MCP_ALLOW_NO_AUTH:
+        raise RuntimeError(
+            "MCP_API_KEY is not set and MCP_ALLOW_NO_AUTH is not enabled — "
+            "refusing to serve the corpus without authentication"
+        )
+    if not MCP_API_KEY:
+        logger.warning(
+            "starting WITHOUT app-level auth (MCP_ALLOW_NO_AUTH=true) — "
+            "the deployment must stay IAM-protected"
+        )
     app = mcp.streamable_http_app()
     app.add_middleware(ApiKeyMiddleware)
     return app

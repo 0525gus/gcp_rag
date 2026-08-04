@@ -16,13 +16,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import services.sync.main as sync_main  # noqa: E402
+from services.sync.main import ReconcileBody, reconcile  # noqa: E402
+from shared import rag_engine  # noqa: E402
 from shared.config import Settings  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.models import DocState, DocStatus  # noqa: E402
-from shared import rag_engine  # noqa: E402
 from shared.rag_engine import RagEngineClient  # noqa: E402
-import services.sync.main as sync_main  # noqa: E402
-from services.sync.main import ReconcileBody, reconcile  # noqa: E402
 
 
 # ---------------------------------------------------------------- #3
@@ -93,6 +93,8 @@ def test_delete_files_by_ids_single_list(monkeypatch) -> None:
             _FakeRagFile("f1.md", "rn1"),
             _FakeRagFile("f1.meta.md", "rn2"),
             _FakeRagFile("f2.pdf", "rn3"),
+            _FakeRagFile("f10.pdf", "rn-collision"),
+            _FakeRagFile("prefix-f1.md", "rn-substring"),
             _FakeRagFile("other.md", "rn4"),
         ]
 
@@ -105,6 +107,39 @@ def test_delete_files_by_ids_single_list(monkeypatch) -> None:
     assert calls["list"] == 1  # 핵심: 배치 전체에 코퍼스 1회 순회
     assert n == 3
     assert set(calls["deleted"]) == {"rn1", "rn2", "rn3"}
+
+
+def test_shared_client_scans_the_corpus_once_across_batches(monkeypatch) -> None:
+    """배치마다 지우되(지우는 집합 = 넣는 집합) 순회는 첫 배치에서 한 번만."""
+    client = object.__new__(RagEngineClient)
+    # 인덱스 캐시는 코퍼스 이름으로 키잉된다(학생/교직원 분리) — 스텁도 이름이 필요하다.
+    client.corpus_name = "corpora/shared-scan"
+    client.settings = get_settings_for_test()
+    rag_engine._CORPUS_INDEX_CACHE.pop(client.corpus_name, None)
+    rag_engine._CORPUS_DIRTY_IDS.pop(client.corpus_name, None)
+    calls = {"list": 0, "deleted": []}
+
+    def fake_list() -> list[_FakeRagFile]:
+        calls["list"] += 1
+        return [
+            _FakeRagFile("f1.md", "rn1"),
+            _FakeRagFile("f2.pdf", "rn2"),
+            _FakeRagFile("f3.md", "rn3"),
+        ]
+
+    client.list_files = fake_list  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        rag_engine.rag, "delete_file", lambda name: calls["deleted"].append(name)
+    )
+
+    assert client.delete_files_by_ids(["f1"]) == 1
+    assert client.delete_files_by_ids(["f2"]) == 1
+    assert client.delete_files_by_ids(["f3"]) == 1
+    assert calls["list"] == 1
+    assert calls["deleted"] == ["rn1", "rn2", "rn3"]
+    # 이미 지운 파일을 다시 지우라고 해도 재순회하지 않는다.
+    assert client.delete_files_by_ids(["f1"]) == 0
+    assert calls["list"] == 1
 
 
 def test_delete_files_by_ids_empty(monkeypatch) -> None:
@@ -149,6 +184,16 @@ def test_reconcile_uris_fallback_to_gcs() -> None:
     assert r["indexConsistent"] is True
 
 
+def test_reconcile_detects_missing_indexed_uri() -> None:
+    body = ReconcileBody(
+        driveId="d", listed=2, gcsUploaded=2, uris=2, indexed=1,
+        failed=0, skipped=0, deleted=0, unchanged=0,
+    )
+    r = reconcile(body)
+    assert r["indexConsistent"] is False
+    assert r["ok"] is False
+
+
 def test_reconcile_detects_real_gap() -> None:
     # listed=5, 실제 4만 계정 → 진짜 누락 1건은 여전히 잡아야 함
     body = ReconcileBody(
@@ -168,6 +213,9 @@ def test_ingest_out_of_scope_returns_uppercase_excluded(monkeypatch) -> None:
         sync_folder_id_list = ["folderX"]
 
     class FakeStore:
+        def get(self, _file_id):
+            return None
+
         def upsert(self, *a, **k) -> None:
             pass
 
@@ -179,6 +227,9 @@ def test_ingest_out_of_scope_returns_uppercase_excluded(monkeypatch) -> None:
     monkeypatch.setattr(sync_main, "DocStateStore", lambda *a, **k: FakeStore())
     monkeypatch.setattr(sync_main, "GcsClient", lambda *a, **k: object())
     monkeypatch.setattr(sync_main, "DriveClient", lambda *a, **k: FakeDrive())
+    monkeypatch.setattr(
+        sync_main, "_cleanup_out_of_scope_file", lambda *a, **k: (False, 0, 0)
+    )
 
     res = ingest(IngestBody(fileId="f1", driveId="d", mimeType="application/pdf"))
     # 원래 이 테스트가 고정하려던 것은 '대문자 enum 값'이었다. 거기에 더해
@@ -333,7 +384,7 @@ def test_list_changes_drops_entries_without_file_id(monkeypatch) -> None:
 
     client._service = type("_S", (), {"changes": staticmethod(lambda: _Changes())})()
 
-    changes, token = client.list_changes("drive1", "t1")
+    changes, token, has_more = client.list_changes("drive1", "t1")
     assert [c.file_id for c in changes] == ["realid1234"]
     assert token == "t2"
 
@@ -346,7 +397,12 @@ def test_workflow_yaml_parses_and_uses_uris_gate() -> None:
     txt = p.read_text(encoding="utf-8")
     data = yaml.safe_load(txt)
     assert "main" in data
-    assert "drive_indexed == drive_uris" in txt
+    # 색인 실패는 failed 와 분리해 세지만(이중 집계 방지) 커밋은 똑같이 막아야 한다.
+    assert (
+        "drive_failed == 0 and drive_index_failed == 0 and drive_indexed == drive_uris"
+        in txt
+    )
+    assert "drive_reconciled == true" in txt
     assert "drive_indexed == drive_gcs" not in txt
     assert "uris: ${drive_uris}" in txt
 
@@ -513,6 +569,9 @@ def test_index_gcs_keeps_parsed_on_partial_failure(monkeypatch) -> None:
             )
 
     class _Store:
+        def get(self, _fid):
+            return None
+
         def mark_indexed(self, fid):
             marked.append(fid)
 
@@ -552,6 +611,9 @@ def test_index_gcs_marks_indexed_on_full_success(monkeypatch) -> None:
             )
 
     class _Store:
+        def get(self, _fid):
+            return None
+
         def mark_indexed(self, fid):
             marked.append(fid)
 

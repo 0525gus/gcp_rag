@@ -46,6 +46,13 @@ PARSER_URL=$(gcloud run services describe rag-parser --region="${REGION}" --form
 SYNC_URL=$(gcloud run services describe rag-sync --region="${REGION}" --format='value(status.url)')
 echo "SYNC_URL=${SYNC_URL}"
 
+# BACKFILL=1 은 드라이브 전체 재적재다 — 스모크 테스트 이름 아래 켜지기엔 무겁다.
+if [[ "${BACKFILL:-0}" == "1" && "${CONFIRM_BACKFILL:-}" != "yes" ]]; then
+  echo "BACKFILL=1 은 드라이브 전체를 다시 적재합니다." >&2
+  echo "계속하려면 CONFIRM_BACKFILL=yes 를 함께 지정하세요." >&2
+  exit 1
+fi
+
 echo "== [2/3] 워크플로우 실행 (drive=${DRIVE} backfill=${BACKFILL:-0}) =="
 ARG="{\"syncUrl\":\"${SYNC_URL}\",\"parserUrl\":\"${PARSER_URL}\",\"driveIds\":[\"${DRIVE}\"]"
 [[ "${BACKFILL:-0}" == "1" ]] && ARG="${ARG},\"backfill\":true"

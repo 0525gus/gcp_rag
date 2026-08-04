@@ -14,7 +14,6 @@ from shared.lexical_rerank import query_terms, term_coverage
 from shared.search_postprocess import (
     build_answer_payload,
     citation_label,
-    distance_to_relevance,
     extract_file_id,
     postprocess_hits,
     unescape_chunk_text,
@@ -95,6 +94,29 @@ def test_allowlist_matches_file_id_itself() -> None:
     )
 
 
+def test_allowlist_parent_lookup_failure_is_not_out_of_scope() -> None:
+    def fail(_file_id: str) -> list[str]:
+        raise RuntimeError("Drive unavailable")
+
+    with pytest.raises(RuntimeError, match="cannot determine folder scope"):
+        is_under_folder_allowlist(
+            file_id="f",
+            parents=["unknown-parent"],
+            allowlist={"root"},
+            resolve_parents=fail,
+        )
+
+
+def test_drive_scope_initial_lookup_failure_propagates() -> None:
+    client = object.__new__(DriveClient)
+    client.get_parents = lambda _file_id: (_ for _ in ()).throw(  # type: ignore[method-assign]
+        RuntimeError("Drive unavailable")
+    )
+
+    with pytest.raises(RuntimeError, match="Drive unavailable"):
+        client.is_in_sync_scope("f", ["root"])
+
+
 # ---------------------------------------------------------------- cleanup
 @pytest.mark.parametrize("line", ["- 3 -", "3 -", "12", "- 3", "iv"])
 def test_strip_noise_removes_page_numbers(line: str) -> None:
@@ -168,6 +190,7 @@ def test_is_hwpx_distinguishes_from_hwp() -> None:
         ("abc123.meta.md", "abc123"),
         ("normalized/abc123.pdf", "abc123"),
         ("gs://b/normalized/abc123.docx", "abc123"),
+        ("gs://b/normalized/abc123.doc", "abc123"),
         ("noext", "noext"),
         # 파이프라인이 실제로 만드는 확장자인데 목록에 빠져 있었다.
         # 빠지면 fileId 로 안 접혀 코퍼스 삭제가 대상을 못 찾고,
@@ -184,18 +207,6 @@ def test_extract_file_id(display: str, expected: str) -> None:
 
 def test_extract_file_id_falls_back_to_source_uri() -> None:
     assert extract_file_id("", "gs://b/normalized/xyz.md") == "xyz"
-
-
-def test_distance_to_relevance_is_monotonic_decreasing() -> None:
-    # 거리가 멀수록 relevance는 낮아야 함
-    assert distance_to_relevance(0.0) > distance_to_relevance(0.5)
-    assert distance_to_relevance(0.5) > distance_to_relevance(1.0)
-
-
-def test_distance_to_relevance_clamps_range() -> None:
-    assert distance_to_relevance(-1.0) == 0.0
-    assert 0.0 <= distance_to_relevance(0.0) <= 1.0
-    assert 0.0 <= distance_to_relevance(100.0) <= 1.0
 
 
 def test_unescape_chunk_text_normalizes_entities_and_newlines() -> None:
@@ -457,3 +468,22 @@ def test_total_budget_spreads_before_deepening() -> None:
         hits, top_k=2, max_chunks_per_file=3, max_total_chunks=4
     )
     assert [h.text.count("[...]") for h in out] == [1, 1]
+
+
+# ------------------------------------------------- MCP 무인증 기동 거부
+def test_mcp_refuses_to_serve_without_any_authentication(monkeypatch) -> None:
+    """키가 없으면 미들웨어가 통째로 무력화된다 — 조용히 열리지 말고 기동을 거부한다."""
+    import services.mcp_server.main as mcp_main
+
+    monkeypatch.setattr(mcp_main, "MCP_API_KEY", "")
+    monkeypatch.setattr(mcp_main, "MCP_ALLOW_NO_AUTH", False)
+    with pytest.raises(RuntimeError, match="without authentication"):
+        mcp_main.build_app()
+
+
+def test_mcp_allows_no_auth_only_as_an_explicit_opt_in(monkeypatch) -> None:
+    import services.mcp_server.main as mcp_main
+
+    monkeypatch.setattr(mcp_main, "MCP_API_KEY", "")
+    monkeypatch.setattr(mcp_main, "MCP_ALLOW_NO_AUTH", True)
+    assert mcp_main.build_app() is not None

@@ -27,7 +27,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from shared.config import get_settings  # noqa: E402
-from shared.gcs import GcsClient  # noqa: E402
+from shared.gcs import GcsClient, parse_gs_uri  # noqa: E402
 from shared.hashing import sha256_text  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
 from shared.mime_types import is_hwpx  # noqa: E402
@@ -41,7 +41,10 @@ from services.parser.engine import (  # noqa: E402
     parse_document_bytes,
 )
 from services.parser.hwpx_parser import ENGINE as HWPX_ENGINE  # noqa: E402
-from services.parser.quality_gate import evaluate_quality  # noqa: E402
+from services.parser.quality_gate import (  # noqa: E402
+    count_markdown_tables,
+    evaluate_quality,
+)
 
 setup_logging()
 logger = logging.getLogger("parser_service")
@@ -83,6 +86,26 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
         engine_name = "python-hwpx/rhwp" if is_hwpx_filename(filename) else "rhwp-python"
         raise HTTPException(status_code=503, detail=f"{engine_name} is not installed")
 
+    # sync 가 다운로드 전에 이미 걸러 주지만, 파서를 직접 부르는 경로(수동 재처리
+    # 등)에는 방어가 없다 — 원본을 통째로 메모리에 올리기 전에 막는다.
+    try:
+        bucket_name, blob_name = parse_gs_uri(req.gcs_uri)
+        blob = gcs._client.bucket(bucket_name).get_blob(blob_name)
+        size = getattr(blob, "size", None) if blob else None
+    except Exception:  # noqa: BLE001
+        # 크기를 못 재면 통과시킨다 — 게이트가 아니라 방어선이다.
+        size = None
+    if size is not None and size > settings.max_gcs_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": "SOURCE_TOO_LARGE",
+                "sizeBytes": size,
+                "limit": settings.max_gcs_bytes,
+                "fileId": req.file_id,
+            },
+        )
+
     try:
         raw = gcs.download_bytes(req.gcs_uri)
     except Exception as exc:  # noqa: BLE001
@@ -93,6 +116,8 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
         parsed = parse_document_bytes(raw, filename=filename)
         markdown = cleanup_markdown(parsed.markdown)
         parsed.metrics.text_length = len(markdown)
+        # 최종 본문 기준으로 잰다 — cleanup 이 표를 지웠다면 그것도 손실이다.
+        parsed.metrics.tables_rendered = count_markdown_tables(markdown)
     except Exception as exc:  # noqa: BLE001
         logger.exception("parse failed for %s", req.file_id)
         raise HTTPException(

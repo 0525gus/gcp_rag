@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from services.parser.quality_gate import ParseMetrics
+from services.parser.quality_gate import ParseMetrics, count_markdown_tables
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,12 @@ def parse_hwp_bytes(data: bytes, *, filename: str = "doc.hwp") -> ParseOutput:
 
     ir = doc.to_ir()
     markdown = ir.to_markdown()
-    table_count = _count_tables(ir, markdown)
+    table_count = _count_tables_in_ir(ir)
+    if table_count is None:
+        # IR 에서 못 세면 표 손실을 판정할 기준이 없다. 마크다운에 남은 수를 그대로
+        # 기준으로 삼아 G2 를 무력화한다 — 근거 없이 실패로 몰지 않는다.
+        table_count = count_markdown_tables(markdown)
+        warnings.append("TABLE_COUNT_UNAVAILABLE")
 
     metrics = ParseMetrics(
         text_length=len(markdown),
@@ -66,27 +71,21 @@ def rhwp_available() -> bool:
         return False
 
 
-def _count_tables(ir: object, markdown: str) -> int:
-    count = 0
+def _count_tables_in_ir(ir: object) -> int | None:
+    """문서 구조가 말하는 표 개수. 셀 수 없으면 None.
+
+    마크다운을 세지 않는다 — 이 값은 '마크다운에 몇 개가 살아남았나'를 재는
+    기준값이므로, 마크다운에서 유도하면 손실이 항상 0 이 되어 판정이 무의미해진다.
+    """
     try:
         # HwpDocument 는 .blocks 가 아니라 .body/.furniture 구조 —
         # iter_blocks(scope="all") 가 표를 세는 정식 경로 (중첩 표도 포함).
         from rhwp.ir.nodes import TableBlock  # noqa: PLC0415
 
         iter_blocks = getattr(ir, "iter_blocks", None)
-        if callable(iter_blocks):
-            count = sum(
-                1 for b in iter_blocks(scope="all") if isinstance(b, TableBlock)
-            )
-    except Exception:  # noqa: BLE001
-        count = 0
-    if count == 0:
-        count = markdown.lower().count("<table")
-    if count == 0:
-        lines = markdown.splitlines()
-        count = sum(
-            1
-            for i, line in enumerate(lines[:-1])
-            if line.strip().startswith("|") and "---" in lines[i + 1]
-        )
-    return count
+        if not callable(iter_blocks):
+            return None
+        return sum(1 for b in iter_blocks(scope="all") if isinstance(b, TableBlock))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("table count from IR failed: %s", exc)
+        return None

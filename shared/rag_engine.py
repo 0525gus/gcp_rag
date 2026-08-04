@@ -7,9 +7,9 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import vertexai
 from google.api_core import exceptions as gcp_exceptions
 from vertexai import rag
-import vertexai
 
 from shared.config import Settings, get_settings
 from shared.models import SearchHit, SearchSource
@@ -66,6 +66,52 @@ class ImportOutcome:
         return self.failed == 0 and (self.imported + self.skipped) >= len(self.uris)
 
 
+class RagImportError(RuntimeError):
+    """RAG import가 요청 전체를 확실히 처리하지 못했을 때 발생한다."""
+
+    def __init__(
+        self,
+        *,
+        requested: int,
+        imported: int,
+        failed: int,
+        skipped: int,
+        partial_failures: str | None = None,
+    ) -> None:
+        self.requested = requested
+        self.imported = imported
+        self.failed = failed
+        self.skipped = skipped
+        self.partial_failures = partial_failures
+        detail = (
+            f"requested={requested} imported={imported} "
+            f"failed={failed} skipped={skipped}"
+        )
+        if partial_failures:
+            detail += f" partialFailures={partial_failures}"
+        super().__init__(f"RAG import incomplete: {detail}")
+
+
+def _with_throttle_retry(fn: Any, *, what: str, max_retries: int = 5) -> Any:
+    """RPM 초과(429)만 지수 백오프로 재시도한다.
+
+    import 에만 재시도가 걸려 있었다. list/delete 는 배치 하나가 수십 번 부르는데도
+    무방비라, 쿼터를 넘기면 그대로 호출측까지 튀어 500 이 되고 — SKIP 분기처럼
+    워크플로우 재시도가 없는 경로에서는 pageToken 이 영구 미커밋으로 굳는다.
+    """
+    delay = 1.0
+    last: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except gcp_exceptions.ResourceExhausted as exc:
+            last = exc
+            logger.warning("RAG %s throttled (attempt %s): %s", what, attempt + 1, exc)
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+    raise RuntimeError(f"RAG {what} failed after {max_retries} retries: {last}")
+
+
 class RagEngineClient:
     def __init__(
         self,
@@ -77,7 +123,8 @@ class RagEngineClient:
 
         학생/교직원 코퍼스를 나누면서 인스턴스마다 대상이 달라진다. 아래 인덱스
         캐시는 처음부터 corpus_name 으로 키잉돼 있어(_CORPUS_INDEX_CACHE) 코퍼스가
-        여럿이어도 서로 섞이지 않는다.
+        여럿이어도 서로 섞이지 않는다 — 인스턴스 속성 스냅샷으로는 코퍼스가 둘
+        이상일 때 서로 덮어쓴다.
         """
         self.settings = settings or get_settings()
         vertexai.init(
@@ -193,14 +240,20 @@ class RagEngineClient:
                     )
                 else:
                     # 여기가 유일한 신호다. 예외가 아니므로 위로 안 올라간다.
+                    # partial_failures_* 는 Vertex 가 실패 상세를 적어 두는 경로라
+                    # 어느 파일이 왜 죽었는지 확인하려면 이것부터 봐야 한다.
+                    partial_failures = getattr(
+                        response, "partial_failures_gcs_path", None
+                    ) or getattr(response, "partial_failures_bigquery_table", None)
                     logger.error(
                         "RAG import 부분 실패 corpus=%s uris=%s imported=%s "
-                        "failed=%s skipped=%s sample=%s",
+                        "failed=%s skipped=%s partial_failures=%s sample=%s",
                         self.corpus_name,
                         len(gcs_uris),
                         outcome.imported,
                         outcome.failed,
                         outcome.skipped,
+                        partial_failures,
                         [u.rsplit("/", 1)[-1] for u in gcs_uris[:5]],
                     )
                 return outcome
@@ -235,29 +288,12 @@ class RagEngineClient:
                 delay = min(delay * 2, 60)
         raise RuntimeError(f"RAG import failed after retries: {last_err}")
 
-    def import_drive_files(
-        self,
-        drive_folder_or_file_ids: list[str],
-        *,
-        chunk_size: int = 512,
-        chunk_overlap: int = 100,
-    ) -> Any:
-        """네이티브 Drive 커넥터 경로 (기타 지원 포맷)."""
-        transformation = rag.TransformationConfig(
-            chunking_config=rag.ChunkingConfig(
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
+    def list_files(self) -> list[Any]:
+        return list(
+            _with_throttle_retry(
+                lambda: rag.list_files(corpus_name=self.corpus_name), what="list_files"
             )
         )
-        return rag.import_files(
-            self.corpus_name,
-            drive_folder_or_file_ids,
-            transformation_config=transformation,
-        )
-
-    def list_files(self) -> list[Any]:
-        return list(rag.list_files(corpus_name=self.corpus_name))
-
     def _file_index(self, wanted: set[str] | None = None) -> dict[str, list[str]]:
         """fileId → RagFile resource_name 목록.
 
@@ -284,8 +320,13 @@ class RagEngineClient:
             if not resource_name:
                 continue
             display = getattr(f, "display_name", "") or ""
-            # 정규화 산출물은 {fileId}{.partN}{확장자} 꼴이라 여기서 되돌린다
-            index.setdefault(extract_file_id(display), []).append(resource_name)
+            source_uri = getattr(f, "source_uri", None)
+            # 정규화 산출물은 {fileId}{.partN}{확장자} 꼴이라 여기서 되돌린다.
+            # display_name 이 잘렸을 때를 대비해 source_uri 도 같이 넘긴다 —
+            # 부분문자열 비교로 떨어지면 f1 을 지우며 f10 까지 지운다.
+            index.setdefault(extract_file_id(display, source_uri), []).append(
+                resource_name
+            )
         _CORPUS_INDEX_CACHE[self.corpus_name] = (time.monotonic(), index)
         _CORPUS_DIRTY_IDS[self.corpus_name] = set()
         logger.info("RAG corpus index built: %s files", sum(map(len, index.values())))
@@ -300,13 +341,6 @@ class RagEngineClient:
         """코퍼스가 크게 바뀐 뒤 캐시를 통째로 버린다."""
         _CORPUS_INDEX_CACHE.pop(self.corpus_name, None)
         _CORPUS_DIRTY_IDS.pop(self.corpus_name, None)
-
-    def find_rag_file_by_display_name(self, display_name: str) -> Any | None:
-        for f in self.list_files():
-            name = getattr(f, "display_name", "") or ""
-            if name == display_name or display_name in name:
-                return f
-        return None
 
     def delete_by_file_id(self, file_id: str) -> bool:
         """fileId 기반 청크 제거 (display_name / 메타데이터 매칭)."""
@@ -335,7 +369,12 @@ class RagEngineClient:
         def _delete_one(item: tuple[str, str]) -> tuple[str, str] | None:
             fid, resource_name = item
             try:
-                rag.delete_file(name=resource_name)
+                # 페이싱으로도 쿼터를 다 못 막는다(동시 실행 + 다른 배치와 경합).
+                # 429 는 기다리면 풀리므로 여기서 한 번 더 삼킨다.
+                _with_throttle_retry(
+                    lambda name=resource_name: rag.delete_file(name=name),
+                    what="delete_file",
+                )
                 logger.info("Deleted RAG file: %s (%s)", resource_name, fid)
                 return item
             except Exception:  # noqa: BLE001

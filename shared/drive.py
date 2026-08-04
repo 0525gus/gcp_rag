@@ -18,11 +18,22 @@ logger = logging.getLogger(__name__)
 
 FILE_FIELDS = (
     "id,name,mimeType,modifiedTime,trashed,md5Checksum,"
-    "webViewLink,parents,driveId"
+    # size 는 다운로드 '전에' 크기를 거르기 위해 필요하다. 받아 놓고 재면 이미
+    # 메모리를 점유한 뒤라, 백필의 병렬 워커가 큰 파일을 동시에 물면 OOM 이다.
+    # Google 네이티브(Docs/Sheets/Slides)는 blob 이 아니라서 이 필드가 없다.
+    "size,webViewLink,parents,driveId"
 )
 
 # googleapiclient 내장 재시도: 429/5xx·연결 오류에 지수 백오프 (커스텀 로직 불필요)
 NUM_RETRIES = 5
+
+
+def parse_drive_size(raw: Any) -> int | None:
+    """Drive 는 size 를 문자열로 준다. 없거나 이상하면 None(=크기 미상)."""
+    try:
+        return int(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 class DriveClient:
@@ -46,14 +57,30 @@ class DriveClient:
         return resp["startPageToken"]
 
     def list_changes(
-        self, drive_id: str, page_token: str
-    ) -> tuple[list[DriveChange], str]:
-        """changes.list 페이지네이션. 반환: (변경 목록, newStartPageToken)."""
+        self, drive_id: str, page_token: str, *, max_changes: int | None = None
+    ) -> tuple[list[DriveChange], str, bool]:
+        """changes.list 페이지네이션. 반환: (변경 목록, 다음 토큰, 더 남았는지).
+
+        ``max_changes`` 를 주면 그 건수를 채우는 즉시 멈추고 재개용 토큰을 돌려준다.
+        델타 전체를 한 번에 반환하면 호출측(Cloud Workflows)의 변수 한도 512KB를
+        넘겨 실행 자체가 죽고, 토큰이 커밋되지 않아 다음 실행의 델타가 더 커진다 —
+        한 번 넘으면 자력으로 못 돌아온다. 그래서 여기서 끊는다.
+
+        끝까지 읽었으면 ``newStartPageToken`` 과 ``False`` 를, 중간에 끊었으면
+        ``nextPageToken`` 과 ``True`` 를 돌려준다. 둘 다 다음 ``changes.list`` 의
+        ``pageToken`` 으로 그대로 쓸 수 있으므로 호출측은 구분할 필요가 없다.
+        """
         changes: list[DriveChange] = []
         token: str | None = page_token
         new_start: str | None = None
 
         while token:
+            # 한 페이지를 통째로 받은 뒤에 한도를 재면 최대 pageSize-1 건을 초과해
+            # 돌려준다 — maxChanges=150 을 주면 200 건이 오는 식이라, 한도를 낮춰
+            # 잡으려는 조정이 반대로 돈다. 남은 몫만큼만 요청한다.
+            page_size = 100
+            if max_changes is not None:
+                page_size = max(1, min(page_size, max_changes - len(changes)))
             resp = (
                 self._service.changes()
                 .list(
@@ -62,7 +89,7 @@ class DriveClient:
                     includeItemsFromAllDrives=True,
                     supportsAllDrives=True,
                     spaces="drive",
-                    pageSize=100,
+                    pageSize=page_size,
                     fields=(
                         "nextPageToken,newStartPageToken,"
                         "changes(fileId,removed,file(" + FILE_FIELDS + "))"
@@ -84,11 +111,14 @@ class DriveClient:
             token = resp.get("nextPageToken")
             if "newStartPageToken" in resp:
                 new_start = resp["newStartPageToken"]
+            if max_changes is not None and token and len(changes) >= max_changes:
+                # 재개 지점은 nextPageToken. 이 배치를 커밋하면 다음 호출이 이어받는다.
+                return changes, token, True
 
         if new_start is None:
             # 변경이 없으면 기존 토큰 유지
             new_start = page_token
-        return changes, new_start
+        return changes, new_start, False
 
     def download_file(self, file_id: str) -> bytes:
         request = self._service.files().get_media(
@@ -193,13 +223,9 @@ class DriveClient:
             return True
         initial = parents
         if initial is None:
-            try:
-                initial = self.get_parents(file_id)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "scope check: cannot read parents for %s: %s", file_id, exc
-                )
-                return False
+            # 조회 실패를 범위 밖(False)으로 바꾸면 일시적 Drive 오류가 문서
+            # 삭제로 이어진다. 호출자까지 전파해 배치와 토큰 커밋을 중단한다.
+            initial = self.get_parents(file_id)
         return is_under_folder_allowlist(
             file_id=file_id,
             parents=list(initial),
@@ -297,5 +323,6 @@ class DriveClient:
             trashed=trashed,
             web_view_link=file_meta.get("webViewLink"),
             md5_checksum=file_meta.get("md5Checksum"),
+            size_bytes=parse_drive_size(file_meta.get("size")),
             parents=list(file_meta.get("parents") or []),
         )

@@ -166,21 +166,6 @@ class DocState:
 
 
 @dataclass
-class ParseRequest:
-    gcs_uri: str
-    mime_type: str
-    file_id: str
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> ParseRequest:
-        return cls(
-            gcs_uri=data.get("gcsUri") or data["gcs_uri"],
-            mime_type=data.get("mimeType") or data["mime_type"],
-            file_id=data.get("fileId") or data["file_id"],
-        )
-
-
-@dataclass
 class ParseResult:
     gcs_markdown_uri: str
     route: ParseRoute
@@ -227,4 +212,7 @@ class DriveChange:
     trashed: bool = False
     web_view_link: str | None = None
     md5_checksum: str | None = None
+    # Drive 가 주는 blob 크기. 다운로드 전에 거르는 데 쓴다.
+    # Google 네이티브(Docs/Sheets/Slides)는 blob 이 아니라 None.
+    size_bytes: int | None = None
     parents: list[str] = field(default_factory=list)

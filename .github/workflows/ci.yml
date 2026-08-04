@@ -17,10 +17,12 @@ jobs:
           cache: pip
 
       - name: Install deps
-        # sync 서비스 의존성까지 필요 — 테스트가 services.sync.main을 import 한다
+        # 테스트가 services.sync.main / services.mcp_server.main 을 import 한다.
+        # mcp 의존성을 빼면 검색·인증 테스트가 ModuleNotFoundError 로 죽는데,
+        # 파서 의존성(rhwp 네이티브 휠)은 여기서 받지 않으므로 제외한다.
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-sync.txt
+          pip install -r requirements.txt -r requirements-sync.txt -r requirements-mcp.txt
 
       - name: Test
         run: pytest -q
