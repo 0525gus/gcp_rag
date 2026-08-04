@@ -150,6 +150,13 @@ class ReconcileBody(BaseModel):
     unchanged: int = 0
     dlq: int = 0
     split_queued: int = Field(default=0, alias="splitQueued")
+    # 처리를 **마쳤고** 별도 큐(DLQ·분할 대기)로 보낸 문서 수. dlq/splitQueued 의 합과
+    # 같지만 그쪽은 세부 분류라 accounted 에는 이 값만 더한다.
+    #
+    # failed 와 분리하는 이유는 pageToken 커밋 때문이다. failed 는 '다시 하면 될 수도
+    # 있는 것'이라 토큰을 막아야 하지만, parked 는 '다시 해도 같은 결과'다. 막으면
+    # 그 한 건 때문에 같은 페이지가 매일 재생되고 드라이브가 영구 정지한다.
+    parked: int = 0
     # 동기화 지정 폴더 밖 — 애초에 우리 대상이 아니므로 listed 에서 차감한다.
     excluded: int = 0
 
@@ -353,6 +360,8 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
         "unchanged": 0,
         "dlq": 0,
         "splitQueued": 0,
+        # 처리를 마치고 별도 큐로 보낸 문서. failed 와 달리 커밋을 막지 않는다.
+        "parked": 0,
         # 색인이 덜 된 URI 수. failed 와 분리한다 — reconcile 로 가는 값들과 단위가
         # 달라(그쪽 accounted 는 '파일 수' 기준) 섞으면 없는 불일치가 보고된다.
         # pageToken 커밋 판단에만 쓴다.
@@ -477,11 +486,13 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
                 elif status in {"SKIPPED", "skipped"}:
                     totals["skipped"] += 1
                 elif status == "DLQ":
+                    # 델타 경로와 같은 이유로 failed 가 아니라 parked 다 — 다시 돌려도
+                    # 같은 결과인 문서가 pageToken 커밋을 막으면 백필이 영영 안 끝난다.
                     totals["dlq"] += 1
-                    totals["failed"] += 1
+                    totals["parked"] += 1
                 elif status == "SPLIT_QUEUED":
                     totals["splitQueued"] += 1
-                    totals["failed"] += 1
+                    totals["parked"] += 1
                 else:
                     totals["failed"] += 1
 
@@ -1287,8 +1298,35 @@ def _ingest_direct(
     upload_ext = ".md" if mime in _TEXT_COPY_MIMES else ext
 
     # 다운로드 전 1차 차단. 크기 미상이면 통과하고 아래 사후 검사가 잡는다.
+    #
+    # **여기서 RAG 한도로 재면 안 되는 두 종류가 있다.** 이 게이트의 목적은
+    # '메모리에 올릴 바이트'를 막는 것이지, '색인될 산출물'을 재는 게 아니다.
+    # 산출물 크기는 변환·분할이 끝난 뒤 아래에서 따로 잰다.
+    #
+    #   스프레드시트  원본이 아니라 변환된 .md 가 올라간다. 원본 크기로 재면
+    #                변환하면 통과할 문서를 다운로드도 전에 버린다.
+    #                (실측: 29MB xlsx 가 SPLIT_QUEUED 로 영구 정체 중)
+    #   PDF          한도를 넘으면 버리는 게 아니라 페이지 경계로 쪼갠다.
+    #                여기서 막으면 그 분할 로직에 **영영 도달하지 못한다**.
+    #                (실측: GCS 에 .partN 조각 6개가 남아 있으나 이 게이트가
+    #                 생긴 뒤로는 새로 만들어지지 않는다)
+    #
+    # 둘 다 '내려받아도 되는 최대치'인 MAX_GCS_BYTES 로만 막는다. 그보다 큰 PDF 를
+    # 쪼개려면 MAX_GCS_BYTES 를 올려야 한다 — 기본값은 RAG PDF 한도와 같은 50MB 라
+    # 그대로 두면 분할 구간이 열리지 않는다.
+    if mime in _SPREADSHEET_COPY_MIMES or ext.lower() == ".pdf":
+        pre_ext, pre_limit = ext, settings.max_gcs_bytes
+    else:
+        pre_ext, pre_limit = upload_ext, None
+
     gated = _size_gate(
-        store, settings, body, body.size_bytes, splittable=True, ext=upload_ext
+        store,
+        settings,
+        body,
+        body.size_bytes,
+        splittable=True,
+        ext=pre_ext,
+        limit=pre_limit,
     )
     if gated:
         gated["route"] = "FILE_COPY"
@@ -2146,6 +2184,9 @@ def reconcile(body: ReconcileBody) -> dict[str, Any]:
     accounted = (
         body.gcs_uploaded
         + body.failed
+        # parked(DLQ·분할 대기) 도 '처리를 마친 것'이라 accounted 에 든다. 안 더하면
+        # 그만큼 unaccounted 로 잡혀 정합성 검사가 실패하고 토큰이 안 커밋된다.
+        + body.parked
         + body.skipped
         + body.deleted
         + body.unchanged
@@ -2171,6 +2212,7 @@ def reconcile(body: ReconcileBody) -> dict[str, Any]:
         "uris": body.uris,
         "indexed": body.indexed,
         "failed": body.failed,
+        "parked": body.parked,
         "skipped": body.skipped,
         "deleted": body.deleted,
         "unchanged": body.unchanged,
@@ -2184,6 +2226,13 @@ def reconcile(body: ReconcileBody) -> dict[str, Any]:
         logger.error("Reconciliation mismatch: %s", summary)
     else:
         logger.info("Reconciliation OK: %s", summary)
+    if body.parked:
+        # ok 판정에는 안 들어가므로(토큰을 막지 않는다) 여기서라도 남긴다.
+        # 방치되면 '처리된 줄 알았는데 검색에 안 나오는' 문서가 조용히 쌓인다.
+        logger.warning(
+            "parked %s docs on drive=%s (dlq=%s splitQueued=%s) — 별도 조치 필요",
+            body.parked, body.drive_id, body.dlq, body.split_queued,
+        )
     return summary
 
 

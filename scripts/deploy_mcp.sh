@@ -2,6 +2,16 @@
 # MCP 서버만 Cloud Run에 배포 (FactChat MCP 커넥터용)
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
+# .env 를 올리되 **셸에 이미 있는 값은 건드리지 않는다.** 학생용 배포가
+#   RAG_CORPUS_NAME="${RAG_CORPUS_NAME_STUDENT}" ... ./scripts/deploy_mcp.sh
+# 처럼 앞에 값을 붙여 도는 구조라, 여기서 .env 가 이기면 학생 서비스에
+# 교직원 코퍼스가 실린다.
+# shellcheck source=scripts/_load_env.sh
+. "$(dirname "$0")/_load_env.sh"
+load_dotenv
+
 PROJECT_ID="${GCP_PROJECT_ID:?set GCP_PROJECT_ID}"
 REGION="${GCP_REGION:-asia-northeast3}"
 REPO="${ARTIFACT_REPO:-rag-mcp}"

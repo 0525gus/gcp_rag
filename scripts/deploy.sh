@@ -2,6 +2,14 @@
 # Cloud Run / Workflows / Scheduler 배포 헬퍼
 set -euo pipefail
 
+cd "$(dirname "$0")/.."
+
+# .env 를 셸로 올린다. 안 읽으면 아래 --set-env-vars 의 `:-` 기본값이 운영 값을
+# 조용히 덮어쓴다 (자세한 근거는 scripts/_load_env.sh 주석).
+# shellcheck source=scripts/_load_env.sh
+. "$(dirname "$0")/_load_env.sh"
+load_dotenv
+
 PROJECT_ID="${GCP_PROJECT_ID:?set GCP_PROJECT_ID}"
 REGION="${GCP_REGION:-asia-northeast3}"
 REPO="${ARTIFACT_REPO:-rag-mcp}"
@@ -53,12 +61,23 @@ gcloud run deploy rag-parser \
   --region="${REGION}" \
   --no-allow-unauthenticated \
   --set-env-vars="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_REGION=${REGION}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|DOCAI_PROCESSOR_ID=${DOCAI_PROCESSOR_ID:-}|QG_MODE=${QG_MODE:-log}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}" \
-  --memory=2Gi --cpu=2 --timeout=600 \
-  --concurrency="${PARSER_CONCURRENCY:-8}"
+  --memory=2Gi --cpu=2 --timeout="${PARSER_TIMEOUT:-540}" \
+  --concurrency="${PARSER_CONCURRENCY:-4}" \
+  --max-instances="${PARSER_MAX_INSTANCES:-10}"
 # concurrency 를 낮게 두는 이유: 파서는 HWP 원본을 통째로 메모리에 올리고
-# 네이티브 확장(rhwp)으로 파싱한다. 2Gi 에 동시 요청이 몰리면 OOM 이다.
-# 실효 동시성은 어차피 RAW_UPLOAD_CONCURRENCY(=8) 로 묶여 있으니 그에 맞춘다.
-# (운영에 손으로 160 이 들어가 있었다 — 여태 안 터진 건 워크플로가 순차라서다)
+# (services/parser/main.py `gcs.download_bytes`) 네이티브 확장(rhwp)으로 파싱한다.
+# 요청 하나가 원본 최대 50MB(MAX_GCS_BYTES) + 파싱 작업 메모리를 잡으므로 2Gi 로는
+# 4건 남짓이 한계다. 핵심은 '동시성을 줄인다'가 아니라 **넘치는 요청을 새 인스턴스로
+# 흘린다**는 것 — 5번째 요청부터 각자 2Gi 를 쥔 인스턴스가 뜬다.
+# 실효 호출자는 RAW_UPLOAD_CONCURRENCY(=8) 이라 인스턴스 2대로 흡수된다.
+# (운영에 손으로 160 이 들어가 있었다 — 여태 안 터진 건 델타 경로가 순차라서고,
+#  백필·retry-failed 를 돌리는 순간 8병렬이 한 인스턴스에 쌓인다)
+#
+# timeout 540 < sync 의 httpx 600 — 서버가 먼저 포기해야 sync 가 진짜 오류를 받는다.
+# 같게 두면 안 된다: 클라이언트 타이머는 요청을 보낸 순간, 서버 타이머는 받은 순간
+# 시작하므로 콜드스타트만큼 서버 데드라인이 뒤로 밀린다.
+#
+# max-instances 는 비용 상한이다. 미설정 시 기본 100 까지 뜬다.
 
 # --timeout 을 워크플로우 스텝(1800s)에 맞추면 안 된다. backfill-run 은 끝에서
 # 스스로 pageToken 을 커밋하므로, 워크플로우가 1800s 에 포기해도 서버가 2500s 에

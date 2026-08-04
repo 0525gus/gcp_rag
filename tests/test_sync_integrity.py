@@ -483,3 +483,82 @@ def test_backfill_releases_the_lock_even_when_it_fails(
         sync_main.backfill_run(sync_main.BackfillRunBody(driveId="drive"))
 
     assert released == ["backfill:drive"], "실패해도 잠금은 풀려야 한다"
+
+
+# ------------------------------------------------- parked 는 커밋을 막지 않는다
+def test_parked_docs_are_accounted_and_do_not_break_reconcile() -> None:
+    """DLQ·분할 대기는 '처리를 마친 것'이라 accounted 에 들어가야 한다.
+
+    안 넣으면 그만큼 unaccounted 로 잡혀 reconcile 이 실패하고, 워크플로우는
+    drive_reconciled=false 로 pageToken 을 커밋하지 않는다 — parked 를 failed 에서
+    뺀 의미가 사라진다.
+    """
+    body = sync_main.ReconcileBody(
+        driveId="d",
+        listed=5,
+        gcsUploaded=2,
+        uris=2,
+        indexed=2,
+        failed=0,
+        parked=2,          # DLQ 1 + 분할 대기 1
+        dlq=1,
+        splitQueued=1,
+        skipped=1,
+        deleted=0,
+        unchanged=0,
+    )
+
+    r = sync_main.reconcile(body)
+
+    assert r["unaccounted"] == 0
+    assert r["parked"] == 2
+    assert r["ok"] is True
+
+
+def test_parked_and_failed_are_counted_once_each() -> None:
+    """parked 와 failed 는 서로 다른 문서다 — 한쪽을 다른 쪽에 겹쳐 세면 안 된다.
+
+    reconcile 이 보는 것은 '전부 설명됐는가'(항등식)뿐이고, 실패 때문에 커밋을
+    막는 판단은 워크플로우의 `drive_failed == 0` 이 한다. 그래서 failed 가 있어도
+    항등식이 맞으면 여기서는 ok 다 — 그 구분이 parked 분리의 전제다.
+    """
+    body = sync_main.ReconcileBody(
+        driveId="d",
+        listed=3,
+        gcsUploaded=1,
+        uris=1,
+        indexed=1,
+        failed=1,          # 진짜 일시 실패 — 커밋은 워크플로우가 막는다
+        parked=1,          # 처리를 마친 것 — 커밋을 막지 않는다
+        skipped=0,
+        deleted=0,
+        unchanged=0,
+    )
+
+    r = sync_main.reconcile(body)
+
+    # 1(gcs) + 1(failed) + 1(parked) = 3 = listed
+    assert r["unaccounted"] == 0
+    assert (r["failed"], r["parked"]) == (1, 1)
+
+
+def test_backfill_dlq_does_not_block_token_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """처리 불가 문서 1건이 백필의 pageToken 을 영구히 세우면 안 된다."""
+    store = _wire_backfill(monkeypatch)
+    monkeypatch.setattr(
+        sync_main,
+        "_ingest_with",
+        lambda body, **_c: {"status": "DLQ", "error": "PARSE_FAILED"},
+    )
+
+    result = sync_main.backfill_run(
+        sync_main.BackfillRunBody(driveId="drive", indexBatchSize=3)
+    )
+
+    assert result["totals"]["dlq"] == 3
+    assert result["totals"]["parked"] == 3
+    assert result["totals"]["failed"] == 0, "parked 를 failed 로 세면 커밋이 막힌다"
+    assert result["ok"] is True
+    assert store.committed == [("drive", "candidate-token")]

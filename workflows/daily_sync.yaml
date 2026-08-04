@@ -45,6 +45,9 @@ main:
               splitQueued: 0
               excluded: 0
               indexFailed: 0
+              # DLQ·분할 대기로 보낸 문서. failed 와 분리한다 — 아래 commit_token
+              # 주석 참고. 이 값은 커밋을 막지 않는다.
+              parked: 0
 
     - for_each_drive:
         for:
@@ -79,6 +82,7 @@ main:
                   - drive_dlq: 0
                   - drive_split: 0
                   - drive_excluded: 0
+                  - drive_parked: 0
                   - drive_has_more: false
 
             # ----- 1) 초기 backfill-run 또는 Changes 델타 -----
@@ -134,6 +138,7 @@ main:
                             - drive_unchanged: ${default(backfill_resp.body.totals.unchanged, 0)}
                             - drive_dlq: ${default(backfill_resp.body.totals.dlq, 0)}
                             - drive_split: ${default(backfill_resp.body.totals.splitQueued, 0)}
+                            - drive_parked: ${default(backfill_resp.body.totals.parked, 0)}
                             - drive_excluded: ${default(backfill_resp.body.totals.excluded, 0)}
                             - pending_page_token: ${default(backfill_resp.body.pendingPageToken, "")}
                             - pending_uris: []
@@ -151,6 +156,7 @@ main:
                             - totals.unchanged: ${totals.unchanged + default(backfill_resp.body.totals.unchanged, 0)}
                             - totals.dlq: ${totals.dlq + default(backfill_resp.body.totals.dlq, 0)}
                             - totals.splitQueued: ${totals.splitQueued + default(backfill_resp.body.totals.splitQueued, 0)}
+                            - totals.parked: ${totals.parked + default(backfill_resp.body.totals.parked, 0)}
                             - totals.excluded: ${totals.excluded + default(backfill_resp.body.totals.excluded, 0)}
                       - log_backfill:
                           call: sys.log
@@ -438,22 +444,28 @@ main:
                                             assign:
                                               - drive_skipped: ${drive_skipped + 1}
                                               - totals.skipped: ${totals.skipped + 1}
+                                    # DLQ·SPLIT_QUEUED 는 '실패'가 아니라 **판정을 마치고
+                                    # 별도 큐로 보낸 것**이다. failed 로 세면 아래
+                                    # commit_token 이 막히는데, 다시 처리해도 같은 결과라
+                                    # 그 한 건이 드라이브의 pageToken 을 영구히 세운다
+                                    # (같은 페이지가 매일 재생되고 뒷 페이지는 영영 처리 안 됨).
+                                    # parked 로 분리해 커밋을 통과시키고, 문서는 큐에 남긴다.
                                     - condition: ${ingest_resp.body.status == "DLQ"}
                                       steps:
                                         - tally_dlq:
                                             assign:
                                               - drive_dlq: ${drive_dlq + 1}
-                                              - drive_failed: ${drive_failed + 1}
+                                              - drive_parked: ${drive_parked + 1}
                                               - totals.dlq: ${totals.dlq + 1}
-                                              - totals.failed: ${totals.failed + 1}
+                                              - totals.parked: ${totals.parked + 1}
                                     - condition: ${ingest_resp.body.status == "SPLIT_QUEUED"}
                                       steps:
                                         - tally_split:
                                             assign:
                                               - drive_split: ${drive_split + 1}
-                                              - drive_failed: ${drive_failed + 1}
+                                              - drive_parked: ${drive_parked + 1}
                                               - totals.splitQueued: ${totals.splitQueued + 1}
-                                              - totals.failed: ${totals.failed + 1}
+                                              - totals.parked: ${totals.parked + 1}
                                     - condition: true
                                       steps:
                                         - tally_unknown:
@@ -560,6 +572,7 @@ main:
                       unchanged: ${drive_unchanged}
                       dlq: ${drive_dlq}
                       splitQueued: ${drive_split}
+                      parked: ${drive_parked}
                       excluded: ${drive_excluded}
                     timeout: 60
                   result: recon_resp
@@ -623,7 +636,7 @@ main:
                           call: sys.log
                           args:
                             severity: "WARNING"
-                            text: ${"pageToken NOT committed drive=" + drive_id + " failed=" + string(drive_failed) + " indexFailed=" + string(drive_index_failed) + " reconciled=" + string(drive_reconciled) + " gcs=" + string(drive_gcs) + " uris=" + string(drive_uris) + " indexed=" + string(drive_indexed)}
+                            text: ${"pageToken NOT committed drive=" + drive_id + " failed=" + string(drive_failed) + " indexFailed=" + string(drive_index_failed) + " reconciled=" + string(drive_reconciled) + " gcs=" + string(drive_gcs) + " uris=" + string(drive_uris) + " indexed=" + string(drive_indexed) + " (parked=" + string(drive_parked) + " 는 커밋을 막지 않는다)"}
 
             # ----- 6) 다음 페이지 -----
             # 커밋 조건과 동일해야 한다. 토큰이 커밋되지 않았는데 되돌아가면 같은
@@ -751,6 +764,18 @@ main:
         args:
           severity: "INFO"
           text: ${"retry-failed " + json.encode_to_string(default(retry_resp.body.totals, {}))}
+
+    - warn_if_parked:
+        switch:
+          - condition: ${totals.parked > 0}
+            steps:
+              - log_parked:
+                  call: sys.log
+                  args:
+                    severity: "WARNING"
+                    # ok 를 뒤집지 않는다 — 다시 돌려도 같은 결과라 실행 실패로
+                    # 보고하면 매일 거짓 경보가 된다. 대신 여기서 눈에 띄게 남긴다.
+                    text: ${"parked " + string(totals.parked) + " docs (dlq=" + string(totals.dlq) + " splitQueued=" + string(totals.splitQueued) + ") — 큐에 남아 있고 자동 회수되지 않는다"}
 
     - return_summary:
         return:
