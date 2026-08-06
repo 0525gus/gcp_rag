@@ -218,8 +218,13 @@ class ParserStub:
 def main() -> int:
     ap = argparse.ArgumentParser(description="코퍼스를 실제 ingest 경로로 흘려 검증")
     ap.add_argument("corpus", help="파일이 든 디렉터리 (재귀 탐색)")
-    ap.add_argument("--max-gcs-bytes", type=int, default=50 * 1024 * 1024)
+    # 기본값을 하드코딩하면 검증 도구가 실제 배포 설정과 어긋난다 — Settings 에서 받는다.
+    ap.add_argument("--max-gcs-bytes", type=int, default=None)
     args = ap.parse_args()
+    max_gcs_bytes = (
+        args.max_gcs_bytes
+        or Settings.__dataclass_fields__["max_gcs_bytes"].default
+    )
 
     root = Path(args.corpus)
     if not root.is_absolute():
@@ -231,14 +236,14 @@ def main() -> int:
     if not files:
         print(f"파일 없음: {root}", file=sys.stderr)
         return 1
-    print(f"코퍼스 {root} — {len(files)}건, MAX_GCS_BYTES={args.max_gcs_bytes:,}\n")
+    print(f"코퍼스 {root} — {len(files)}건, MAX_GCS_BYTES={max_gcs_bytes:,}\n")
 
     settings = Settings(
         gcp_project_id="p",
         gcs_raw_bucket="rb",
         gcs_normalized_bucket="nb",
         rag_corpus_name="projects/p/locations/asia-northeast3/ragCorpora/c",
-        max_gcs_bytes=args.max_gcs_bytes,
+        max_gcs_bytes=max_gcs_bytes,
         qg_density_threshold=0.0005,
         qg_mode="log",
     )
