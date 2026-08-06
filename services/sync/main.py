@@ -1506,10 +1506,16 @@ def _ingest_direct(
         uris = [gcs_uri]
         _drop_stale_sidecar(gcs, settings, body.file_id)
     else:
-        gated = _size_gate(store, settings, body, len(data), splittable=True, ext=ext)
-        if gated:
-            gated["route"] = "FILE_COPY"
-            return gated
+        # 쪼갠 PDF 는 여기서 재지 않는다. split_pdf 가 파트마다 한도 이하로 만들어
+        # 놓았는데 **원본 전체 크기**로 다시 재면 무조건 걸린다 — 위에서 분할에
+        # 성공해도 그대로 SPLIT_QUEUED 로 떨어져, 1424행 분할 로직이 통째로
+        # 도달 불가가 된다. (로컬 종단 검증에서 잡음: 53MB PDF 가 2파트로 쪼개진
+        # 직후 이 게이트에 걸려 파트가 하나도 업로드되지 않았다.)
+        if not pdf_parts:
+            gated = _size_gate(store, settings, body, len(data), splittable=True, ext=ext)
+            if gated:
+                gated["route"] = "FILE_COPY"
+                return gated
         sidecar = build_breadcrumb_markdown(
             path=path_ctx.path,
             bundle=path_ctx.bundle,

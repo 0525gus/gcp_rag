@@ -304,3 +304,48 @@ def test_xlsm_body_is_converted_like_xlsx() -> None:
     assert "홍길동" in markdown
     assert gcs.blobs == []  # 스프레드시트 원본은 색인 대상이 아니다
     assert res["status"] == "GCS_READY"
+
+
+# ------------------------------------------------------------- PDF 분할 경로
+def test_split_pdf_parts_are_not_measured_against_the_original_size(monkeypatch) -> None:
+    """쪼갠 PDF 를 원본 전체 크기로 다시 재면 분할이 통째로 무의미해진다.
+
+    split_pdf 가 파트마다 한도 이하로 만들어 놓아도, 사후 게이트가 원본 크기를
+    보면 무조건 걸려 SPLIT_QUEUED 로 떨어진다. 그러면 분할 로직에 도달은 하되
+    결과물이 하나도 업로드되지 않는다 — 로컬 종단 검증에서 실제로 잡힌 결함이다.
+    """
+    parts = [b"%PDF-1.4 part1", b"%PDF-1.4 part2"]
+    monkeypatch.setattr(sync_main, "split_pdf", lambda data, limit: parts)
+    # 분할 트리거와 사후 게이트가 함께 쓰는 한도만 낮춘다.
+    # 다운로드 전 게이트는 max_gcs_bytes 를 쓰므로 영향받지 않는다.
+    monkeypatch.setattr(sync_main, "_effective_limit", lambda settings, ext: 4)
+
+    res, gcs, store = _run(
+        b"%PDF-1.4 " + b"x" * 200,
+        body=_body(name="대용량.pdf", mime="application/pdf"),
+    )
+
+    assert store.split_queue == []
+    assert res["status"] == "GCS_READY"
+    assert len([b for b in gcs.blobs if ".part" in b]) == 2
+    assert gcs.sidecars == ["f1"]
+
+
+def test_unsplittable_oversized_pdf_still_goes_to_split_queue(monkeypatch) -> None:
+    """분할에 실패하면 예전대로 큐로 보낸다 — 게이트를 통째로 없앤 게 아니다."""
+    from shared.pdf_split import PdfSplitError  # noqa: PLC0415
+
+    def _boom(data, limit):  # noqa: ANN001
+        raise PdfSplitError("깨진 PDF")
+
+    monkeypatch.setattr(sync_main, "split_pdf", _boom)
+    monkeypatch.setattr(sync_main, "_effective_limit", lambda settings, ext: 4)
+
+    res, gcs, store = _run(
+        b"%PDF-1.4 " + b"x" * 200,
+        body=_body(name="깨진.pdf", mime="application/pdf"),
+    )
+
+    assert res["status"] == "SPLIT_QUEUED"
+    assert len(store.split_queue) == 1
+    assert gcs.blobs == []
