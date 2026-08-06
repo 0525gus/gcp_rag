@@ -127,7 +127,19 @@ class Settings:
     # 실측 소모율 ≈ 동시수 / (0.4 + 페이싱) 건/초. 300rpm(=5건/초) 기준
     # 동시 4 + 페이싱 0.25 면 약 6건/초라 여유가 빠듯하니 그보다 낮게 잡을 것.
     rag_delete_concurrency: int = 1
-    max_gcs_bytes: int = 50 * 1024 * 1024
+    # 우리가 정한 '메모리에 올려도 되는 최대치'. RAG import 한도와는 다른 값이다
+    # (그건 shared/mime_types.rag_size_limit — PDF/DOCX 50MB, 나머지 10MB).
+    #
+    # **RAG PDF 한도(50MB)보다 커야 한다.** 같으면 분할 구간이 열리지 않는다:
+    # 다운로드 전 게이트가 이 값으로 막는데 분할 트리거는 min(이 값, 50MB) 초과라,
+    # 둘이 같으면 쪼갤 문서가 다운로드조차 되지 않는다. 07-23 부터 대용량 PDF 2건이
+    # 그렇게 SPLIT_QUEUED 에 갇혀 있었다(소비자 없는 큐라 영구 정체).
+    #
+    # 150MB 근거 — 실측 최대 문서가 135.8MB(455쪽)이고, 그 한 건을 쪼갤 때
+    # 원본 136MB + 파이썬 힙 피크 375MB ≈ 511MB 를 쓴다. sync 2Gi 기준 동시 4건이
+    # 한계라 deploy.sh 에서 concurrency 를 4 로 묶어 뒀다. 이 값을 더 올리려면
+    # 그 동시성이나 메모리도 같이 봐야 한다.
+    max_gcs_bytes: int = 150 * 1024 * 1024
     enable_docai_fallback: bool = False
     dlq_collection: str = "doc_dlq"
     split_queue_collection: str = "doc_split_queue"
@@ -205,7 +217,7 @@ class Settings:
             rag_delete_concurrency=max(
                 1, min(_env_int("RAG_DELETE_CONCURRENCY", 1), 16)
             ),
-            max_gcs_bytes=_env_int("MAX_GCS_BYTES", 50 * 1024 * 1024),
+            max_gcs_bytes=_env_int("MAX_GCS_BYTES", 150 * 1024 * 1024),
             enable_docai_fallback=_env_bool("ENABLE_DOCAI_FALLBACK", False),
             dlq_collection=os.environ.get("DLQ_COLLECTION", "doc_dlq"),
             split_queue_collection=os.environ.get(

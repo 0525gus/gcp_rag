@@ -21,6 +21,7 @@ import io
 import logging
 import re
 import zipfile
+from xml.etree import ElementTree as ET
 
 logger = logging.getLogger(__name__)
 
@@ -105,16 +106,110 @@ def _load(data: bytes):
         raise XlsxParseError(f"{type(exc).__name__}: {exc}") from exc
 
 
-def _sheet_rows(ws, budget: list[int]) -> list[list[str]]:
-    """시트를 문자열 행 목록으로. 빈 행·오른쪽 빈 열은 떨군다."""
+_MAIN = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_PKG_REL = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_CELL_REF = re.compile(r"^([A-Z]+)(\d+)$")
+
+
+def _col_num(letters: str) -> int:
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def _sheet_xml_paths(zf: zipfile.ZipFile) -> list[str]:
+    """workbook.xml 이 정한 시트 순서 그대로 시트 XML 경로.
+
+    ``xl/worksheets/sheetN.xml`` 의 N 은 표시 순서와 무관하므로
+    관계(rels)를 거쳐야 openpyxl 의 ``wb.worksheets`` 순서와 맞는다.
+    """
+    wb = ET.fromstring(zf.read("xl/workbook.xml"))
+    rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))
+    target = {r.get("Id"): r.get("Target") for r in rels.findall(f"{_PKG_REL}Relationship")}
+    out: list[str] = []
+    for sheet in wb.findall(f"{_MAIN}sheets/{_MAIN}sheet"):
+        path = target.get(sheet.get(f"{_REL}id"))
+        if not path:
+            continue
+        path = path.lstrip("/")
+        out.append(path if path.startswith("xl/") else f"xl/{path}")
+    return out
+
+
+def _vertical_merges(data: bytes) -> list[dict[int, list[int]]]:
+    """시트 순서대로 {시작행: [열, ...]} — 세로 병합의 값 전파 대상.
+
+    ``read_only=True`` 로 연 워크시트는 ``merged_cells`` 가 비어 있고, 끄면
+    큰 시트에서 메모리가 위험하다(운영 최대 146,472셀). 병합 정보는 시트당
+    수십~수백 개뿐이라 ZIP 에서 따로 읽는 편이 싸고, 실측 12건 전부
+    openpyxl(read_only=False) 결과와 일치했다 — 그 중 1건은 openpyxl 이
+    아예 열지 못한 파일이었다.
+
+    가로 병합은 손대지 않는다. 지금도 좌상단에만 값이 있어 같은 줄 안 중복일
+    뿐이고, HWP 쪽 격자 펼침 규칙과도 같다.
+    """
+    result: list[dict[int, list[int]]] = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            names = set(zf.namelist())
+            for path in _sheet_xml_paths(zf):
+                spans: dict[int, list[int]] = {}
+                if path not in names:
+                    result.append(spans)
+                    continue
+                with zf.open(path) as fh:
+                    for _event, elem in ET.iterparse(fh, events=("end",)):
+                        if elem.tag == f"{_MAIN}mergeCell":
+                            ref = elem.get("ref") or ""
+                            if ":" in ref:
+                                a, b = ref.split(":", 1)
+                                ma, mb = _CELL_REF.match(a), _CELL_REF.match(b)
+                                if ma and mb:
+                                    r1, r2 = int(ma.group(2)), int(mb.group(2))
+                                    col = _col_num(ma.group(1))
+                                    if r2 > r1:  # 세로로 걸친 것만
+                                        for r in range(r1 + 1, r2 + 1):
+                                            spans.setdefault(r, []).append(col)
+                        elem.clear()  # 시트 본문을 메모리에 쌓지 않는다
+                result.append(spans)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("xlsx 병합 정보 읽기 실패(전파 생략): %s", exc)
+        return []
+    return result
+
+
+def _sheet_rows(ws, budget: list[int], vmerge: dict[int, list[int]] | None = None) -> list[list[str]]:
+    """시트를 문자열 행 목록으로. 빈 행·오른쪽 빈 열은 떨군다.
+
+    세로 병합된 분류 값은 아래 행으로 복제한다 — 행이 스스로를 설명해야
+    청크가 잘려도 소속을 잃지 않는다(HWP 쪽 rowspan 처리와 같은 규칙).
+    """
     rows: list[list[str]] = []
-    for raw in ws.iter_rows(values_only=True):
+    carry: dict[int, str] = {}  # 1-based 열 -> 위에서 내려온 값
+    start = getattr(ws, "min_row", 1) or 1
+    for row_idx, raw in enumerate(ws.iter_rows(values_only=True), start=start):
         if budget[0] <= 0:
             break
         cells = ["" if v is None else _fmt(v) for v in raw]
+        budget[0] -= len(raw)
+
+        for col in (vmerge or {}).get(row_idx, ()):
+            value = carry.get(col)
+            if not value:
+                continue
+            while len(cells) < col:
+                cells.append("")
+            if not cells[col - 1]:
+                cells[col - 1] = value
+
+        for i, value in enumerate(cells):
+            if value:
+                carry[i + 1] = value
+
         while cells and not cells[-1]:
             cells.pop()
-        budget[0] -= len(raw)
         if not cells:
             continue
         rows.append(cells)
@@ -153,12 +248,13 @@ def xlsx_to_markdown(
     wb = _load(data)
     try:
         sheets = wb.worksheets
+        vmerges = _vertical_merges(data)
         budget = [max_cells]
         chunks: list[str] = []
         used = 0
         truncated = False
-        for ws in sheets:
-            rows = _sheet_rows(ws, budget)
+        for idx, ws in enumerate(sheets):
+            rows = _sheet_rows(ws, budget, vmerges[idx] if idx < len(vmerges) else None)
             if not rows:
                 continue
             lines = ([f"## {ws.title}"] if len(sheets) > 1 else []) + _to_table(rows)

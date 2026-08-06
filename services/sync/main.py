@@ -36,6 +36,7 @@ from shared.hashing import sha256_bytes, sha256_text  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
 from shared.mime_types import (  # noqa: E402
     GOOGLE_EXPORT_MAP,
+    SIDECAR_ONLY_MIME,
     RouteKind,
     classify_route,
     is_hwpx,
@@ -1268,6 +1269,78 @@ def _ingest_google_export(
     )
 
 
+def _ingest_sidecar_only(
+    body: IngestBody,
+    store: DocStateStore,
+    gcs: GcsClient,
+    drive: DriveClient,
+    settings: Settings,
+) -> dict[str, Any]:
+    """본문 추출 수단이 없는 형식 — 경로 사이드카만 색인한다.
+
+    SKIP 으로 두면 파일명으로도 검색되지 않는다. SKIP 라우트는 GCS 업로드도
+    사이드카도 만들지 않고, 검색단이 SKIPPED 문서를 결과에서 걸러내기까지 한다
+    (services/mcp_server/main.py). "그런 파일이 어디 있다"는 답조차 못 하는 셈이라
+    사이드카만이라도 남긴다.
+
+    원본 바이트는 GCS 에 올리지 않는다 — RAG Engine 이 못 읽는 형식을 색인에
+    넣으면 매번 import 에서 거부된다(암호 xlsx 27건이 상시 실패하던 전례).
+
+    **파일을 내려받지 않는다.** 쓸 데가 없고, ZIP 은 큰 것이 흔하다. 대신 해시를
+    바이트가 아니라 경로·사이드카에서 만든다. 파일명이나 폴더가 바뀌면 사이드카가
+    바뀌어 재색인되고, 내용만 바뀐 경우는 어차피 색인할 본문이 없어 재색인이
+    무의미하므로 건너뛴다.
+    """
+    path_ctx = _resolve_path_ctx(drive, body)
+    audience = _resolve_audience(drive, settings, body)
+    sidecar = build_breadcrumb_markdown(
+        path=path_ctx.path,
+        bundle=path_ctx.bundle,
+        title=body.name or body.file_id,
+        body="",
+    )
+    content_hash = sha256_text(f"{body.file_id}|{path_ctx.path}|{sidecar}")
+    if store.should_skip_reindex(body.file_id, content_hash):
+        store.touch_modified_time(body.file_id, body.modified_time)
+        return {
+            "fileId": body.file_id,
+            "status": "HASH_UNCHANGED",
+            "route": "FILE_COPY",
+            "contentHash": content_hash,
+            "path": path_ctx.path,
+            "bundle": path_ctx.bundle,
+        }
+
+    uris = [gcs.upload_path_sidecar_md(sidecar, body.file_id)]
+    store.upsert(
+        _state_fields(
+            body,
+            content_hash=content_hash,
+            status=DocStatus.PARSED,
+            parse_route=ParseRoute.GCS_COPY,
+            source_uri=body.web_view_link or uris[0],
+            path_ctx=path_ctx,
+            audience=audience,
+            # 본문 없는 문서라는 사실이 조회 가능해야 한다. 상태는 색인되므로
+            # INDEXED 로 가지만, 검색 결과의 근거가 파일명뿐임을 여기서 알린다.
+            error=f"NO_BODY_EXTRACTOR:{body.mime_type}",
+        )
+    )
+    logger.info(
+        "sidecar-only ingest %s (%s) — 본문 없이 경로만 색인",
+        body.file_id,
+        body.mime_type,
+    )
+    return _gcs_ready(
+        body=body,
+        route="FILE_COPY",
+        parse_route=ParseRoute.GCS_COPY,
+        uris=uris,
+        content_hash=content_hash,
+        path_ctx=path_ctx,
+    )
+
+
 def _ingest_direct(
     body: IngestBody,
     store: DocStateStore,
@@ -1282,8 +1355,9 @@ def _ingest_direct(
     나가므로 그대로 두고, 함수 이름만 실제 동작에 맞춘다.
 
         PDF          한도 초과분을 페이지 경계로 분할
-        XLSX         셀을 마크다운 표로 변환
+        XLSX/XLSM    셀을 마크다운 표로 변환
         TXT/HTML/CSV 머리말을 본문 앞에 심음
+        ZIP/XLS      사이드카만 (본문 추출 수단 없음, 아래 참고)
         그 외        원본 복사 + 경로 사이드카
 
     크기 게이트가 세 번 나오는데 **재는 대상이 다르다**. 맨 위는 다운로드 전
@@ -1294,6 +1368,14 @@ def _ingest_direct(
     name = body.name or body.file_id
     mime = (body.mime_type or "").lower()
     ext = Path(name).suffix or _ext_for_mime(body.mime_type)
+
+    # 본문을 뽑을 수단이 없는 형식(.zip/.xls)은 여기서 끝낸다. 사이드카만 색인하므로
+    # **다운로드도 크기 게이트도 필요 없다.** 그냥 아래로 흘려보내면 원본 크기를
+    # RAG 한도(10MB)로 재는 게이트에 걸려 SPLIT_QUEUED 로 영구 정체한다 — 올리지도
+    # 않을 바이트 때문에 문서를 잃는, 이 함수가 이미 두 번 겪은 사고다.
+    if mime in SIDECAR_ONLY_MIME:
+        return _ingest_sidecar_only(body, store, gcs, drive, settings)
+
     # 텍스트는 breadcrumb 를 붙여 .md 로 나가므로 상한도 .md 기준이다.
     upload_ext = ".md" if mime in _TEXT_COPY_MIMES else ext
 
@@ -1424,10 +1506,16 @@ def _ingest_direct(
         uris = [gcs_uri]
         _drop_stale_sidecar(gcs, settings, body.file_id)
     else:
-        gated = _size_gate(store, settings, body, len(data), splittable=True, ext=ext)
-        if gated:
-            gated["route"] = "FILE_COPY"
-            return gated
+        # 쪼갠 PDF 는 여기서 재지 않는다. split_pdf 가 파트마다 한도 이하로 만들어
+        # 놓았는데 **원본 전체 크기**로 다시 재면 무조건 걸린다 — 위에서 분할에
+        # 성공해도 그대로 SPLIT_QUEUED 로 떨어져, 1424행 분할 로직이 통째로
+        # 도달 불가가 된다. (로컬 종단 검증에서 잡음: 53MB PDF 가 2파트로 쪼개진
+        # 직후 이 게이트에 걸려 파트가 하나도 업로드되지 않았다.)
+        if not pdf_parts:
+            gated = _size_gate(store, settings, body, len(data), splittable=True, ext=ext)
+            if gated:
+                gated["route"] = "FILE_COPY"
+                return gated
         sidecar = build_breadcrumb_markdown(
             path=path_ctx.path,
             bundle=path_ctx.bundle,

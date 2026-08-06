@@ -215,3 +215,137 @@ def test_binary_file_keeps_copy_plus_sidecar() -> None:
     assert gcs.blobs == ["normalized/f1.pdf"]
     assert gcs.sidecars == ["f1"]
     assert gcs.md == []
+
+
+# ------------------------------------------------- 본문 추출 수단이 없는 형식
+ZIP_MIME = "application/zip"
+XLS_MIME = "application/vnd.ms-excel"
+XLSM_MIME = "application/vnd.ms-excel.sheet.macroenabled.12"
+
+
+class _NoDownloadDrive(_Drive):
+    """다운로드를 시도하면 즉시 실패시킨다 — 사이드카 경로는 받을 이유가 없다."""
+
+    def download_file(self, file_id: str) -> bytes:
+        raise AssertionError("사이드카 전용 형식은 파일을 내려받으면 안 된다")
+
+
+def _run_no_download(body: IngestBody, settings: Settings | None = None):
+    gcs, store = _Gcs(), _Store()
+    res = _ingest_direct(body, store, gcs, _NoDownloadDrive(b""), settings or _settings())
+    return res, gcs, store
+
+
+@pytest.mark.parametrize("mime,name", [(ZIP_MIME, "매뉴얼.zip"), (XLS_MIME, "대상목록.xls")])
+def test_no_extractor_formats_index_sidecar_only(mime: str, name: str) -> None:
+    """SKIP 으로 두면 파일명으로도 검색되지 않는다 — 사이드카만이라도 남긴다."""
+    res, gcs, store = _run_no_download(_body(name=name, mime=mime))
+
+    assert gcs.sidecars == ["f1"]
+    assert gcs.blobs == []  # 원본은 GCS 에 올리지 않는다 (RAG import 가 거부한다)
+    assert gcs.md == []
+    assert res["status"] == "GCS_READY"
+    assert res["route"] == "FILE_COPY"
+    state = store.upserts[-1]
+    assert state.status.value != "SKIPPED"  # 검색단이 SKIPPED 를 걸러낸다
+    assert "NO_BODY_EXTRACTOR" in (state.error or "")
+
+
+def test_oversized_zip_is_not_queued_for_split() -> None:
+    """RAG 한도(10MB)로 재면 큰 ZIP 이 SPLIT_QUEUED 로 영구 정체한다.
+
+    올리지도 않을 원본 바이트 때문에 문서를 잃는, 이 함수가 이미 두 번 겪은 사고다.
+    """
+    body = IngestBody(
+        fileId="f1", driveId="d1", name="매뉴얼.zip", mimeType=ZIP_MIME,
+        sizeBytes=200 * 1024 * 1024,
+    )
+    res, gcs, store = _run_no_download(body)
+
+    assert store.split_queue == []
+    assert store.dlq == []
+    assert gcs.sidecars == ["f1"]
+    assert res["status"] == "GCS_READY"
+
+
+def test_no_extractor_format_skips_reindex_when_hash_matches() -> None:
+    class _Skipping(_Store):
+        def __init__(self) -> None:
+            super().__init__()
+            self.touched: list[str] = []
+
+        def should_skip_reindex(self, file_id: str, content_hash: str) -> bool:
+            return True
+
+        def touch_modified_time(self, file_id: str, modified_time) -> None:  # noqa: ANN001
+            self.touched.append(file_id)
+
+    gcs, store = _Gcs(), _Skipping()
+    res = _ingest_direct(
+        _body(name="매뉴얼.zip", mime=ZIP_MIME), store, gcs, _NoDownloadDrive(b""), _settings()
+    )
+    assert res["status"] == "HASH_UNCHANGED"
+    assert gcs.sidecars == []
+    assert store.touched == ["f1"]
+
+
+def test_xlsm_body_is_converted_like_xlsx() -> None:
+    """매크로 엑셀은 내부가 같은 OOXML 이라 그대로 읽힌다.
+
+    _SPREADSHEET_COPY_MIMES 에는 진작 들어 있었는데 FILE_COPY_MIME 에 빠져 있어
+    classify_route 가 SKIP 을 돌려주고 있었다 — 변환 코드에 도달조차 못 했다.
+    """
+    res, gcs, _ = _run(
+        _xlsx([["부서", "담당자"], ["교무처", "홍길동"]]),
+        body=_body(name="집계표.xlsm", mime=XLSM_MIME),
+    )
+    assert gcs.md, "본문 마크다운이 만들어져야 한다"
+    _, markdown = gcs.md[-1]
+    assert "홍길동" in markdown
+    assert gcs.blobs == []  # 스프레드시트 원본은 색인 대상이 아니다
+    assert res["status"] == "GCS_READY"
+
+
+# ------------------------------------------------------------- PDF 분할 경로
+def test_split_pdf_parts_are_not_measured_against_the_original_size(monkeypatch) -> None:
+    """쪼갠 PDF 를 원본 전체 크기로 다시 재면 분할이 통째로 무의미해진다.
+
+    split_pdf 가 파트마다 한도 이하로 만들어 놓아도, 사후 게이트가 원본 크기를
+    보면 무조건 걸려 SPLIT_QUEUED 로 떨어진다. 그러면 분할 로직에 도달은 하되
+    결과물이 하나도 업로드되지 않는다 — 로컬 종단 검증에서 실제로 잡힌 결함이다.
+    """
+    parts = [b"%PDF-1.4 part1", b"%PDF-1.4 part2"]
+    monkeypatch.setattr(sync_main, "split_pdf", lambda data, limit: parts)
+    # 분할 트리거와 사후 게이트가 함께 쓰는 한도만 낮춘다.
+    # 다운로드 전 게이트는 max_gcs_bytes 를 쓰므로 영향받지 않는다.
+    monkeypatch.setattr(sync_main, "_effective_limit", lambda settings, ext: 4)
+
+    res, gcs, store = _run(
+        b"%PDF-1.4 " + b"x" * 200,
+        body=_body(name="대용량.pdf", mime="application/pdf"),
+    )
+
+    assert store.split_queue == []
+    assert res["status"] == "GCS_READY"
+    assert len([b for b in gcs.blobs if ".part" in b]) == 2
+    assert gcs.sidecars == ["f1"]
+
+
+def test_unsplittable_oversized_pdf_still_goes_to_split_queue(monkeypatch) -> None:
+    """분할에 실패하면 예전대로 큐로 보낸다 — 게이트를 통째로 없앤 게 아니다."""
+    from shared.pdf_split import PdfSplitError  # noqa: PLC0415
+
+    def _boom(data, limit):  # noqa: ANN001
+        raise PdfSplitError("깨진 PDF")
+
+    monkeypatch.setattr(sync_main, "split_pdf", _boom)
+    monkeypatch.setattr(sync_main, "_effective_limit", lambda settings, ext: 4)
+
+    res, gcs, store = _run(
+        b"%PDF-1.4 " + b"x" * 200,
+        body=_body(name="깨진.pdf", mime="application/pdf"),
+    )
+
+    assert res["status"] == "SPLIT_QUEUED"
+    assert len(store.split_queue) == 1
+    assert gcs.blobs == []

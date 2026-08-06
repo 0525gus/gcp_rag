@@ -47,6 +47,31 @@ def test_classify_routes():
     assert classify_route("", "", removed=True) == RouteKind.DELETE
 
 
+def test_no_extractor_formats_are_not_skipped():
+    """SKIP 은 GCS 업로드도 사이드카도 없다 — 파일명으로도 검색되지 않는다.
+
+    본문을 못 뽑는 형식이라도 FILE_COPY 로 받아 경로 사이드카는 남긴다.
+    """
+    assert classify_route("application/zip", "a.zip") == RouteKind.FILE_COPY
+    assert classify_route("application/vnd.ms-excel", "a.xls") == RouteKind.FILE_COPY
+
+
+def test_macro_enabled_xlsx_reaches_the_spreadsheet_branch():
+    """.xlsm 은 _SPREADSHEET_COPY_MIMES 에 있는데도 SKIP 되고 있었다."""
+    from services.sync.main import _SPREADSHEET_COPY_MIMES  # noqa: PLC0415
+
+    mime = "application/vnd.ms-excel.sheet.macroenabled.12"
+    assert classify_route(mime, "a.xlsm") == RouteKind.FILE_COPY
+    assert mime in _SPREADSHEET_COPY_MIMES
+
+
+def test_sidecar_only_mimes_are_a_subset_of_file_copy():
+    """사이드카 전용 목록에 넣었는데 FILE_COPY 가 아니면 SKIP 으로 새어 나간다."""
+    from shared.mime_types import FILE_COPY_MIME, SIDECAR_ONLY_MIME  # noqa: PLC0415
+
+    assert SIDECAR_ONLY_MIME <= FILE_COPY_MIME
+
+
 def test_quality_gate_density():
     settings = Settings(
         gcp_project_id="p",

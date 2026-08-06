@@ -71,9 +71,11 @@ gcloud run deploy rag-parser \
   --max-instances="${PARSER_MAX_INSTANCES:-10}"
 # concurrency 를 낮게 두는 이유: 파서는 HWP 원본을 통째로 메모리에 올리고
 # (services/parser/main.py `gcs.download_bytes`) 네이티브 확장(rhwp)으로 파싱한다.
-# 요청 하나가 원본 최대 50MB(MAX_GCS_BYTES) + 파싱 작업 메모리를 잡으므로 2Gi 로는
+# 요청 하나가 원본(HWP 최대 MAX_GCS_BYTES) + 파싱 작업 메모리를 잡으므로 2Gi 로는
 # 4건 남짓이 한계다. 핵심은 '동시성을 줄인다'가 아니라 **넘치는 요청을 새 인스턴스로
 # 흘린다**는 것 — 5번째 요청부터 각자 2Gi 를 쥔 인스턴스가 뜬다.
+# (MAX_GCS_BYTES 는 PDF 분할 구간을 열려고 150MB 로 올렸다. 파서가 다루는 HWP 는
+#  실측 최대가 그보다 훨씬 작지만, 그 크기의 HWP 가 들어오면 이 계산도 다시 볼 것.)
 # 실효 호출자는 RAW_UPLOAD_CONCURRENCY(=8) 이라 인스턴스 2대로 흡수된다.
 # (운영에 손으로 160 이 들어가 있었다 — 여태 안 터진 건 델타 경로가 순차라서고,
 #  백필·retry-failed 를 돌리는 순간 8병렬이 한 인스턴스에 쌓인다)
@@ -94,7 +96,15 @@ gcloud run deploy rag-sync \
   --region="${REGION}" \
   --no-allow-unauthenticated \
   --set-env-vars="^|^GCP_PROJECT_ID=${PROJECT_ID}|GCP_REGION=${REGION}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|DRIVE_IDS=${DRIVE_IDS}|SYNC_FOLDER_IDS=${SYNC_FOLDER_IDS:-}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|QG_MODE=${QG_MODE:-log}|RAW_UPLOAD_CONCURRENCY=${RAW_UPLOAD_CONCURRENCY:-8}|RAG_DELETE_PACING_SECONDS=${RAG_DELETE_PACING_SECONDS:-1.1}|RAG_DELETE_CONCURRENCY=${RAG_DELETE_CONCURRENCY:-1}|RAG_CORPUS_NAME_STUDENT=${RAG_CORPUS_NAME_STUDENT:-}|STUDENT_FOLDER_IDS=${STUDENT_FOLDER_IDS:-}" \
-  --memory=2Gi --cpu=2 --timeout=3600
+  --memory=2Gi --cpu=2 --timeout=3600 \
+  --concurrency="${SYNC_CONCURRENCY:-4}"
+# concurrency 를 명시하는 이유: sync 는 대용량 PDF 를 페이지 경계로 쪼갤 때 원본과
+# 조각을 한꺼번에 메모리에 올린다. 실측(135.8MB / 455쪽) 원본 136MB + 파이썬 힙
+# 피크 375MB ≈ 요청 하나에 511MB 라, 2Gi 로는 4건이 한계다. 미지정 시 Cloud Run
+# 기본값은 80 이고 그러면 큰 문서 몇 건이 겹치는 순간 인스턴스가 OOM 으로 죽는다.
+# 파서와 같은 논리다 — 동시성을 줄이는 게 목적이 아니라 넘치는 요청을 새 인스턴스로
+# 흘리는 것. max-instances 를 안 걸어 두었으므로 처리량은 인스턴스가 흡수한다.
+#
 # RAG_CORPUS_NAME_STUDENT / STUDENT_FOLDER_IDS 는 학생용 코퍼스 분리 스위치다.
 # 둘 중 하나라도 비면 분리가 꺼지고 단일 코퍼스로 동작한다(config.audience_split_enabled).
 # 여기서 넘기지 않으면 --set-env-vars 치환으로 조용히 꺼지므로 반드시 등록해 둘 것.

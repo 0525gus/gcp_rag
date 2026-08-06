@@ -51,10 +51,11 @@ def test_in_scope_file_keeps_its_route() -> None:
 
 
 def test_unsupported_mime_is_skip_not_exclude() -> None:
-    # 대상 폴더 안이지만 처리할 방법이 없는 형식 → SKIP 이어야 한다
+    # 대상 폴더 안이지만 처리할 방법이 없는 형식 → SKIP 이어야 한다.
+    # (예시가 .zip 이었으나 지금은 사이드카로라도 색인한다 — 이미지로 바꿨다)
     entry = _route_file_meta(
         drive_id="d",
-        file_meta={"id": "f1", "name": "a.zip", "mimeType": "application/zip"},
+        file_meta={"id": "f1", "name": "포스터.jpg", "mimeType": "image/jpeg"},
         folder_ids=["folderX"],
         drive=_Drive(True),
     )

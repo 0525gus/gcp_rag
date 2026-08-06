@@ -18,7 +18,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from services.parser.cleanup import cleanup_markdown
-from services.parser.quality_gate import ParseMetrics, evaluate_quality
+from services.parser.quality_gate import (
+    ParseMetrics,
+    count_markdown_tables,
+    evaluate_quality,
+)
 from services.parser.engine import can_parse, parse_document_bytes
 from shared.config import Settings
 
@@ -34,6 +38,7 @@ class Row:
     ms: float
     md_chars: int = 0
     table_count: int = 0
+    tables_rendered: int = 0
     density: float = 0.0
     gate_pass: bool = False
     gate_reasons: list[str] = field(default_factory=list)
@@ -100,6 +105,10 @@ def main() -> int:
             row.table_count = out.metrics.table_count
             row.ok = True
             out.metrics.text_length = len(md)
+            # main.py 와 같은 값을 재야 한다 — 안 채우면 tables_rendered 가 0 으로
+            # 남아 표 있는 문서가 전부 G2(표 100% 손실) 오탐으로 잡힌다.
+            out.metrics.tables_rendered = count_markdown_tables(md)
+            row.tables_rendered = out.metrics.tables_rendered
             gate = evaluate_quality(out.metrics, settings)
             row.gate_pass = not gate.triggered
             row.gate_reasons = gate.reasons

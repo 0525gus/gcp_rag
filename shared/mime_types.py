@@ -64,6 +64,24 @@ GOOGLE_NATIVE_MIME: frozenset[str] = frozenset(
     }
 )
 
+# 본문을 뽑을 수단이 없는 형식. SKIP 으로 두면 **파일명으로도 검색되지 않는다** —
+# SKIP 라우트는 GCS 업로드도 사이드카도 만들지 않고, 검색단도 SKIPPED 문서를
+# 결과에서 걸러낸다(services/mcp_server/main.py). 그래서 FILE_COPY 로 받되
+# 경로 사이드카만 색인한다: 내용은 못 찾아도 "그런 파일이 여기 있다"는 답은 된다.
+#
+#   .zip  안에 문서가 들어 있지만 해제는 별도 과제다(실측 8건 안에 39개 문서).
+#   .xls  구형 OLE2 이진 포맷이라 openpyxl 이 못 읽는다(xlsx_md 가 거부).
+#
+# 원본 바이트는 GCS 에 올리지 않는다. RAG Engine 이 못 읽는 형식을 색인에 넣으면
+# **매번 import 에서 거부**되기 때문이다(암호 xlsx 27건이 상시 실패하던 전례).
+SIDECAR_ONLY_MIME: frozenset[str] = frozenset(
+    {
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/vnd.ms-excel",  # 구형 .xls
+    }
+)
+
 # Drive에서 바이너리 그대로 받아 GCS로 복사
 FILE_COPY_MIME: frozenset[str] = frozenset(
     {
@@ -75,9 +93,15 @@ FILE_COPY_MIME: frozenset[str] = frozenset(
         "text/html",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        # 매크로 포함 엑셀(.xlsm). 내부 구조는 .xlsx 와 같은 OOXML 이라
+        # xlsx_to_markdown 이 그대로 읽는다. sync 의 _SPREADSHEET_COPY_MIMES 에는
+        # 진작 들어 있었는데 여기 빠져 있어 classify_route 가 SKIP 을 돌려주고 있었다
+        # — 변환 코드에 도달조차 못 하던 죽은 분기다.
+        "application/vnd.ms-excel.sheet.macroenabled.12",
         "text/csv",
         "application/rtf",
     }
+    | SIDECAR_ONLY_MIME
 )
 
 # Google export 대상 MIME → (exportMime, 확장자)

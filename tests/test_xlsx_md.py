@@ -176,3 +176,114 @@ def test_byte_budget_untouched_when_small() -> None:
     md = xlsx_to_markdown(data, max_bytes=MAX_BYTES)
     assert "잘림" not in md
     assert "홍길동" in md
+
+
+# ------------------------------------------------------- 세로 병합 값 전파
+def _book_merged(rows: list[list[object]], merges: list[str]) -> bytes:
+    """행 목록 + 병합 범위(예: "A2:A4")로 xlsx 바이트를 만든다."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "s"
+    for row in rows:
+        ws.append(row)
+    for ref in merges:
+        ws.merge_cells(ref)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _body_rows(md: str) -> list[list[str]]:
+    out = []
+    for line in md.splitlines():
+        s = line.strip()
+        if not s.startswith("|"):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if all(c and set(c) <= {"-", ":"} for c in cells):
+            continue
+        out.append(cells)
+    return out
+
+
+def test_vertical_merge_value_repeats_down_each_row() -> None:
+    """세로 병합된 분류 값은 아래 행으로 복제한다.
+
+    엑셀은 병합 시 좌상단에만 값을 남긴다. 그대로 두면 청크가 행 단위로
+    잘렸을 때 나머지 행이 자기 분류를 잃는다 — HWP 쪽 rowspan 처리와 같은 이유.
+    실측 코퍼스 13건 중 11건에 병합이 있었고 그중 80%가 세로 병합이었다.
+    """
+    data = _book_merged(
+        [
+            ["분류", "항목"],
+            ["교육", "강의"],
+            [None, "실습"],
+            [None, "평가"],
+        ],
+        ["A2:A4"],
+    )
+    rows = _body_rows(xlsx_to_markdown(data))
+    assert [r[0] for r in rows] == ["분류", "교육", "교육", "교육"]
+    assert [r[1] for r in rows] == ["항목", "강의", "실습", "평가"]
+
+
+def test_horizontal_merge_is_left_alone() -> None:
+    """가로 병합은 같은 줄 안 중복이라 좌상단에만 둔다."""
+    data = _book_merged([["제목", None, None], ["a", "b", "c"]], ["A1:C1"])
+    md = xlsx_to_markdown(data)
+    assert md.count("제목") == 1
+    assert _body_rows(md)[1] == ["a", "b", "c"]
+
+
+def test_workbook_without_merges_is_unaffected() -> None:
+    plain = [["부서", "담당자"], ["교무처", "홍길동"], ["기획처", "김철수"]]
+    assert xlsx_to_markdown(_book({"s": plain})) == xlsx_to_markdown(_book_merged(plain, []))
+
+
+def test_merge_propagation_never_overwrites_a_real_value() -> None:
+    """병합 범위 안에 값이 있으면 그 값을 지킨다.
+
+    정상 엑셀은 병합 시 아래 셀을 비우므로 파일로는 이 상황을 만들 수 없다.
+    다른 도구가 만든 파일이나 손상 파일을 대비한 방어라서 단위로 확인한다.
+    """
+    from shared.xlsx_md import _sheet_rows  # noqa: PLC0415
+
+    class _Ws:
+        min_row = 1
+
+        def iter_rows(self, values_only=True):  # noqa: ARG002
+            yield ("교육", "강의")
+            yield ("연구", "실습")  # 병합 범위인데 값이 남아 있다
+
+    rows = _sheet_rows(_Ws(), [100], {2: [1]})
+    assert [r[0] for r in rows] == ["교육", "연구"]
+
+
+def test_merge_read_failure_falls_back_to_plain_conversion(monkeypatch) -> None:
+    """병합 정보를 못 읽어도 변환 자체는 살아야 한다."""
+    import shared.xlsx_md as mod
+
+    monkeypatch.setattr(mod, "_sheet_xml_paths", lambda _zf: (_ for _ in ()).throw(RuntimeError("boom")))
+    data = _book_merged([["분류", "항목"], ["교육", "강의"], [None, "실습"]], ["A2:A3"])
+    md = xlsx_to_markdown(data)
+    assert "실습" in md and "교육" in md
+
+
+def test_multi_sheet_merges_are_matched_to_the_right_sheet() -> None:
+    """시트 XML 이름(sheetN.xml)은 표시 순서와 무관 — rels 를 거쳐야 맞는다."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    first = wb.create_sheet(title="첫째")
+    for row in [["A", "B"], ["병합", "x"], [None, "y"]]:
+        first.append(row)
+    first.merge_cells("A2:A3")
+    second = wb.create_sheet(title="둘째")
+    for row in [["C", "D"], ["단독", "z"]]:
+        second.append(row)
+    wb.move_sheet("둘째", offset=-1)  # 표시 순서를 뒤집는다
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    md = xlsx_to_markdown(buf.getvalue())
+    assert md.index("## 둘째") < md.index("## 첫째")
+    assert md.count("병합") == 2  # 첫째 시트에서만 전파
