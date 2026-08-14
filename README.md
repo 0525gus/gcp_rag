@@ -1,74 +1,74 @@
-# RAG MCP — Drive → GCS → Vertex RAG → MCP search
+# RAG MCP
 
-일 배치로 Google Drive 공유 드라이브를 GCS 단일 진입점으로 동기화하고,
-MCP `search`로 검색합니다. **HWP/HWPX는 rhwp-python으로 MD 변환**합니다.
+Drive → GCS → Vertex RAG → MCP `search`.
 
-## 파이프라인 (재검토 기준)
+- 일 배치로 공유드라이브를 동기화하고 FactChat에서 검색
+- GCS raw(hwp->md 변환용)/ normalized 각 1개. RAG 코퍼스와 MCP는 교직원·학생 2벌
+- HWP/HWPX는 rhwp로 마크다운 변환
 
+상세: [`docs/DEV_SPEC.md`](docs/DEV_SPEC.md)
+
+## 구조
+
+```mermaid
+flowchart TB
+  Drive["Google Drive"]
+  Sync[rag-sync]
+  Parser[rag-parser]
+  GCS["GCS raw + normalized"]
+  StaffRAG[RAG 교직원]
+  StudentRAG[RAG 학생]
+  McpStaff[rag-mcp]
+  McpStudent[rag-mcp-student]
+
+  Drive --> Sync
+  Sync <--> Parser
+  Sync --> GCS
+  Sync --> StaffRAG
+  Sync --> StudentRAG
+  McpStaff --> StaffRAG
+  McpStudent --> StudentRAG
 ```
-Cloud Scheduler (00:00 KST, Asia/Seoul)
-  └─ Cloud Workflows (workflows/daily_sync.yaml)
-       └─ Drive 하나당 페이지 루프 (hasMore 인 동안 반복)
-            ├─ /sync/changes          Changes API 델타 (기본 200건씩, pageToken 미커밋)
-            │                          토큰 없으면 mode=backfill_required → backfill-run
-            │                          SYNC_FOLDER_IDS 있으면 해당 폴더 트리만 ingest
-            │                          STUDENT_FOLDER_IDS 밖은 교직원 전용으로 분류
-            ├─ MIME 분기
-            │    DELETE        → /sync/delete
-            │    SKIP          → doc_state SKIPPED
-            │    EXCLUDE       → doc_state EXCLUDED (색인 대상에서 회수)
-            │    HWP_PARSE     → Drive 다운로드 → /parse(rhwp) → GCS *.md
-            │    GOOGLE_EXPORT → Drive export → GCS
-            │    FILE_COPY     → PDF 분할 / XLSX 표 변환 / 그 외 복사 → GCS
-            ├─ /sync/index-gcs        RAG Engine은 GCS만 import (Drive 커넥터 미사용)
-            ├─ /sync/reconcile
-            └─ /sync/commit-token     색인 성공 시에만 커밋 → 다음 페이지
 
-MCP Client → Cloud Run MCP (/mcp) → RAG retrieval
-```
+- `DRIVE_IDS`: 공유 드라이브
+- `SYNC_FOLDER_IDS`: 수집 폴더. 비우면 드라이브 전체
+- `STUDENT_FOLDER_IDS`: 학생 코퍼스에 실을 폴더 (`SYNC`의 부분집합)
+- 교직원 코퍼스 = 전량. 학생 코퍼스 = `audience=STUDENT`만
 
-### 델타를 왜 끊어서 받나
+| 서비스 | 역할 |
+|---|---|
+| `services/parser` | HWP/HWPX → MD |
+| `services/sync` | Drive / GCS / RAG 오케스트레이션 |
+| `services/mcp_server` | MCP `search` / `answer` |
 
-Cloud Workflows 는 실행당 변수 누적 **512KB** 가 상한이다. 변경 1건이 응답·복사본·URI
-까지 합쳐 워크플로우 변수를 ~900B 먹으므로 **약 586건에서 실행 자체가 죽는다**. 죽으면
-pageToken 이 커밋되지 않아 다음 실행의 델타가 더 커지고 — 한 번 넘으면 자력으로 못
-돌아온다. 그래서 `/sync/changes` 는 `SYNC_MAX_CHANGES`(기본 200) 건씩만 주고 `hasMore`
-로 잔량을 알리며, 워크플로우가 **배치마다 토큰을 커밋하고** 다음 페이지를 받는다.
-중간에 실패해도 앞 배치는 확정되므로 재실행 부담이 줄어든다.
+## 일 배치
 
-최초 실행(토큰 없음)은 전체 스냅샷이라 재개 지점이 없다 — 목록을 워크플로우에 올리지
-않고 서버 안에서 끝내는 `/sync/backfill-run` 으로 넘긴다.
+Scheduler 00:00 KST → Workflows → rag-sync
 
-`DRIVE_IDS` = 공유 드라이브, `SYNC_FOLDER_IDS` = 그 안 하위 폴더(콤마 구분, 비우면 전체).
+- `/sync/changes` 200건씩. 색인 성공 후에만 pageToken 커밋
+- 토큰 없으면 `/sync/backfill-run`
+- DELETE / SKIP / EXCLUDE / HWP_PARSE / GOOGLE_EXPORT / FILE_COPY
+- `/sync/index-gcs` → 교직원 코퍼스 후 학생 코퍼스
+- `/sync/reconcile` → `/sync/commit-token`
 
-| 서비스 | 역할 | 런타임 |
-|---|---|---|
-| `services/parser` | HWP/HWPX → MD (rhwp) | Python 3.12 + rhwp-python |
-| `services/sync` | Drive/GCS/RAG 오케스트레이션 API | Python |
-| `services/mcp_server` | search tool | Python MCP SDK |
+Workflows 변수 상한 때문에 델타를 끊음
 
 ## 품질 게이트
 
-| 게이트 | 판정 | 설정 |
-|---|---|---|
-| G1 추출 밀도 | 텍스트 길이 / 원본 바이트 | `QG_DENSITY_THRESHOLD=0.0005` (이미지 많은 공문 오탐 완화) |
-| G2 표 손실률 | 문서 구조상 표 N개 중 마크다운에 안 남은 비율 | `QG_TABLE_LOSS_RATIO=0.3` |
-| EMPTY_TEXT | 추출 결과가 사실상 없음 | `QG_MIN_TEXT_LENGTH=20` |
+| 게이트 | 설정 |
+|---|---|
+| G1 밀도 | `QG_DENSITY_THRESHOLD=0.0005` |
+| G2 표 손실 | `QG_TABLE_LOSS_RATIO=0.3` |
+| EMPTY_TEXT | `QG_MIN_TEXT_LENGTH=20` |
 
-- 기본 `QG_MODE=log` — 미달해도 **색인 계속**, Cloud Logging 경고만
-- 전환: `reject` | `fallback`(+`ENABLE_DOCAI_FALLBACK`)
-- `EMPTY_TEXT` 만은 QG_MODE 와 무관하게 422 (색인할 내용이 없으므로)
-
-> 구 G2(셀 단위 실패율)·G3(이미지 면적비)는 **제거**했다. 두 판정이 읽던
-> `table_cell_failures` / `image_area_ratio` 를 채우는 파서가 없어 셀이 전부 비어도,
-> 이미지가 지면의 100%여도 통과했다. 셀 '실패'는 빈 셀이 정상이라 판별이 불가능하고
-> 이미지 면적비는 페이지 기하 정보가 없어 계산 경로가 없다. G3 조건은 실질적으로
-> G1 의 완화판이기도 했다.
+- 기본 `QG_MODE=log`: 미달이어도 색인, 로그만
+- `reject` / `fallback`(+`ENABLE_DOCAI_FALLBACK`)으로 전환 가능
+- EMPTY_TEXT만 모드와 무관하게 422
 
 ## 로컬
 
 ```bash
-# CPython 3.12 권장 (rhwp 휠). mingw/msys Python은 빌드 실패할 수 있음.
+# CPython 3.12. mingw/msys Python은 빌드 실패할 수 있음
 pip install -r requirements-parser.txt
 pip install -r requirements.txt
 set PYTHONPATH=.
@@ -76,6 +76,16 @@ python scripts/hwp_to_md.py sample.hwp -o sample.md
 ```
 
 ## 배포
+- 배포 전 `.env` 확인 필수
+- parser / sync / 교직원 MCP + Scheduler: `scripts/deploy.sh`
+- FactChat용 MCP만: `scripts/deploy_mcp.sh` 또는 `scripts/deploy_mcp.ps1` (`.env` 로드)
+- 학생 MCP:
 
-`scripts/deploy.sh` — parser / sync / mcp Cloud Run + Scheduler  
-리전: `asia-northeast3`
+```bash
+MCP_SERVICE_NAME=rag-mcp-student \
+RAG_CORPUS_NAME="${RAG_CORPUS_NAME_STUDENT}" \
+MCP_API_KEY="${MCP_API_KEY_STUDENT}" \
+./scripts/deploy_mcp.sh
+```
+
+분리 스위치: `RAG_CORPUS_NAME_STUDENT` + `STUDENT_FOLDER_IDS`를 `rag-sync`에 배포. 기존 INDEXED는 `audience` 일괄 기록 후에 학생 코퍼스를 채운다.

@@ -406,6 +406,11 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
             # import 는 직렬화하되(Vertex RPM), 집계 lock 은 쥐지 않는다.
             with index_lock:
                 indexed = _import_and_mark(store, uris, ids, rag=rag).imported
+                # 학생 코퍼스도 같은 배치에서 맞춘다. 델타 경로는 /sync/index-gcs
+                # 가 대신 해 주지만 백필은 그 엔드포인트를 거치지 않는다. 여기를
+                # 빼면 **초기 적재 직후 학생 코퍼스가 통째로 비어 있고**, 그 문서들은
+                # 이미 INDEXED 라 이후 델타에도 안 걸려 영영 안 채워진다.
+                _sync_student_corpus(uris, ids, settings, store)
         except Exception:  # noqa: BLE001
             logger.exception("backfill index flush failed")
             return len(dict.fromkeys(ids))
@@ -627,8 +632,7 @@ def _already_evicted(existing: DocState | None) -> bool:
     ``error=out_of_folder_scope`` 마커까지 맞을 때만 생략한다.
 
     EXCLUDED 가 정상 상태이고, SKIPPED 는 상태 신설 이전에 쓰인 값이다.
-    scripts/migrate_excluded_status.py 가 옮겨 주기 전의 문서도 정리를 다시
-    돌리지 않도록 둘 다 받는다.
+    마이그레이션 전 잔여 문서도 정리를 다시 돌리지 않도록 둘 다 받는다.
     """
     return bool(
         existing
@@ -682,6 +686,19 @@ def _cleanup_out_of_scope_file(
     except Exception as exc:
         failures.append(exc)
         logger.exception("out-of-scope RAG cleanup failed: %s", file_id)
+    # 분리가 켜져 있으면 학생 코퍼스에서도 내린다. 인자 없는 클라이언트는 기본
+    # (=교직원) 코퍼스만 보므로, 여기를 빼면 범위 밖으로 나간 문서가 교직원
+    # 검색에서만 사라지고 **학생에게는 계속 검색된다** — 내려야 할 자료가
+    # 안 내려가는 쪽이라 조용히 넘기지 않고 실패로 올린다.
+    if settings.audience_split_enabled:
+        try:
+            student_deleted = RagEngineClient(
+                settings, corpus_name=settings.rag_corpus_name_student
+            ).delete_by_file_id(file_id)
+            rag_deleted = rag_deleted or student_deleted
+        except Exception as exc:
+            failures.append(exc)
+            logger.exception("out-of-scope 학생 코퍼스 cleanup failed: %s", file_id)
     for bucket, prefix, kind in (
         (
             settings.gcs_normalized_bucket,

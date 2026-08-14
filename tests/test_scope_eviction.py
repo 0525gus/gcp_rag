@@ -223,6 +223,77 @@ def test_skipped_for_another_reason_still_cleans_the_corpus(monkeypatch) -> None
     assert blob.deleted is True
 
 
+class _SplitSettings(_FakeSettings):
+    audience_split_enabled = True
+    rag_corpus_name_student = "corpora/student"
+
+
+class _RecordingRag:
+    """코퍼스별 삭제 호출을 기록한다. 인자 없는 생성 = 기본(교직원) 코퍼스."""
+
+    calls: list[tuple[str | None, str]] = []
+    # 값이 있으면 학생 코퍼스 삭제만 실패시킨다 (교직원 쪽은 성공).
+    student_error: Exception | None = None
+
+    def __init__(self, *_a, corpus_name: str | None = None, **_k) -> None:
+        self.corpus_name = corpus_name
+
+    def delete_by_file_id(self, file_id: str) -> bool:
+        type(self).calls.append((self.corpus_name, file_id))
+        if self.corpus_name and type(self).student_error:
+            raise type(self).student_error
+        return True
+
+
+def _patch_split_dependencies(monkeypatch, *, store: _FakeStore, gcs: _FakeGcs) -> None:
+    _RecordingRag.calls = []
+    monkeypatch.setattr(_RecordingRag, "student_error", None)
+    monkeypatch.setattr(sync_main, "get_settings", lambda: _SplitSettings())
+    monkeypatch.setattr(sync_main, "DocStateStore", lambda *a, **k: store)
+    monkeypatch.setattr(sync_main, "GcsClient", lambda *a, **k: gcs)
+    monkeypatch.setattr(sync_main, "DriveClient", lambda *a, **k: _FakeDrive())
+    monkeypatch.setattr(sync_main, "RagEngineClient", _RecordingRag)
+
+
+def test_out_of_scope_cleanup_also_removes_from_student_corpus(monkeypatch) -> None:
+    """분리가 켜지면 학생 코퍼스에서도 내려야 한다.
+
+    기본 클라이언트는 교직원 코퍼스만 본다. 학생 쪽을 빼면 범위 밖으로 나간
+    문서가 교직원 검색에서만 사라지고 **학생에게는 계속 검색된다**.
+    """
+    gcs = _FakeGcs({"normalized-bucket": [], "raw-bucket": []})
+    store = _FakeStore(
+        DocState(file_id="f1", drive_id="drive-1", status=DocStatus.INDEXED)
+    )
+    _patch_split_dependencies(monkeypatch, store=store, gcs=gcs)
+
+    result = ingest(_body())
+
+    assert result["status"] == "EXCLUDED"
+    assert _RecordingRag.calls == [(None, "f1"), ("corpora/student", "f1")]
+    assert [state.status for state in store.upserts] == [DocStatus.EXCLUDED]
+
+
+def test_student_corpus_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) -> None:
+    """학생 코퍼스 삭제 실패를 삼키면 안 된다 — 내려야 할 자료가 남는다."""
+    gcs = _FakeGcs({"normalized-bucket": [], "raw-bucket": []})
+    store = _FakeStore(
+        DocState(file_id="f1", drive_id="drive-1", status=DocStatus.INDEXED)
+    )
+    _patch_split_dependencies(monkeypatch, store=store, gcs=gcs)
+    monkeypatch.setattr(
+        _RecordingRag, "student_error", RuntimeError("student corpus unavailable")
+    )
+
+    with pytest.raises(HTTPException) as caught:
+        ingest(_body())
+
+    assert caught.value.status_code == 500
+    assert "out_of_folder_scope_cleanup_failed" in str(caught.value.detail)
+    assert store.upserts == []
+    assert len(store.dlq) == 1
+
+
 def test_rag_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) -> None:
     blob = _FakeBlob("normalized/f1.pdf")
     gcs = _FakeGcs({"normalized-bucket": [blob], "raw-bucket": []})

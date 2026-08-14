@@ -1,8 +1,18 @@
 # 문서 검색(RAG) 시스템 개발명세
 
-- 작성일: 2026. 7. 28.
-- 대상 시스템: 한국공학대학교 문서 검색 파이프라인 (Google Drive → Vertex AI RAG Engine → FactChat)
-- 기재된 수치는 **2026. 7. 28. 운영 환경 실측치**임
+- 작성: 2026. 7. 28. / 개정: 2026. 8. 13.
+- 대상: 한국공학대학교 문서 검색 파이프라인 (Drive → GCS → Vertex RAG → FactChat)
+- 규모·품질 수치는 2026. 7. 28. 운영 실측. 아키텍처는 현행 코드 기준
+
+## 목차
+
+- [Ⅰ. 개요](#ⅰ-개요)
+- [Ⅱ. 시스템 구성](#ⅱ-시스템-구성)
+- [Ⅲ. 처리 명세](#ⅲ-처리-명세)
+- [Ⅳ. 검색 품질 실측](#ⅳ-검색-품질-실측-2026-7-28-단일-코퍼스)
+- [Ⅴ. 운영](#ⅴ-운영)
+- [Ⅵ. 제약·과제](#ⅵ-제약과제)
+- [부록. 평가 재현](#부록-평가-재현)
 
 ---
 
@@ -10,30 +20,30 @@
 
 ### 1. 목적
 
-- □ 교내 공문·규정·양식 문서를 자연어로 검색하여 근거 문서와 함께 반환
-- □ 외부 LLM 제품(FactChat)이 MCP 표준으로 호출하는 검색 도구 제공
-- □ 답변 생성은 호출 측 LLM 담당, 본 시스템은 **근거 검색·출처 제공에 한정**
+- 교내 공문·규정·양식을 자연어로 검색하고 근거 문서와 함께 반환
+- FactChat이 MCP로 호출하는 검색 도구 제공
+- 답변 생성은 호출 측 LLM. 본 시스템은 근거 검색·출처 제공
 
 ### 2. 범위
 
-- □ 포함
-  - ○ Google Drive 공유드라이브 문서의 자동 수집·변환·색인
-  - ○ 한글(HWP/HWPX) 문서의 마크다운 변환
-  - ○ 벡터 검색 및 검색 결과 후처리
-  - ○ MCP 프로토콜 기반 외부 연동
-- □ 제외
-  - ○ 답변 문장 생성 (FactChat 담당)
-  - ○ 사용자 인증·권한 분리 (전사 단일 키 방식)
-  - ○ 표(xlsx) 내부 데이터 검색
+- 포함
+  - Drive 공유드라이브 수집·변환·색인
+  - HWP/HWPX → 마크다운
+  - 학생/교직원 코퍼스 분리 (Drive 경로 기준)
+  - 벡터 검색 및 후처리
+  - MCP 연동 (서비스 2벌)
+- 제외
+  - 답변 문장 생성
+  - 문서 단위 ACL (부서·기밀등급). 분리는 폴더 트리 + 코퍼스 2개까지
 
-### 3. 현행 규모
+### 3. 현행 규모 (2026. 7. 28.)
 
 | 구분 | 수량 |
 |---|---:|
 | 색인 문서 | 1,211건 |
 | 색인 객체(URI) | 1,418건 |
-| 범위 외 제외 문서 | 394건 |
-| 원본 저장 용량 | raw 271MB / normalized 530MB |
+| 범위 외 제외 | 394건 |
+| 원본 저장 | raw 271MB / normalized 530MB |
 
 ---
 
@@ -41,469 +51,337 @@
 
 ### 1. 전체 구조
 
+GCS는 공용 1세트. 소속은 Firestore `audience`에 두고, RAG 코퍼스만 둘로 나눈다.
+
 ```
-Google Drive (공유드라이브)
-      │  증분 변경 감지 (pageToken)
-      ▼
-┌─────────────┐   HWP/HWPX    ┌──────────────┐
-│  rag-sync   │──────────────▶│  rag-parser  │
-│ (Cloud Run) │◀──────────────│  (Cloud Run) │
-└─────────────┘   마크다운     └──────────────┘
-      │
-      │  GCS raw (원본) / normalized (변환본)
-      ▼
-Vertex AI RAG Engine  (RagManagedDb, 청킹·임베딩·벡터검색)
-      ▲
-      │  retrieveContexts
-┌─────────────┐
-│   rag-mcp   │◀──── MCP (Streamable HTTP) ──── FactChat
-│ (Cloud Run) │
-└─────────────┘
+Google Drive
+  DRIVE_IDS / SYNC_FOLDER_IDS / STUDENT_FOLDER_IDS
       │
       ▼
-  Firestore (문서 상태·메타)
+ rag-sync ────── HWP/HWPX ──────▶ rag-parser
+      │
+      ├─ GCS raw (1) / normalized (1)     키 = fileId, 경로에 소속 없음
+      ├─ Firestore DB doc-state
+      │     doc_state.audience = STUDENT | STAFF
+      ▼
+      ├─ RAG 교직원 코퍼스  ← 전량
+      └─ RAG 학생 코퍼스    ← audience=STUDENT 만
+            ▲                    ▲
+            │                    │
+      rag-mcp (교직원)     rag-mcp-student
+            │                    │
+         FactChat             FactChat
 ```
 
-### 2. 구성요소별 명세
+포함 관계: 교직원 코퍼스 ⊇ 학생 코퍼스.
 
-#### 가. rag-sync (수집·동기화)
+### 2. 구성요소
 
-- □ 역할: Drive 변경 감지 → 다운로드 → 변환 위임 → GCS 적재 → RAG 색인
-- □ 사양: CPU 2 / MEM 2Gi / timeout 3600s / concurrency 80 / CPU 상시할당(`no-cpu-throttling`)
-- □ 주요 엔드포인트
+#### 가. rag-sync
+
+- Drive 변경 감지 → 다운로드 → 변환 위임 → GCS 적재 → RAG 색인
+- CPU 2 / MEM 2Gi / timeout 3600s / concurrency 4
+- 엔드포인트
 
 | 경로 | 기능 |
 |---|---|
-| `POST /sync/changes` | Drive 델타 감지 및 MIME 라우팅 |
-| `POST /sync/ingest` | Drive → GCS 적재 |
-| `POST /sync/index-gcs` | GCS → RAG Engine 색인(선삭제 후 import) |
+| `POST /sync/changes` | Drive 델타, MIME 라우팅 |
+| `POST /sync/ingest` | Drive → GCS. `audience` 기록 |
+| `POST /sync/index-gcs` | GCS → 교직원 코퍼스 import 후 학생 코퍼스 동기화 |
 | `POST /sync/reindex-pending` | 누락분 또는 전량 재색인 |
-| `POST /sync/delete` | 코퍼스·GCS 정리 |
-| `GET /sync/jobs/{id}` | 장시간 작업 진행률 조회 |
+| `POST /sync/delete` | 양쪽 코퍼스 + GCS 정리 |
+| `GET /sync/jobs/{id}` | 장시간 작업 진행률 |
 
-- □ 접근제어: 공개 아님(프로젝트 IAM)
+- IAM만 허용 (공개 아님)
+- 분리 스위치: `RAG_CORPUS_NAME_STUDENT` + `STUDENT_FOLDER_IDS` 둘 다 있어야 켜짐. 하나라도 비면 단일 코퍼스
 
-#### 나. rag-parser (한글문서 변환)
+#### 나. rag-parser
 
-- □ 역할: HWP/HWPX → 마크다운 변환, 품질 게이트 판정
-- □ 사양: CPU 2 / MEM 2Gi / timeout 900s / concurrency 160
-- □ 변환 엔진
+- HWP/HWPX → 마크다운, 품질 게이트
+- CPU 2 / MEM 2Gi / timeout 900s
+- 엔진: `.hwp` = rhwp, `.hwpx` = python-hwpx (부재 시 rhwp)
+- 게이트: `log` / `reject` / `fallback`
+  - 실제 발동은 G1 밀도, G2 표 손실, EMPTY_TEXT
+  - 기본 `QG_MODE=log` — 미달이어도 색인 계속, 로그만
+  - EMPTY_TEXT만 모드와 무관하게 422
+- rag-sync 서비스계정만 호출
 
-| 확장자 | 엔진 | 비고 |
-|---|---|---|
-| `.hwp` | rhwp (PyO3 네이티브) | |
-| `.hwpx` | python-hwpx (순수 파이썬) | 엔진 부재 시 rhwp 대체 |
+#### 다. rag-mcp / rag-mcp-student
 
-- □ 품질 게이트: `log`/`reject`/`fallback` 모드
-  - ○ 실제 발동: **텍스트 밀도(G1)와 빈 텍스트 두 가지뿐임**
-  - ○ 표 실패율(G2)·이미지 비율(G3)은 판정 로직은 있으나 파서가 입력값
-    (`table_cell_failures` / `image_area_ratio`)을 채우지 않아 **발동하지 않음**
-  - ○ 따라서 `QG_TABLE_FAIL_RATIO` / `QG_IMAGE_RATIO` 는 현재 무효한 설정값임
-    (근거: [`quality_gate.py`](../services/parser/quality_gate.py) 머리말)
-- □ 접근제어: rag-sync 서비스계정만 호출 가능
+- MCP 도구 `search`, `answer`
+- CPU 1 / MEM 1Gi / timeout 60s / concurrency 40
+- 기동 시 코퍼스 하나. 툴 인자로 대상을 고르지 않음
+- 공개 URL + API 키 (`Authorization: Bearer` 또는 `X-API-Key`). 서비스마다 키를 다르게 둠
+- 배포: 교직원 `scripts/deploy_mcp.sh`, 학생은 값만 바꿔 한 번 더
 
-#### 다. rag-mcp (검색 제공)
+```
+MCP_SERVICE_NAME=rag-mcp-student \
+RAG_CORPUS_NAME="${RAG_CORPUS_NAME_STUDENT}" \
+MCP_API_KEY="${MCP_API_KEY_STUDENT}" ./scripts/deploy_mcp.sh
+```
 
-- □ 역할: MCP 도구(`search`, `answer`) 제공
-- □ 사양: CPU 1 / MEM 1Gi / timeout 60s / concurrency 40
-- □ 접근제어: 공개 URL + API 키(`Authorization: Bearer` 또는 `X-API-Key`)
-- □ 실측 응답 지연: **중앙값 1.14초 / 최대 1.39초**
+- `MCP_SERVICE_NAME`은 `.env`에 고정하지 않음. 남기면 다음 배포가 학생 서비스를 덮어씀
+- 실측 지연 (단일 MCP, 2026. 7. 28.): 중앙값 1.14초 / 최대 1.39초
 
 #### 라. 저장소
 
 | 저장소 | 용도 |
 |---|---|
-| GCS `raw` | Drive 원본(HWP/HWPX). sync→parser 전달 매개 및 재파싱 원본 |
-| GCS `normalized` | 변환 마크다운, 경로 사이드카, 무변환 복사본(PDF 등). **RAG 색인 대상** |
-| Firestore `doc_state` | 문서별 상태·경로·해시·색인 이력 |
-| Firestore `doc_dlq` | 처리 실패 문서 |
-| Firestore `sync_tokens` | Drive 증분 동기화 토큰 |
-| Firestore `sync_jobs` | 장시간 작업 진행률 |
+| GCS `raw` | HWP/HWPX 원본. parser 전달·재파싱. 버킷 1개 |
+| GCS `normalized` | 변환 MD, 사이드카, PDF 등. RAG import 대상. 버킷 1개 |
+| Firestore DB `doc-state` | Native 모드. `(default)` Datastore는 사용 불가 |
+| 컬렉션 `doc_state` | 파일별 상태·경로·해시·`audience` |
+| 컬렉션 `doc_dlq` | 처리 실패 |
+| 컬렉션 `doc_split_queue` | 크기 초과 대기. 소비 코드 없음 |
+| 컬렉션 `sync_tokens` | Drive pageToken |
+| 컬렉션 `sync_jobs` | 장시간 작업 진행률 |
+
+객체 키에 student/staff를 넣지 않음.
+
+```
+raw/{fileId}{.hwp|.hwpx}
+normalized/{fileId}.md
+normalized/{fileId}.meta.md
+normalized/{fileId}{.pdf|…}
+```
 
 ---
 
 ## Ⅲ. 처리 명세
 
-### 1. 문서 수집·변환
-
-- □ 파일 형식별 처리 경로
+### 1. 수집·변환
 
 | 형식 | 처리 |
 |---|---|
-| HWP / HWPX | rag-parser 변환 → 마크다운 색인 |
-| PDF / PPTX / DOCX / TXT | 무변환 복사 → RAG Engine 직접 색인 |
-| Google 문서 | 내보내기(export) 후 색인 |
-| XLSX | 셀 → 마크다운 표 변환 후 색인 (원본은 제외) |
-| 이미지 / 압축파일 | 색인 제외 |
+| HWP / HWPX | parser → MD 색인 |
+| PDF / PPTX / DOCX / TXT | 복사 후 색인. PDF는 필요 시 분할 |
+| Google 문서 | export 후 색인 |
+| XLSX | 셀 → MD 표. 원본은 색인 안 함 |
+| 이미지 / 압축 | 제외 |
 
-- □ 색인 대상 확장자: `.md` `.meta.md` `.pdf` `.txt` `.html` `.docx` `.pptx` `.csv`
-- □ 객체 키 규칙
+- 색인 확장자: `.md` `.meta.md` `.pdf` `.txt` `.html` `.docx` `.pptx` `.csv`
+- 일 배치: Scheduler 00:00 KST → Workflows → rag-sync
+  - `/sync/changes` 기본 200건. pageToken은 색인 성공 후에만 커밋
+  - 토큰 없으면 `/sync/backfill-run`
 
-```
-raw/{fileId}{.hwp|.hwpx}         원본
-normalized/{fileId}.md           변환 본문
-normalized/{fileId}.meta.md      경로·자료묶음 사이드카
-normalized/{fileId}{.pdf|…}      무변환 복사본
-```
+### 1-1. Drive 경로 → 소속
 
-### 1-1. XLSX 셀 → 마크다운 표
+- `DRIVE_IDS`: 공유 드라이브 ID (`folders/` URL의 `0A…`)
+- `SYNC_FOLDER_IDS`: 수집 범위. 지정 폴더와 하위. 비우면 드라이브 전체
+- `STUDENT_FOLDER_IDS`: 학생 코퍼스에 실을 폴더. `SYNC_FOLDER_IDS`의 부분집합. 여기서 빼면 수집 자체가 안 됨
+- 판정: ingest 때 조상 폴더가 `STUDENT_FOLDER_IDS` 안이면 `STUDENT`, 아니면 `STAFF`
+- 실패·필드 없음·모르는 값 → `STAFF`
+- `STUDENT`: 양쪽 코퍼스. `STAFF`: 교직원만
+- 범위 밖(`SYNC` 밖): `EXCLUDED`. 다운로드·색인 없음. 기존 청크는 회수
+- `SKIPPED`: 대상인데 처리 못 함 (미지원 MIME, 암호 파일 등)
 
-RAG Engine 기본 파서는 xlsx 를 읽지 못한다. 예전에는 경로 사이드카 한 줄만
-색인했는데, 그러면 표 **안**을 묻는 질문에 구조적으로 답이 안 나온다. 실제로
-운영 중 그 질문이 들어와 9회 재질의 끝에 실패한 사례가 있다(2026-07-29 09:21).
+| 폴더 | 교직원 코퍼스 | 학생 코퍼스 |
+|---|---|---|
+| `STUDENT_FOLDER_IDS` 안 | 들어감 | 들어감 |
+| `SYNC` 안, 학생 폴더 밖 | 들어감 | 안 들어감 |
+| `SYNC` 밖 | 안 들어감 | 안 들어감 |
 
-- □ 구현: [`shared/xlsx_md.py`](../shared/xlsx_md.py) — openpyxl 읽기전용·값모드
-- □ 실측(운영 코퍼스 xlsx **116건 전량**)
+검색은 `audience`를 다시 보지 않음. MCP가 가리키는 코퍼스에 들어 있는 것만 나옴.
 
-| 구분 | 건수 | 비고 |
-|---|---:|---|
-| 변환 성공 | **89** | 열 수 있는 파일은 **전량** 성공 |
-| 암호 걸림 | 27 | OLE2 로 감싸여 어떤 도구로도 불가 → [`OPS_DEFERRED`](./OPS_DEFERRED.md) 5번 |
+**제약 — 내용 그대로 폴더만 이동하면 코퍼스가 안 따라감**
+
+- Drive에서 파일을 학생↔교직원 폴더로 끌어다 옮기기만 하면 소속 변경이 코퍼스에 반영되지 않음
+  - `modifiedTime`이 안 바뀌면(이동만 하면 보통 안 바뀜) ingest 앞단에서 `UNCHANGED`로 끊김 — 소속 재판정도 안 함
+  - 바뀌어도 내용 해시가 같으면 `HASH_UNCHANGED` — `doc_state.audience`만 갱신되고 코퍼스는 그대로
+  - 코퍼스 반영 지점은 `/sync/index-gcs`의 `_sync_student_corpus` 하나뿐인데, 두 경로 모두 URI를 안 넘김
+- 결과: 학생→교직원 이동분은 **학생 코퍼스에 계속 남고**, 교직원→학생 이동분은 **안 들어옴**
+- 수용 사유: 실무에서 자료 위치 이동이 사실상 없음. 자동 감지 비용(전량 소속 재판정)이 빈도에 비해 큼
+- 필요할 때의 회피
+  - 파일 내용을 실제로 수정 → 해시가 달라져 정상 경로를 탐
+  - 또는 `doc_state`에서 해당 `fileId` 문서를 지우고 재동기화 → 신규로 취급
+- 삭제(`/sync/delete`)와 범위 밖 이탈(EXCLUDE)은 이 제약과 무관 — 양쪽 코퍼스에서 모두 회수됨
+
+### 1-2. XLSX → 마크다운 표
+
+- RAG 기본 파서가 xlsx를 못 읽음. 셀을 MD 표로 뽑아 `{fileId}.md` 색인
+- [`shared/xlsx_md.py`](../shared/xlsx_md.py) — openpyxl 읽기전용·값모드
+- 실측 116건: 변환 89 / 암호(OLE2) 27
+- 상한: 셀 300,000 (`MAX_CELLS`), 출력 8MB (`MAX_BYTES`). 잘리면 본문 끝에 표기
+- 제약: 병합셀은 좌상단만 값. 수식은 캐시 없으면 빈칸. `cellStyle` name 없으면 복구 재시도
+
+### 2. 크기 한도
+
+- RAG: PDF·DOCX 50MB, MD·텍스트 10MB
+- PDF 초과: `{fileId}.partN.pdf` 분할 (안전계수 0.85). 검색 시 `.partN` 떼고 원문으로
+- 한 페이지가 한도면 DLQ
+- 그 외 포맷은 분할 없음. `doc_split_queue` + `FAILED`. 큐 소비 코드 없음
+- HWP→md 실측 최대 ≈ 64KB (한도의 0.6%). PPTX 한도 초과는 이미지 용량이라 분할해도 텍스트가 안 늘음
+
+### 3. 색인
 
 | 항목 | 값 |
-|---|---:|
-| 출력 md 크기 (min/중앙/max) | 139자 / 3,952자 / 1,116,246자 |
-| 최대 파일 예상 바이트 | 3.19MB (한도 10MB) |
-| 처리 속도 (중앙값) | 28.4ms |
-
-- □ 상한 두 가지 — **둘 다** 필요함
-  - ○ 셀 **300,000개**(`MAX_CELLS`): 메모리·시간 방어. 실측 최대 146,472셀의 약 2배
-  - ○ 출력 **8MB**(`MAX_BYTES`): 셀 수만 막으면 바이트가 새어 한도를 넘음.
-    실제로 재색인 중 29MB 산출물이 나와 `SIZE_EXCEEDED` 로 색인이 통째로
-    실패한 사례가 있음(그 문서는 사이드카로도 못 찾게 됨). 잘라서라도 넣는 편이 나음
-  - ○ 잘린 경우 그 사실을 본문 끝에 표기함
-- □ 알려진 제약
-  - ○ **병합셀**: 읽기전용 모드에는 병합 정보가 없어 좌상단에만 값이 남음.
-    검색어는 한 번 등장하므로 회수에는 지장이 없으나 표 모양은 원본과 다름
-  - ○ **수식**: 계산값 캐시를 읽으므로(값모드), 캐시가 없는 파일은 빈칸이 됨
-  - ○ `styles.xml` 의 `cellStyle` 에 `name` 이 없으면 openpyxl 이 죽는다.
-    해당 블록을 들어내고 재시도하는 복구 경로가 있음(실측 2건이 이 경우)
-
-### 2. 크기 한도 대응
-
-- □ RAG Engine 한도: PDF·DOCX **50MB**, 마크다운·텍스트 등 **10MB**
-- □ 초과 시 처리
-  - ○ PDF: **페이지 경계 단위 분할**(`{fileId}.partN.pdf`), 안전계수 0.85 적용
-  - ○ 단일 페이지가 한도 초과 시 DLQ 이관
-  - ○ 검색 결과에서는 `.partN` 접미사를 제거하여 원 문서로 복원
-  - ○ **그 외 포맷: 분할하지 않고 색인 제외**(한도 초과 큐 `doc_split_queue`
-    적재 + `doc_state` FAILED). 큐를 소비하는 코드는 없다
-
-- □ 분할을 PDF 에만 구현한 이유 — 텍스트 계열은 한도에 닿지 않는다
-
-| 포맷 | 실측 최대 | 한도 | 판단 |
-|---|---:|---:|---|
-| HWP→md (270건 벤치) | 21,221자 ≈ **64KB** | 10MB | 한도의 **0.6%**, 해당 없음 |
-| PDF (스캔본) | 한도 초과 사례 있음 | 50MB | **분할 구현** |
-| PPTX·XLSX | — | 10MB | 초과해도 이미지 용량이라 분할 무의미 |
-
-  → 10MB 마크다운은 한글 약 300만 자다. 공문·규정 코퍼스에서 나오지 않는다.
-  이미지가 많은 PPTX 가 한도를 넘길 수는 있으나, 그건 본문 용량이 아니라
-  이미지 용량이라 쪼개도 색인되는 텍스트가 늘지 않는다. 조치는 분할이 아니라
-  텍스트 추출이다(→ [`OPS_DEFERRED.md`](./OPS_DEFERRED.md))
-
-### 3. 색인(청킹·임베딩)
-
-| 항목 | 값 | 근거 |
-|---|---|---|
-| 청크 크기 | 1,024 토큰 | 표 절단율 실측(512 대비 개선, 768 이상 평탄) |
-| 청크 중첩 | 256 토큰 | |
-| 임베딩 모델 | `text-multilingual-embedding-002` | 대안 `text-embedding-005` 대비 MRR 0.967 vs 0.239 |
-| 벡터 DB | RagManagedDb | |
-| 한글 문자/토큰 비 | 0.96 | 운영 코퍼스 실측(청크 182개 중앙값 981자) |
-
-- □ import 제약: 호출 1회당 GCS URI **최대 25개** (초과 시 자동 분할)
-- □ 색인 방식: 동일 fileId 기존 청크 **선삭제 후 import**(중복 방지)
-- □ 전량 재색인 실측: 1,211건 / 약 50분 / 실패 0건
-
-#### 색인 결과 검증
-
-`rag.import_files` 는 **호출 자체가 실패할 때만** 예외를 던진다. 파일 단위 거부는
-예외가 아니라 응답의 카운트로 온다.
-
-| 응답 필드 | 의미 |
 |---|---|
-| `imported_rag_files_count` | 실제 색인된 건수 |
-| `failed_rag_files_count` | 거부된 건수 |
-| `skipped_rag_files_count` | 건너뛴 건수 |
+| 청크 | 1,024 / 중첩 256 |
+| 임베딩 | `text-multilingual-embedding-002` |
+| 벡터 DB | RagManagedDb |
+| import | 호출당 URI 최대 25. 배치 24 |
 
-- □ 예전에는 이 카운트를 로그로만 흘리고 **보낸 URI 목록을 그대로 성공으로 반환**했다.
-  그래서 거부된 파일이 `doc_state` 에 `INDEXED` 로 기록됐다
-  - ○ 실측 사례: xlsx 27건이 상시 import 거부 중이었으나 집계에는 전량 성공으로 잡힘
-  - ○ `INDEXED` 로 찍히면 `reindex-pending`(PARSED 만 대상)이 다시 집지 않아 **영구 고착**
-- □ 현재: `RagEngineClient.import_from_gcs` 가 `ImportOutcome`(보낸 URI + 실제 카운트)을 반환
-  - ○ `ok` 판정: `failed == 0 and (imported + skipped) >= len(uris)`
-  - ○ `skipped` 를 **성공으로 세는** 이유: 유력한 해석이 '이미 코퍼스에 있어 건너뜀'이고,
-    실패로 세면 pre-delete 를 생략하는 `reindex-pending` 비-force 경로에서 그 문서가
-    영영 `PARSED` 에 머물며 매일 다시 import 된다(회수 장치가 무한 루프가 됨).
-    관측은 WARNING 로그로 유지되므로 손실이 없다
-  - ○ 부분 실패 시 해당 배치를 **`INDEXED` 로 올리지 않는다**(PARSED 유지 → 다음 주기 자동 회수)
-  - ○ 어느 URI 가 거부됐는지는 카운트로 알 수 없어 **배치 단위**로 판정한다.
-    파일 단위 사유가 필요하면 `import_result_sink` 를 걸어야 함
-- □ `POST /sync/index-gcs` 응답
-  - ○ `count` — **실제 색인 건수**(예전에는 보낸 URI 수였음). 워크플로 커밋 조건이 이 값을 쓴다
-  - ○ `failed` / `skipped` / `ok` 추가, `status` 는 부분 실패 시 `PARTIAL`
-  - ○ `imported` 는 하위 호환으로 **보낸 URI 목록**을 유지(성공 목록 아님)
+- 같은 fileId는 선삭제 후 import
+- `index-gcs`: 교직원 코퍼스 먼저, 이어서 `_sync_student_corpus`
+  - 학생 쪽은 이번 배치 fileId를 학생 코퍼스에서 지운 뒤 `audience=STUDENT`만 다시 import
+  - 학생 폴더 → 교직원 폴더 이동은 여기서만 학생 노출이 내려감
+- `import_files`는 호출 실패만 예외. 파일 거부는 카운트 (`imported` / `failed` / `skipped`)
+- 부분 실패면 `INDEXED`로 올리지 않음 (`PARSED` 유지 → 다음 주기 회수)
+- `skipped`는 성공으로 셈 (이미 코퍼스에 있는 경우). WARNING 로그는 남김
+- 전량 재색인 실측: 1,211건 / 약 50분 / 실패 0
 
 ### 4. 검색
 
-- □ 처리 순서
-
 ```
-질의 → retrieveContexts(fetch_k=30, 거리상한 0.30)
+질의 → retrieveContexts(fetch_k, 거리상한 0.30)
      → 어휘 재정렬(BM25 + RRF)
+     → SKIPPED / EXCLUDED / DELETED 제외
      → 문서 단위 병합(문서당 최대 3청크)
-     → 상위 5건 반환
+     → 상위 k건
 ```
-
-- □ 파라미터
-
-| 항목 | 값 | 설명 |
-|---|---|---|
-| `TOP_K_DEFAULT` | 5 | 반환 문서 수(1~20 클램프) |
-| `SEARCH_FETCH_MULTIPLIER` | 6 | 후보 배수 → fetch_k = 30 |
-| `SEARCH_DISTANCE_THRESHOLD` | 0.30 | 코퍼스 범위 밖 질의 차단 |
-| `SEARCH_LEXICAL_RERANK` | true | BM25·벡터 순위 RRF 결합 |
-| `SEARCH_MAX_CHUNKS_PER_FILE` | 3 | 문서당 이어붙일 청크 수 |
-| `SEARCH_MAX_TOTAL_CHUNKS` | 15 | 응답 **총** 청크 상한 (토큰 폭발 방지) |
-
-- □ `SEARCH_MAX_TOTAL_CHUNKS` 가 필요한 이유: `top_k × 문서당 청크` 는 곱셈이라
-  `top_k=20` 이면 한 응답에 최대 60청크(≈6만 토큰)가 실린다. 실측으로 팩트챗이
-  한 질문에 7회 호출하며 top_k 를 10→20 으로 올린 사례가 있다.
-  문서당 1청크는 예산보다 우선 보장되므로, 예산을 낮춰도 문서가 사라지지는 않는다.
-
-- □ 거리 임계값 근거(실측, 골든 100건 기준)
-
-| 구분 | 거리 범위 | 비고 |
-|---|---|---|
-| 정답 문서 | 0.118 ~ **0.275** | 중앙값 0.197 / p95 0.243 |
-| 무관한 질의 | 0.330 ~ 0.396 | 전량 차단됨 |
-
-  → 정답 상한 0.275와 무관 질의 시작 0.330 사이에 **0.30** 설정
-
-- □ **여유가 크지 않음(약 0.05).** 초기 설정 시에는 15건 표본으로 정답 범위를
-  `0.120 ~ 0.214`로 파악했으나, 100건으로 재측정한 실제 상한은 **0.275**임
-  - ○ 실제 비용 발생: 일상어 질의 1건이 전량 차단됨(골든 100 중 39번)
-
-```
-"냉난방기를 안 트는 기간이 언제부터…"   (일상어)   → 0건
-"냉난방기 휴지기간이 언제인가요?"        (문서 어휘) → 1위 0.283
-```
-
-  - ○ 상세 및 조정 선택지는 [`GOLDEN_EVAL.md`](./GOLDEN_EVAL.md) Ⅴ장 참조
-
-- □ 재정렬 방식: **점수 미사용, 순위만 결합(RRF)**
-  - ○ 사유: Vertex `score`는 거리(작을수록 유사)이며, 유사도로 오인해 변환 시 순위 역전 사고 발생 이력 있음
-
-### 5. 메타데이터 필터링 정책
-
-#### 가. 기본 방침
-
-- □ **색인 시점 차단을 주 수단으로 함**
-  - ○ 검색 대상이 되어서는 안 되는 문서는 **코퍼스에 넣지 않음**
-  - ○ 사유: 색인 후 검색 단계에서 거르는 방식은 필터 조건 누락 시 그대로 노출되므로,
-    차단 실패 시의 손실이 큼
-- □ 검색 시점 필터는 **범위 좁히기 용도로만** 사용함(차단 목적 아님)
-
-#### 나. 계층별 정책
-
-| 계층 | 시점 | 기준 | 구현 | 상태 |
-|---|---|---|---|---|
-| ① 폴더 범위 | 수집 | 폴더 allowlist 조상 탐색 | `shared/folder_scope.py` | **적용** |
-| ② 형식 | 색인 | 확장자 allowlist | `_INDEXABLE_SUFFIXES` | **적용** |
-| ③ 크기 | 색인 | 형식별 한도 | `shared/mime_types.py` | **적용** |
-| ④ 벡터 메타 필터 | 검색 | Vertex `metadata_filter` | `RagEngineClient.retrieve()` | **미사용** |
-| ⑤ 드라이브 | 검색 후 | Firestore 메타 대조 | `mcp_server.search()` | 적용 |
-
-#### 다. ① 폴더 범위 (주 차단 수단)
-
-- □ `SYNC_FOLDER_IDS` 에 지정한 폴더 및 **그 하위 전체**만 수집 대상
-  - ○ 파일의 조상 폴더를 거슬러 올라가 allowlist 포함 여부를 판정함
-  - ○ allowlist 가 비어 있으면 드라이브 전체가 대상임
-- □ 범위 밖 문서는 `SKIPPED` 상태로 기록하되 **다운로드·색인하지 않음**
-- □ 실적: **394건 차단**(전체 1,605건 중 24.5%), 사유 대부분 `out_of_folder_scope`
-
-#### 라. ② 형식 / ③ 크기
-
-- □ 색인 허용 확장자
-
-```
-.md  .meta.md  .pdf  .txt  .html  .docx  .pptx  .csv
-```
-
-- □ XLSX: **원본 색인 제외**, 셀을 마크다운 표로 뽑아 `{fileId}.md` 로 색인
-  - ○ 원본 제외 사유: RAG Engine 기본 파서가 xlsx 를 읽지 못함
-  - ○ 변환: [`shared/xlsx_md.py`](../shared/xlsx_md.py) (openpyxl, 읽기전용·값모드)
-  - ○ 본문이 생기므로 사이드카는 만들지 않으며, 예전 `.meta.md` 는 정리함
-    (남겨두면 같은 fileId 로 청크가 두 벌 잡힘)
-- □ 이미지·압축파일: 색인 대상 아님
-- □ 크기 한도 초과 시: PDF 는 페이지 단위 분할, 그 외는 색인 제외(한도 초과 큐)
-
-#### 마. ④ 벡터 메타 필터 — 구현되어 있으나 사용하지 않음
-
-- □ `RagEngineClient.retrieve()` 는 `metadata_filter` 인자를 지원하나,
-  **호출부에서 전달하지 않음**
-- □ 즉 현재 벡터 검색 단계에는 메타데이터 조건이 걸리지 않음
-- □ 사유: 문서 단위 접근제어 요건이 없어(전 교직원 동일 범위) 필요성이 없었음
-- □ 향후 부서별·기밀등급별 분리가 필요해지면 이 계층을 사용해야 함
-  - ○ ⑤ 계층(검색 후 필터)으로 대체하면 아래 바항의 제약을 그대로 안게 됨
-
-#### 바. ⑤ 드라이브 필터 — 검색 후 적용, 결과 수 감소 가능
-
-- □ `search(drive_id=...)` 지정 시 **상위 k건을 확정한 뒤** Firestore 메타를 대조해 제외함
-- □ **제약**: 제외된 자리를 다음 후보로 채우지 않음
-  - ○ 예: `top_k=5` 요청 시 2건이 다른 드라이브면 **3건만 반환됨**
-- □ 현재 영향 없음 — 운영 드라이브가 1개(`0AP6Mv9od5B3yUk9PVA`)이므로 필터가 실질 작동하지 않음
-- □ 드라이브가 2개 이상이 되면 ④ 계층으로 옮기거나, 여유분을 더 뽑아 보충하는 처리가 필요함
-
-#### 사. 필터링에 해당하지 않는 항목 (구분 주의)
-
-- □ **거리 임계값(0.30)** 은 메타데이터 필터가 아니라 **유사도 컷오프**임
-  - ○ 문서 속성이 아니라 질의-문서 관련도로 판정하므로 성격이 다름
-- □ **문서당 청크 수 제한(3)** 은 필터가 아니라 **결과 구성 규칙**임
-
----
-
-## Ⅳ. 검색 품질 실측
-
-### 1. 평가 방법
-
-- □ 골든셋: 색인 1,211건에서 **시드 고정 무작위 100건** 추출 후 각 문서 본문을 읽고 질의 작성
-  - ○ 제목 어휘를 그대로 베끼지 않음(질의-제목 어휘 중복률 17%)
-  - ○ 본문이 없는 문서(엑셀 스텁, 텍스트층 없는 PDF)는 제외 — 질문이
-    '파일명이 걸리나'를 재는 데 그쳐 검색 품질의 신호가 아님
-- □ 평가 대상: 배포된 MCP `search` 응답(후처리 포함 전 구간)
-- □ 데이터셋 [`tests/golden100.json`](../tests/golden100.json) / 결과 전량은
-  [`GOLDEN_EVAL.md`](./GOLDEN_EVAL.md)
-- □ 판정 기준
-
-| 기준 | 정의 |
-|---|---|
-| 정확히 그 파일 | 기대 fileId가 상위 k에 존재(본문 동일 확인된 사본 포함) |
-| 같은 자료묶음 | 동일 폴더의 공문·붙임 포함 |
-
-### 2. 결과 (100건, top_k=5)
-
-| 기준 | hit@1 | hit@3 | hit@5 | MRR |
-|---|---:|---:|---:|---:|
-| 정확히 그 파일 | 46 (46%) | 81 (81%) | **94 (94%)** | 0.652 |
-| 같은 자료묶음 | 63 (63%) | 90 (90%) | 97 (97%) | 0.766 |
-
-- □ 부가 지표
-  - ○ 빈 결과: **1건 / 100건**
-  - ○ 무관 질의 차단: 6건 / 6건
-  - ○ 평균 응답 본문: 9,006자
-
-- □ **hit@5 94%는 다소 낙관적임 — 보수적으로는 89~94% 구간으로 읽을 것**
-
-| 표본 구간 | n | hit@1 | hit@3 | hit@5 | MRR |
-|---|---:|---:|---:|---:|---:|
-| 기존 38건 | 38 | 45% | 79% | 89% | 0.632 |
-| 신규 62건 | 62 | 47% | 82% | 97% | 0.664 |
-
-  - ○ 신규 62건은 추출 시 **본문 200자 이상** 필터를 적용해 표본이 유리하게 잡힘
-  - ○ **hit@1은 두 구간이 사실상 동일**(45% vs 47%)하므로 이 값이 안정적임
-
-### 3. 미검출 사유 분석 (100건 중 6건)
-
-| 유형 | 건수 | 성격 |
-|---|---:|---|
-| 같은 묶음 문서가 대신 검출 | 4 | 사용자는 답에 도달 |
-| 실제 미검출 | 2 | 개선 대상 |
-
-- □ 실제 미검출 2건
-  - ○ 18번: 대상 문장이 표 1개 셀에 위치, 거리 임계값에 의해 제외
-  - ○ 39번: 문서는 정상 색인되어 있으나 **질의를 일상어로 하면 전량 차단**
-    (Ⅲ-4 거리 임계값 항 참조)
-
-### 4. 개선 시도 및 결과
-
-| 시도 | 결과 | 판정 |
-|---|---|---|
-| 문서 단위 청크 병합 | 조문 다수 규정에서 누락 완화 | 채택 |
-| 거리 임계값 도입 | 무관 질의 차단 6/6 | 채택 |
-| 어휘 재정렬(BM25+RRF) 도입 | 편향 골든셋 기준 개선, **무편향 재측정 미실시** | 유지(효과 미확정) |
-| 중복 사본 제거 | hit@1 +1건 | 효과 미미 |
-| 내용 없는 문서 제외 | hit@1 **-2%p** | 효과 없음 |
-| 머리말 축약(반복 제거) | MRR +0.003, hit@3 -5%p | **효과 없음(가설 기각)** |
-| 청크 크기 확대(2048) | 미실시 | 근거 부족으로 보류 |
-
-- □ **중요 1**: 머리말 축약은 "코퍼스 공통 보일러플레이트가 임베딩을 왜곡한다"는
-  가설로 시행하였으나 **가설이 기각됨.** 해가 없어 유지하되 품질 근거로 인용 불가
-- □ **중요 2**: 어휘 재정렬은 도입 근거였던 수치가 **편향된 골든셋(질의-제목
-  어휘 중복률 36%)에서 산출된 것**임. 현행 무편향 골든셋으로 on/off 비교
-  측정을 하지 않았으므로 **실효성이 확인되지 않은 상태**임
-
----
-
-## Ⅴ. 운영 명세
-
-### 1. 자동화
-
-- □ 일일 동기화: Cloud Scheduler → Cloud Workflows → rag-sync (매일 00:00 KST)
-- □ 실측 소요: 변경 없을 시 약 18초
-
-### 2. 처리량 제약
 
 | 항목 | 값 |
 |---|---|
-| Vertex RagDataService 쿼터 | 300 req/min (60에서 증액) |
-| import 호출 지연 | 약 21초/회(URI 수 무관) |
-| 재색인 배치 크기 | URI 24개(호출 1회 보장 최대값) |
-| 삭제 동시 실행 | 4 / 페이싱 0.6초 |
+| `TOP_K_DEFAULT` | 5 (1~20) |
+| `SEARCH_FETCH_MULTIPLIER` | 3 |
+| `SEARCH_FETCH_MAX` | 60 |
+| `SEARCH_DISTANCE_THRESHOLD` | 0.30 |
+| `SEARCH_LEXICAL_RERANK` | true |
+| `SEARCH_MAX_CHUNKS_PER_FILE` | 3 |
+| `SEARCH_MAX_TOTAL_CHUNKS` | 15 |
+
+- Vertex `score`는 거리(작을수록 유사). 유사도로 변환하면 순위가 뒤집힘. RRF는 순위만 결합
+- 거리 0.30 근거 (골든 100): 정답 0.118~0.275, 무관 질의 0.330~. 여유 ≈ 0.05
+- Vertex `metadata_filter`는 retrieve에 인자가 있으나 호출하지 않음. 소속 차단은 코퍼스 분리로 함
+
+### 5. 켜는 순서
+
+이미 INDEXED인 문서는 ingest가 `UNCHANGED`로 빠져 `audience`를 안 찍음. `reindex-pending`도 경로를 다시 판정하지 않음.
+
+1. `.env`에 `STUDENT_FOLDER_IDS` / `RAG_CORPUS_NAME_STUDENT` 설정 후 `rag-sync` 재배포
+2. 기존 문서 `audience` 일괄 기록. 건너면 학생 코퍼스는 빈 채
+3. 학생 코퍼스 적재
+4. 학생 MCP 배포 (위 다항). 4를 먼저 하면 학생 검색만 빔
+
+---
+
+## Ⅳ. 검색 품질 실측 (2026. 7. 28., 단일 코퍼스)
+
+### 1. 방법
+
+- 색인 1,211건에서 시드 고정 무작위 100건. 본문 읽고 질의. 제목 어휘 베끼지 않음 (중복률 17%)
+- 본문 없는 문서(엑셀 스텁, 텍스트층 없는 PDF) 제외
+- 대상: 배포 MCP `search` 전 구간
+- 데이터 [`tests/golden100.json`](../tests/golden100.json) / 전량 [`GOLDEN_EVAL.md`](./GOLDEN_EVAL.md)
+
+| 기준 | 정의 |
+|---|---|
+| 정확히 그 파일 | 기대 fileId가 상위 k (본문 동일 사본 포함) |
+| 같은 자료묶음 | 동일 폴더의 공문·붙임 |
+
+### 2. 결과 (top_k=5)
+
+| 기준 | hit@1 | hit@3 | hit@5 | MRR |
+|---|---:|---:|---:|---:|
+| 정확히 그 파일 | 46% | 81% | 94% | 0.652 |
+| 같은 자료묶음 | 63% | 90% | 97% | 0.766 |
+
+- 빈 결과 1/100, 무관 질의 차단 6/6, 평균 본문 9,006자
+- hit@5는 신규 62건이 본문 200자 이상 필터라 유리. 기존 38건 hit@5는 89%. 구간으로 89~94%
+- hit@1은 두 구간이 45% vs 47%
+
+### 3. 미검출 6건
+
+| 유형 | 건수 |
+|---|---:|
+| 같은 묶음이 대신 검출 | 4 |
+| 실제 미검출 | 2 |
+
+- 18번: 표 셀 한 칸, 거리 임계로 제외
+- 39번: 일상어 질의면 전량 차단. 문서 어휘로 바꾸면 1위 (거리 0.283)
+
+### 4. 개선 시도
+
+| 시도 | 결과 | 판정 |
+|---|---|---|
+| 문서 단위 청크 병합 | 조문 누락 완화 | 채택 |
+| 거리 임계값 | 무관 질의 6/6 | 채택 |
+| 어휘 재정렬(BM25+RRF) | 편향 골든셋 기준. 무편향 재측정 없음 | 유지, 효과 미확정 |
+| 중복 사본 제거 | hit@1 +1 | 미미 |
+| 내용 없는 문서 제외 | hit@1 -2%p | 없음 |
+| 머리말 축약 | MRR +0.003, hit@3 -5%p | 가설 기각 |
+| 청크 2048 | 미실시 | 보류 |
+
+---
+
+## Ⅴ. 운영
+
+### 1. 자동화
+
+- Scheduler → Workflows → rag-sync, 매일 00:00 KST
+- 변경 없을 때 약 18초
+
+### 2. 처리량
+
+| 항목 | 값 |
+|---|---|
+| Vertex RagDataService | 300 req/min |
+| import 지연 | 약 21초/회 (URI 수 무관) |
+| 재색인 배치 | URI 24 |
+| 삭제 동시 / 페이싱 | 4 / 0.6초 |
 
 ### 3. 접근제어
 
 | 서비스 | 방식 |
 |---|---|
-| rag-mcp | 공개 URL + API 키 |
-| rag-sync | 프로젝트 IAM (공개 아님) |
-| rag-parser | rag-sync 서비스계정 전용 |
+| rag-mcp | 공개 URL + 교직원 키 |
+| rag-mcp-student | 공개 URL + 학생 키 (교직원과 다른 값) |
+| rag-sync | 프로젝트 IAM |
+| rag-parser | rag-sync SA |
 
-### 4. 현행 상태 (2026. 7. 28. 기준)
+### 4. 상태 (2026. 7. 28.)
 
 ```
-문서 상태   INDEXED 1,211 / SKIPPED 394 / FAILED 0 / PENDING 0
-DLQ         0건
-분할 대기   0건
-고아 객체   0건
+INDEXED 1,211 / SKIPPED·EXCLUDED 394 / FAILED 0 / PENDING 0
+DLQ 0 / 분할 대기 0 / 고아 객체 0
 ```
+
+당시 단일 코퍼스. 분리 켠 뒤의 코퍼스별 건수는 재집계 필요.
 
 ---
 
-## Ⅵ. 제약사항 및 향후 과제
+## Ⅵ. 제약·과제
 
-### 1. 기능적 제약
+### 1. 기능
 
-- □ **XLSX 표 내부 미검색**: 116건(9.6%)이 파일명·경로만 색인됨. 명단·시간표 내용 질의 불가
-- □ **스캔 PDF 미검색**: 텍스트 계층 없는 PDF는 본문 추출 불가(표본 50건 중 3건, 전체 PDF 169건 중 일부)
-- □ **문서 위생**: 동일 파일명 사본 122건(10.1%), 초안·의견수렴본 201건(16.6%) 혼재
-  - ○ 검색 점수 영향은 실측상 미미하나, 최신본·확정본 판별은 불가
+- 암호 xlsx 27건: OLE2라 변환 불가
+- 스캔 PDF: 텍스트 계층 없으면 본문 없음 (표본 50건 중 3)
+- 동일 파일명 사본 122건(10.1%), 초안·의견수렴본 201건(16.6%). 최신본 판별 없음
+- 기존 INDEXED는 경로가 안 바뀌면 `audience`가 안 갱신됨. 이미 색인된 코퍼스에서 분리를 켜면 일괄 기록이 필요 (빈 `doc_state`에서 전량 backfill로 시작하면 해당 없음)
+- 내용 불변 + 폴더만 이동하면 학생 코퍼스가 안 따라감 — 수용된 제약, 상세는 Ⅲ-1-1
 
-### 2. 운영 과제 (PoC 범위 밖)
+### 2. 운영 (PoC 밖)
 
-- □ 세부 내용은 별도 문서 `OPS_DEFERRED.md` 참조
+- 상세 [`OPS_DEFERRED.md`](./OPS_DEFERRED.md)
 
 | 과제 | 사유 |
 |---|---|
-| 시크릿 평문 저장 → Secret Manager 이관 | 프로젝트 뷰어 권한자에게 노출 |
-| 알림·모니터링 부재 | 장애 무인지 위험(스케줄러 3일 중단 사례 발생) |
-| 백업 부재(Firestore PITR·GCS 버전관리) | 오조작 시 복구 불가 |
-| raw 버킷 IAM 미분리 | 원본 공문의 개인정보 접근 범위 과다 |
-| 콜드스타트(min-instances=0) | 최초 질의 지연 |
-| 예산 알림 미설정 | 비용 통제 |
+| 시크릿 → Secret Manager | 뷰어에게 평문 노출 |
+| 알림·모니터링 | 스케줄러 3일 중단 사례 |
+| Firestore PITR·GCS 버전 | 오조작 복구 수단 없음 |
+| raw 버킷 IAM 분리 | 원본 공문 접근 범위 |
+| min-instances=0 | 최초 질의 지연 |
+| 예산 알림 | 미설정 |
 
-### 3. 품질 개선 방향
+### 3. 품질
 
-- □ 현 수준(hit@5 89%)에서 **측정 없는 개선 시도는 권장하지 않음**
-  - ○ 근거: 시도한 개선안 다수가 통계적 유의성 없음(위 Ⅳ-4 참조)
-- □ 우선 검토 대상
-  - ○ 어휘 재정렬 on/off 비교 측정 → 현 설정의 실효성 확인
-  - ○ XLSX 표 파싱 도입 → 검색 불가 질의 유형 해소(단, 개인정보 대량 색인 검토 필요)
+- 측정 없는 개선은 권하지 않음 (Ⅳ-4)
+- 어휘 재정렬 on/off 재측정
+- 암호·스캔 문서는 검색 불가로 남김
 
 ---
 
-## 부록. 평가 재현 절차
+## 부록. 평가 재현
 
 ```bash
 export MCP_URL=https://<서비스>/mcp
@@ -511,6 +389,7 @@ export MCP_API_KEY=<키>
 python scripts/eval_golden.py tests/golden100.json
 ```
 
-- □ 골든셋: `tests/golden100.json` (100건, 시드 고정)
-- □ 결과 문서 생성: `python scripts/gen_eval_doc.py <결과.json> docs/GOLDEN_EVAL.md`
-- □ 청크 크기 분석: `python scripts/analyze_chunking.py <코퍼스 디렉터리>`
+- 골든셋: `tests/golden100.json` (100건, 시드 고정)
+- 결과 문서: `python scripts/gen_eval_doc.py <결과.json> docs/GOLDEN_EVAL.md`
+- 청크 분석: `python scripts/analyze_chunking.py <코퍼스 디렉터리>`
+- 학생 MCP를 재려면 URL·키를 학생 서비스로 둔다. 골든셋은 교직원 코퍼스 기준이라 학생 hit는 따로 봐야 함

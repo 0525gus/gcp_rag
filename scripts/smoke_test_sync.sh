@@ -20,7 +20,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # --- 환경 로드 ---
-set -a; source .env; set +a
+# 배포 스크립트와 같은 로더를 쓴다. `source .env` 는 (1) 값을 bash 로 평가해
+# `$(...)` 가 실행되고 (2) .env 가 셸을 이겨서 `GCP_PROJECT_ID=... bash 스크립트`
+# 식의 일회성 오버라이드가 안 먹었다. 공백 트림도 여기 한 곳에만 있다.
+# shellcheck source=scripts/_load_env.sh
+. "$(dirname "$0")/_load_env.sh"
+load_dotenv
 REGION="${GCP_REGION:-asia-northeast3}"
 REPO="${ARTIFACT_REPO:-rag-mcp}"
 IMAGE_BASE="${REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${REPO}"
@@ -33,9 +38,13 @@ if [[ "${SKIP_DEPLOY:-0}" != "1" ]]; then
   echo "== [1/3] sync 이미지 빌드 & 배포 =="
   gcloud builds submit --config=cloudbuild.sync.yaml \
     --substitutions="_IMAGE=${IMAGE_BASE}/sync:latest"
+  # env 목록은 deploy.sh 의 rag-sync 와 **같아야 한다.** 여기는 운영 서비스를
+  # 그대로 재배포하고 --set-env-vars 는 통째 치환이라, 빠진 변수는 스모크
+  # 한 번으로 운영에서 사라진다. 특히 RAG_CORPUS_NAME_STUDENT/STUDENT_FOLDER_IDS
+  # 가 빠지면 audience_split_enabled 가 False 로 떨어져 학생 분리가 조용히 꺼진다.
   gcloud run deploy rag-sync \
     --image="${IMAGE_BASE}/sync:latest" --region="${REGION}" --no-allow-unauthenticated \
-    --set-env-vars="^|^GCP_PROJECT_ID=${GCP_PROJECT_ID}|GCP_REGION=${REGION}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|DRIVE_IDS=${DRIVE_IDS}|SYNC_FOLDER_IDS=${SYNC_FOLDER_IDS:-}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|QG_MODE=${QG_MODE:-log}|RAW_UPLOAD_CONCURRENCY=${RAW_UPLOAD_CONCURRENCY:-8}" \
+    --set-env-vars="^|^GCP_PROJECT_ID=${GCP_PROJECT_ID}|GCP_REGION=${REGION}|GCS_RAW_BUCKET=${GCS_RAW_BUCKET}|GCS_NORMALIZED_BUCKET=${GCS_NORMALIZED_BUCKET}|RAG_CORPUS_NAME=${RAG_CORPUS_NAME}|DRIVE_IDS=${DRIVE_IDS}|SYNC_FOLDER_IDS=${SYNC_FOLDER_IDS:-}|FIRESTORE_COLLECTION=${FIRESTORE_COLLECTION:-doc_state}|FIRESTORE_DATABASE=${FIRESTORE_DATABASE:-doc-state}|QG_MODE=${QG_MODE:-log}|RAW_UPLOAD_CONCURRENCY=${RAW_UPLOAD_CONCURRENCY:-8}|RAG_DELETE_PACING_SECONDS=${RAG_DELETE_PACING_SECONDS:-1.1}|RAG_DELETE_CONCURRENCY=${RAG_DELETE_CONCURRENCY:-1}|RAG_CORPUS_NAME_STUDENT=${RAG_CORPUS_NAME_STUDENT:-}|STUDENT_FOLDER_IDS=${STUDENT_FOLDER_IDS:-}" \
     --memory=2Gi --cpu=2 --timeout=3600
 
   echo "== [1/3] 워크플로우 배포 (#1 YAML) =="

@@ -173,6 +173,80 @@ def test_backfill_commits_candidate_only_after_complete_index(
     assert store.committed == [("drive", "candidate-token")]
 
 
+class _SplitSettings(_Settings):
+    audience_split_enabled = True
+    rag_corpus_name_student = "corpora/student"
+    student_folder_id_list = ["folder-student"]
+
+
+def _indexes_everything(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sync_main,
+        "_import_and_mark",
+        lambda _store, uris, _ids, **_k: ImportOutcome(
+            uris=list(uris), imported=len(uris), failed=0, skipped=0
+        ),
+    )
+
+
+def test_backfill_syncs_student_corpus_for_each_indexed_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """백필은 /sync/index-gcs 를 거치지 않는다.
+
+    학생 코퍼스를 여기서 안 맞추면 초기 적재 직후 학생 코퍼스가 통째로 비고,
+    그 문서들은 이미 INDEXED 라 이후 델타에도 안 걸려 영영 안 채워진다.
+    """
+    store = _wire_backfill(monkeypatch)
+    monkeypatch.setattr(sync_main, "get_settings", lambda: _SplitSettings())
+    _indexes_everything(monkeypatch)
+
+    synced: list[tuple[list[str], list[str]]] = []
+
+    def _record(uris, ids, _settings, _store):
+        synced.append((list(uris), list(ids)))
+        return {"enabled": True}
+
+    monkeypatch.setattr(sync_main, "_sync_student_corpus", _record)
+
+    result = sync_main.backfill_run(
+        sync_main.BackfillRunBody(driveId="drive", indexBatchSize=3)
+    )
+
+    assert result["ok"] is True
+    assert len(synced) == 1, "배치마다 학생 코퍼스를 맞춰야 한다"
+    uris, ids = synced[0]
+    assert sorted(ids) == ["f0", "f1", "f2"]
+    assert len(uris) == 3
+    assert store.committed == [("drive", "candidate-token")]
+
+
+def test_backfill_student_sync_failure_blocks_token_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """학생 코퍼스 동기화 실패를 삼키면 안 된다.
+
+    교직원 import 만 성공한 채 토큰이 커밋되면, 그 배치는 다시 안 돌아
+    학생 코퍼스에 영구 구멍이 남는다.
+    """
+    store = _wire_backfill(monkeypatch)
+    monkeypatch.setattr(sync_main, "get_settings", lambda: _SplitSettings())
+    _indexes_everything(monkeypatch)
+    monkeypatch.setattr(
+        sync_main,
+        "_sync_student_corpus",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("student corpus down")),
+    )
+
+    result = sync_main.backfill_run(
+        sync_main.BackfillRunBody(driveId="drive", indexBatchSize=3)
+    )
+
+    assert result["ok"] is False
+    assert result["totals"]["indexFailed"] == 3
+    assert store.committed == []
+
+
 def test_backfill_does_not_delete_chunks_of_documents_it_will_not_reimport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
