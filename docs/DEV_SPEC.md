@@ -112,15 +112,15 @@ Google Drive
 - CPU 1 / MEM 1Gi / timeout 60s / concurrency 40
 - 기동 시 코퍼스 하나. 툴 인자로 대상을 고르지 않음
 - 공개 URL + API 키 (`Authorization: Bearer` 또는 `X-API-Key`). 서비스마다 키를 다르게 둠
-- 배포: 교직원 `scripts/deploy_mcp.sh`, 학생은 값만 바꿔 한 번 더
+- 배포: 교직원 `scripts/deploy_mcp.ps1`, 학생은 `MCP_AUDIENCE=student` 로 한 번 더
+- 서비스 이름: `.env` 의 `MCP_SERVICE_NAME_STAFF` / `MCP_SERVICE_NAME_STUDENT`
 
 ```
-MCP_SERVICE_NAME=rag-mcp-student \
-RAG_CORPUS_NAME="${RAG_CORPUS_NAME_STUDENT}" \
-MCP_API_KEY="${MCP_API_KEY_STUDENT}" ./scripts/deploy_mcp.sh
+$env:MCP_AUDIENCE = "student"
+.\scripts\deploy_mcp.ps1
 ```
 
-- `MCP_SERVICE_NAME`은 `.env`에 고정하지 않음. 남기면 다음 배포가 학생 서비스를 덮어씀
+- `MCP_SERVICE_NAME`(이번 실행 타깃)은 `.env`에 고정하지 않음
 - 실측 지연 (단일 MCP, 2026. 7. 28.): 중앙값 1.14초 / 최대 1.39초
 
 #### 라. 저장소

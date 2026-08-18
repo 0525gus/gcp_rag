@@ -38,7 +38,7 @@ if [[ "${SKIP_DEPLOY:-0}" != "1" ]]; then
   echo "== [1/3] sync 이미지 빌드 & 배포 =="
   gcloud builds submit --config=cloudbuild.sync.yaml \
     --substitutions="_IMAGE=${IMAGE_BASE}/sync:latest"
-  # env 목록은 deploy.sh 의 rag-sync 와 **같아야 한다.** 여기는 운영 서비스를
+  # env 목록은 deploy.ps1 의 rag-sync 와 **같아야 한다.** 여기는 운영 서비스를
   # 그대로 재배포하고 --set-env-vars 는 통째 치환이라, 빠진 변수는 스모크
   # 한 번으로 운영에서 사라진다. 특히 RAG_CORPUS_NAME_STUDENT/STUDENT_FOLDER_IDS
   # 가 빠지면 audience_split_enabled 가 False 로 떨어져 학생 분리가 조용히 꺼진다.

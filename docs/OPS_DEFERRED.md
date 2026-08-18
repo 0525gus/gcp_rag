@@ -24,8 +24,8 @@ PoC 로 돌리는 동안은 넘어가기로 한 항목들. **실제 운영에 �
 리비전 동안 없는 채로 떠 있었다. 그동안 `allUsers` invoker 와 겹쳐
 **인증 없이 코퍼스 전체가 검색됐다**(2026-07-28 복구, `rag-mcp-00014`).
 
-배포 스크립트([`deploy_mcp.ps1`](../scripts/deploy_mcp.ps1) /
-[`deploy_mcp.sh`](../scripts/deploy_mcp.sh))는 키를 필수로 강제한다. 문제는
+배포 스크립트([`deploy.ps1`](../scripts/deploy.ps1) /
+[`deploy_mcp.ps1`](../scripts/deploy_mcp.ps1))는 키를 필수로 강제한다. 문제는
 그 스크립트를 **안 거치고** `gcloud run services update` 를 직접 쓸 때
 `--set-env-vars` 가 기존 값을 통째로 갈아버리는 것이다.
 

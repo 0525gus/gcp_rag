@@ -46,7 +46,7 @@ MCP_API_KEY = os.environ.get("MCP_API_KEY", "").strip()
 # 키가 없으면 ApiKeyMiddleware 가 통째로 무력화된다(401 이 아니라 그냥 통과).
 # 배포가 공개(allUsers)로 바뀌는 순간 코퍼스 전체가 무인증 노출이므로, 인증 없이
 # 뜨는 것은 반드시 의도한 선택이어야 한다 — 명시적 opt-in 없이는 기동을 거부한다.
-# IAM(ID 토큰) 으로만 여는 scripts/deploy.sh 경로에서 이 값을 켠다.
+# IAM(ID 토큰) 으로만 여는 scripts/deploy.ps1 경로에서 이 값을 켠다.
 MCP_ALLOW_NO_AUTH = os.environ.get("MCP_ALLOW_NO_AUTH", "").strip().lower() in (
     "1",
     "true",
@@ -326,7 +326,7 @@ async def health(_request: Request):  # type: ignore[no-untyped-def]
     return JSONResponse(
         {
             "status": "ok",
-            "service": "rag-mcp",
+            "service": os.environ.get("K_SERVICE") or "rag-mcp",
             "auth": "api_key" if MCP_API_KEY else "none",
         }
     )

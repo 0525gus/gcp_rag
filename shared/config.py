@@ -137,7 +137,7 @@ class Settings:
     #
     # 150MB 근거 — 실측 최대 문서가 135.8MB(455쪽)이고, 그 한 건을 쪼갤 때
     # 원본 136MB + 파이썬 힙 피크 375MB ≈ 511MB 를 쓴다. sync 2Gi 기준 동시 4건이
-    # 한계라 deploy.sh 에서 concurrency 를 4 로 묶어 뒀다. 이 값을 더 올리려면
+    # 한계라 deploy.ps1 에서 concurrency 를 4 로 묶어 뒀다. 이 값을 더 올리려면
     # 그 동시성이나 메모리도 같이 봐야 한다.
     max_gcs_bytes: int = 150 * 1024 * 1024
     enable_docai_fallback: bool = False

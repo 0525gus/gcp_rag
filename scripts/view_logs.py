@@ -34,15 +34,33 @@ if str(ROOT) not in sys.path:
 
 from scripts._env import force_utf8_stdout, load_dotenv  # noqa: E402
 
-SERVICES: dict[str, str | None] = {
-    "sync": "rag-sync",
-    "parser": "rag-parser",
-    "mcp": "rag-mcp",
-    "all": None,  # 세 서비스 전부
-    "workflow": None,  # workflows 전용 필터
-}
-
 SEVERITY_ORDER = ("DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY")
+
+
+def _mcp_service_names() -> tuple[str, str]:
+    staff = os.environ.get("MCP_SERVICE_NAME_STAFF") or "rag-mcp"
+    student = os.environ.get("MCP_SERVICE_NAME_STUDENT") or "rag-mcp-student"
+    return staff, student
+
+
+def _run_service_names(target: str) -> list[str] | None:
+    if target == "sync":
+        return ["rag-sync"]
+    if target == "parser":
+        return ["rag-parser"]
+    if target == "mcp":
+        staff, student = _mcp_service_names()
+        names = [staff]
+        if student and student != staff:
+            names.append(student)
+        return names
+    if target == "all":
+        staff, student = _mcp_service_names()
+        names = ["rag-sync", "rag-parser", staff]
+        if student and student not in names:
+            names.append(student)
+        return names
+    return None
 
 
 def _project() -> str:
@@ -65,15 +83,13 @@ def build_filter(
         parts.append('resource.labels.workflow_id="rag-daily-sync"')
     else:
         parts.append('resource.type="cloud_run_revision"')
-        svc = SERVICES[target]
-        if svc:
-            parts.append(f'resource.labels.service_name="{svc}"')
-        else:
-            names = " OR ".join(
-                f'resource.labels.service_name="{n}"'
-                for n in ("rag-sync", "rag-parser", "rag-mcp")
-            )
-            parts.append(f"({names})")
+        names = _run_service_names(target)
+        if names:
+            if len(names) == 1:
+                parts.append(f'resource.labels.service_name="{names[0]}"')
+            else:
+                joined = " OR ".join(f'resource.labels.service_name="{n}"' for n in names)
+                parts.append(f"({joined})")
 
     if severity:
         sev = severity.upper()
@@ -136,7 +152,7 @@ def main() -> int:
     )
     parser.add_argument(
         "target",
-        choices=list(SERVICES),
+        choices=("sync", "parser", "mcp", "all", "workflow"),
         help="sync | parser | mcp | all | workflow",
     )
     parser.add_argument("-q", "--query", help="로그 본문 검색어")
