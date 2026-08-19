@@ -17,7 +17,7 @@ from shared.models import SearchHit
 # 반환하고, 그 값은 두 곳에서 조용히 잘못 쓰인다.
 #   rag_engine._file_index   fileId 로 안 접혀 delete_files_by_ids 가 못 찾는다
 #   sync._clean_file_ids     점이 들어가 _FILE_ID_RE 에 걸려 버려진다
-# `.hwp`/`.hwpx` 는 raw/ 에, `.doc` 은 _ext_for_mime 이 normalized/ 에 만든다.
+# `.hwp`/`.hwpx` 는 hwp-original 버킷에, `.doc` 은 _ext_for_mime 이 source 버킷에 만든다.
 _FILE_SUFFIXES = (
     ".meta.md",
     ".markdown",

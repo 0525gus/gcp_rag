@@ -147,12 +147,12 @@ def _run_student_sync(monkeypatch, uris, audiences, settings=None):
 def test_only_student_docs_are_imported(monkeypatch) -> None:
     res = _run_student_sync(
         monkeypatch,
-        ["gs://n/normalized/studentAAAAAA.md", "gs://n/normalized/staffBBBBBBB.md"],
+        ["gs://n/studentAAAAAA.md", "gs://n/staffBBBBBBB.md"],
         {"studentAAAAAA": Audience.STUDENT, "staffBBBBBBB": Audience.STAFF},
     )
     imports = [c for c in _Rag.calls if c[0] == "import"]
     assert res["imported"] == 1
-    assert imports == [("import", "corpus/student", ["gs://n/normalized/studentAAAAAA.md"])]
+    assert imports == [("import", "corpus/student", ["gs://n/studentAAAAAA.md"])]
 
 
 def test_moved_out_doc_is_deleted_from_student_corpus(monkeypatch) -> None:
@@ -160,7 +160,7 @@ def test_moved_out_doc_is_deleted_from_student_corpus(monkeypatch) -> None:
     # 학생 코퍼스에서는 빠지고 import 는 일어나지 않아야 한다.
     _run_student_sync(
         monkeypatch,
-        ["gs://n/normalized/movedCCCCCCC.md"],
+        ["gs://n/movedCCCCCCC.md"],
         {"movedCCCCCCC": Audience.STAFF},
     )
     deletes = [c for c in _Rag.calls if c[0] == "delete"]
@@ -170,7 +170,7 @@ def test_moved_out_doc_is_deleted_from_student_corpus(monkeypatch) -> None:
 
 def test_unknown_doc_is_not_given_to_students(monkeypatch) -> None:
     # doc_state 에 없는 파일 — 소속을 모르면 학생에게 주지 않는다
-    res = _run_student_sync(monkeypatch, ["gs://n/normalized/ghostDDDDDDD.md"], {})
+    res = _run_student_sync(monkeypatch, ["gs://n/ghostDDDDDDD.md"], {})
     assert res["imported"] == 0
 
 
@@ -178,7 +178,7 @@ def test_sidecar_and_body_share_one_file_id(monkeypatch) -> None:
     # 파일 하나가 URI 2개(본문 + .meta.md)를 만든다. 둘 다 같은 소속이어야 한다.
     _run_student_sync(
         monkeypatch,
-        ["gs://n/normalized/pdfEEEEEEEEE.pdf", "gs://n/normalized/pdfEEEEEEEEE.meta.md"],
+        ["gs://n/pdfEEEEEEEEE.pdf", "gs://n/pdfEEEEEEEEE.meta.md"],
         {"pdfEEEEEEEEE": Audience.STUDENT},
     )
     imports = [c for c in _Rag.calls if c[0] == "import"]
@@ -190,7 +190,7 @@ def test_sidecar_and_body_share_one_file_id(monkeypatch) -> None:
 def test_disabled_split_touches_nothing(monkeypatch) -> None:
     res = _run_student_sync(
         monkeypatch,
-        ["gs://n/normalized/studentAAAAAA.md"],
+        ["gs://n/studentAAAAAA.md"],
         {"studentAAAAAA": Audience.STUDENT},
         settings=_settings(rag_corpus_name_student=""),
     )

@@ -212,7 +212,7 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
                     ) from exc
 
     content_hash = sha256_text(markdown)
-    md_uri = gcs.upload_normalized_md(markdown, req.file_id)
+    md_uri = gcs.upload_source_md(markdown, req.file_id)
 
     result = ParseResult(
         gcs_markdown_uri=md_uri,

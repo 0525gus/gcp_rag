@@ -97,21 +97,21 @@ class FakeGcs:
         # 파서가 써 둔 마크다운. sync 는 응답의 gcsMarkdownUri 를 다시 읽는다.
         self.objects: dict[str, bytes] = {}
 
-    def upload_raw(self, data: bytes, file_id: str, ext: str) -> str:
+    def upload_hwp_original(self, data: bytes, file_id: str, ext: str) -> str:
         self.raw.append(f"{file_id}{ext}")
-        return f"gs://rb/raw/{file_id}{ext}"
+        return f"gs://rb/{file_id}{ext}"
 
-    def upload_normalized_md(self, markdown: str, file_id: str) -> str:
+    def upload_source_md(self, markdown: str, file_id: str) -> str:
         self.md.append((file_id, markdown))
-        return f"gs://nb/normalized/{file_id}.md"
+        return f"gs://nb/{file_id}.md"
 
     def upload_bytes(self, data: bytes, bucket: str, blob_name: str, content_type=None) -> str:
         self.blobs.append(blob_name)
         return f"gs://{bucket}/{blob_name}"
 
-    def upload_path_sidecar_md(self, markdown: str, file_id: str) -> str:
+    def upload_source_sidecar_md(self, markdown: str, file_id: str) -> str:
         self.sidecars.append(file_id)
-        return f"gs://nb/normalized/{file_id}.meta.md"
+        return f"gs://nb/{file_id}.meta.md"
 
     def delete(self, uri: str) -> None:
         self.deleted.append(uri)
@@ -199,7 +199,7 @@ class ParserStub:
         for r in gate.reasons:
             self.warnings[r.split(":")[0]] += 1
 
-        md_uri = f"gs://nb/normalized/{file_id}.md"
+        md_uri = f"gs://nb/{file_id}.md"
         self.gcs.objects[md_uri] = markdown.encode("utf-8")
         return _Resp(
             {
@@ -240,8 +240,8 @@ def main() -> int:
 
     settings = Settings(
         gcp_project_id="p",
-        gcs_raw_bucket="rb",
-        gcs_normalized_bucket="nb",
+        gcs_hwp_original_bucket="rb",
+        gcs_source_bucket="nb",
         rag_corpus_name="projects/p/locations/asia-northeast3/ragCorpora/c",
         max_gcs_bytes=max_gcs_bytes,
         qg_density_threshold=0.0005,

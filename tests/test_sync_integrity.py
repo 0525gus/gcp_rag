@@ -17,9 +17,9 @@ class _Settings:
     student_folder_id_list: list[str] = []
     audience_split_enabled = False
     rag_corpus_name_student = ""
-    raw_upload_concurrency = 1
+    ingest_concurrency = 1
     gcp_project_id = "project"
-    gcs_normalized_bucket = "normalized"
+    gcs_source_bucket = "src-bkt"
     rag_chunk_size = 1024
     rag_chunk_overlap = 256
 
@@ -79,7 +79,7 @@ def _wire_backfill(monkeypatch: pytest.MonkeyPatch) -> _BackfillStore:
         "_ingest_with",
         lambda body, **_clients: {
             "status": "GCS_READY",
-            "gcsUris": [f"gs://normalized/{body.file_id}.txt"],
+            "gcsUris": [f"gs://{body.file_id}.txt"],
         },
     )
     return store
@@ -443,8 +443,8 @@ def test_reindex_failure_is_counted_for_threshold_and_final_flush(
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s: object())
     monkeypatch.setattr(
         sync_main,
-        "_normalized_uris_for_file",
-        lambda _settings, file_id, _c=None: [f"gs://normalized/{file_id}.txt"],
+        "_source_uris_for_file",
+        lambda _settings, file_id, _c=None: [f"gs://{file_id}.txt"],
     )
 
     result = sync_main._reindex_pending_sync(
@@ -474,14 +474,14 @@ def test_reindex_no_uri_is_not_reported_ok(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s: object())
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s: object())
-    monkeypatch.setattr(sync_main, "_normalized_uris_for_file", lambda *_args: [])
+    monkeypatch.setattr(sync_main, "_source_uris_for_file", lambda *_args: [])
 
     result = sync_main._reindex_pending_sync(sync_main.ReindexPendingBody(limit=1))
 
     assert result["totals"]["skippedNoUri"] == 1
     assert result["totals"]["failed"] == 1
     assert result["ok"] is False
-    assert store.enqueued == [("f1", "reindex_no_normalized_uri")]
+    assert store.enqueued == [("f1", "reindex_no_source_uri")]
 
 
 def test_reindex_replays_original_office_uri_with_sidecar(
@@ -490,9 +490,9 @@ def test_reindex_replays_original_office_uri_with_sidecar(
     from google.cloud import storage
 
     blobs = [
-        SimpleNamespace(name="normalized/f1.xlsx"),
-        SimpleNamespace(name="normalized/f1.meta.md"),
-        SimpleNamespace(name="normalized/f10.xlsx"),
+        SimpleNamespace(name="f1.xlsx"),
+        SimpleNamespace(name="f1.meta.md"),
+        SimpleNamespace(name="f10.xlsx"),
     ]
 
     class FakeClient:
@@ -504,9 +504,9 @@ def test_reindex_replays_original_office_uri_with_sidecar(
 
     monkeypatch.setattr(storage, "Client", lambda **_kwargs: FakeClient())
 
-    assert sync_main._normalized_uris_for_file(_Settings(), "f1") == [
-        "gs://normalized/normalized/f1.xlsx",
-        "gs://normalized/normalized/f1.meta.md",
+    assert sync_main._source_uris_for_file(_Settings(), "f1") == [
+        "gs://src-bkt/f1.xlsx",
+        "gs://src-bkt/f1.meta.md",
     ]
 
 

@@ -21,8 +21,8 @@ from shared.models import DocState, DocStatus
 # 아래 검색 테스트가 그 모듈을 들여오므로 수집 시점에 필수 환경을 세워 둔다.
 for _key, _val in (
     ("GCP_PROJECT_ID", "test-project"),
-    ("GCS_RAW_BUCKET", "raw"),
-    ("GCS_NORMALIZED_BUCKET", "norm"),
+    ("GCS_HWP_ORIGINAL_BUCKET", "raw"),
+    ("GCS_SOURCE_BUCKET", "norm"),
     ("RAG_CORPUS_NAME", "projects/p/locations/l/ragCorpora/c"),
 ):
     os.environ.setdefault(_key, _val)
@@ -36,9 +36,9 @@ class _Settings:
     audience_split_enabled = False
     rag_corpus_name_student = ""
     max_gcs_bytes = 50 * MB
-    gcs_normalized_bucket = "norm"
-    gcs_raw_bucket = "raw"
-    raw_upload_concurrency = 4
+    gcs_source_bucket = "norm"
+    gcs_hwp_original_bucket = "raw"
+    ingest_concurrency = 4
 
 
 # ------------------------------------------------------- 라우트별 RAG 상한
@@ -100,16 +100,16 @@ class _GateGcs:
     def __init__(self) -> None:
         self.uploaded: list[str] = []
 
-    def upload_normalized_md(self, _md: str, fid: str) -> str:
+    def upload_source_md(self, _md: str, fid: str) -> str:
         self.uploaded.append(f"{fid}.md")
-        return f"gs://norm/normalized/{fid}.md"
+        return f"gs://norm/{fid}.md"
 
     def upload_bytes(self, _d: bytes, _b: str, blob: str, **_k: Any) -> str:
         self.uploaded.append(blob)
         return f"gs://norm/{blob}"
 
-    def upload_path_sidecar_md(self, _md: str, fid: str) -> str:
-        return f"gs://norm/normalized/{fid}.meta.md"
+    def upload_source_sidecar_md(self, _md: str, fid: str) -> str:
+        return f"gs://norm/{fid}.meta.md"
 
 
 class _GateDrive:
@@ -230,14 +230,14 @@ def test_backfill_reuses_one_drive_client_per_worker(
         "_ingest_with",
         lambda body, **_c: {
             "status": "GCS_READY",
-            "gcsUris": [f"gs://norm/normalized/{body.file_id}.txt"],
+            "gcsUris": [f"gs://norm/{body.file_id}.txt"],
         },
     )
 
     sync_main.backfill_run(sync_main.BackfillRunBody(driveId="drive"))
 
     # 스냅샷용 1개 + 워커당 1개. 파일당 1개(24개)여서는 안 된다.
-    assert len(built) <= 1 + _Settings.raw_upload_concurrency
+    assert len(built) <= 1 + _Settings.ingest_concurrency
     assert len(built) < files
 
 
@@ -304,7 +304,7 @@ def test_backfill_scans_the_corpus_only_once(monkeypatch: pytest.MonkeyPatch) ->
         "_ingest_with",
         lambda body, **_c: {
             "status": "GCS_READY",
-            "gcsUris": [f"gs://norm/normalized/{body.file_id}.txt"],
+            "gcsUris": [f"gs://norm/{body.file_id}.txt"],
         },
     )
 

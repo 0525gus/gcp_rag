@@ -43,7 +43,7 @@
 | 색인 문서 | 1,211건 |
 | 색인 객체(URI) | 1,418건 |
 | 범위 외 제외 | 394건 |
-| 원본 저장 | raw 271MB / normalized 530MB |
+| 원본 저장 | hwp-original 271MB / source 530MB |
 
 ---
 
@@ -60,15 +60,15 @@ Google Drive
       ▼
  rag-sync ────── HWP/HWPX ──────▶ rag-parser
       │
-      ├─ GCS raw (1) / normalized (1)     키 = fileId, 경로에 소속 없음
-      ├─ Firestore DB doc-state
+      ├─ GCS hwp-original (1) / source (1)  키 = fileId, 경로에 소속 없음
+      ├─ Firestore DB rag-sync-state
       │     doc_state.audience = STUDENT | STAFF
       ▼
       ├─ RAG 교직원 코퍼스  ← 전량
       └─ RAG 학생 코퍼스    ← audience=STUDENT 만
             ▲                    ▲
             │                    │
-      rag-mcp (교직원)     rag-mcp-student
+ rag-mcp-cs-staff      rag-mcp-cs-student
             │                    │
          FactChat             FactChat
 ```
@@ -106,7 +106,7 @@ Google Drive
   - EMPTY_TEXT만 모드와 무관하게 422
 - rag-sync 서비스계정만 호출
 
-#### 다. rag-mcp / rag-mcp-student
+#### 다. rag-mcp-cs-staff / rag-mcp-cs-student
 
 - MCP 도구 `search`, `answer`
 - CPU 1 / MEM 1Gi / timeout 60s / concurrency 40
@@ -127,23 +127,24 @@ $env:MCP_AUDIENCE = "student"
 
 | 저장소 | 용도 |
 |---|---|
-| GCS `raw` | HWP/HWPX 원본. parser 전달·재파싱. 버킷 1개 |
-| GCS `normalized` | 변환 MD, 사이드카, PDF 등. RAG import 대상. 버킷 1개 |
-| Firestore DB `doc-state` | Native 모드. `(default)` Datastore는 사용 불가 |
-| 컬렉션 `doc_state` | 파일별 상태·경로·해시·`audience` |
+| GCS `hwp-original` (`GCS_HWP_ORIGINAL_BUCKET`) | HWP/HWPX **만** 들어간다. parser 전달·재파싱용. 파싱 성공 뒤에도 지우지 않는다(임시 저장소 아님). 버킷 1개. 객체 키 = `{fileId}{확장자}` |
+| GCS `source` (`GCS_SOURCE_BUCKET`) | RAG import 산출물 (MD, 사이드카, 통과 PDF 등). PDF·DOCX 등 HWP 외 포맷은 parser·hwp-original 을 안 거치고 여기로 직행. 버킷 1개. 객체 키 = `{fileId}{확장자}` |
+| Firestore DB `rag-sync-state` | Native 모드. `(default)` Datastore는 사용 불가. **사전 생성 필수** — 이름·타입·리전 변경 불가. 아래 컬렉션 5종을 담는 그릇 (컬렉션은 첫 쓰기 때 자동 생성) |
+| 컬렉션 `doc_state` (`DOC_STATE_COLLECTION`) | 파일별 상태·경로·해시·`audience`. |
 | 컬렉션 `doc_dlq` | 처리 실패 |
 | 컬렉션 `doc_split_queue` | 크기 초과 대기. 소비 코드 없음 |
 | 컬렉션 `sync_tokens` | Drive pageToken |
-| 컬렉션 `sync_jobs` | 장시간 작업 진행률 |
+| 컬렉션 `sync_jobs` (`SYNC_JOB_COLLECTION`) | 장시간 작업 진행률 |
 
 객체 키에 student/staff를 넣지 않음.
 
 ```
-raw/{fileId}{.hwp|.hwpx}
-normalized/{fileId}.md
-normalized/{fileId}.meta.md
-normalized/{fileId}{.pdf|…}
+gs://{hwp-original 버킷}/{fileId}{.hwp|.hwpx}
+gs://{source 버킷}/{fileId}.md
+gs://{source 버킷}/{fileId}.meta.md
+gs://{source 버킷}/{fileId}{.pdf|…}
 ```
+
 
 ---
 
@@ -335,7 +336,7 @@ normalized/{fileId}{.pdf|…}
 | 서비스 | 방식 |
 |---|---|
 | rag-mcp | 공개 URL + 교직원 키 |
-| rag-mcp-student | 공개 URL + 학생 키 (교직원과 다른 값) |
+| rag-mcp-cs-student | 공개 URL + 학생 키 (교직원과 다른 값) |
 | rag-sync | 프로젝트 IAM |
 | rag-parser | rag-sync SA |
 
@@ -369,7 +370,7 @@ DLQ 0 / 분할 대기 0 / 고아 객체 0
 | 시크릿 → Secret Manager | 뷰어에게 평문 노출 |
 | 알림·모니터링 | 스케줄러 3일 중단 사례 |
 | Firestore PITR·GCS 버전 | 오조작 복구 수단 없음 |
-| raw 버킷 IAM 분리 | 원본 공문 접근 범위 |
+| hwp-original 버킷 IAM 분리 | 원본 공문 접근 범위 |
 | min-instances=0 | 최초 질의 지연 |
 | 예산 알림 | 미설정 |
 

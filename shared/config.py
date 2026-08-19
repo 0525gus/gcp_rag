@@ -35,10 +35,11 @@ def _env_bool(key: str, default: bool = False) -> bool:
 class Settings:
     gcp_project_id: str
     gcp_region: str = "asia-northeast3"
-    gcs_raw_bucket: str = ""
-    gcs_normalized_bucket: str = ""
-    firestore_collection: str = "doc_state"
-    firestore_database: str = "doc-state"
+    gcs_hwp_original_bucket: str = ""
+    gcs_source_bucket: str = ""
+    firestore_database: str = "rag-sync-state"
+    # 컬렉션 5종은 {이름}_COLLECTION 한 축으로 읽는다.
+    doc_state_collection: str = "doc_state"
     sync_token_collection: str = "sync_tokens"
     rag_corpus_name: str = ""
 
@@ -143,9 +144,12 @@ class Settings:
     enable_docai_fallback: bool = False
     dlq_collection: str = "doc_dlq"
     split_queue_collection: str = "doc_split_queue"
+    # 장시간 작업 진행률.
+    sync_job_collection: str = "sync_jobs"
     
-    # Drive→GCS ingest 병렬 워커 (무료/소형 인스턴스 기준 8 권장)
-    raw_upload_concurrency: int = 8
+    # Drive→GCS ingest 병렬 워커 (무료/소형 인스턴스 기준 8 권장).
+    # HWP 뿐 아니라 FILE_COPY·GOOGLE_EXPORT 까지 전 라우트를 묶는다.
+    ingest_concurrency: int = 8
     # /sync/changes 가 한 번에 반환할 최대 변경 건수.
     # Cloud Workflows 는 실행당 변수 누적 512KB 가 상한인데, 변경 1건이 응답·복사본·
     # URI 까지 합쳐 워크플로우 변수를 ~900B 먹는다(≈586건에서 초과). 200건이면
@@ -181,10 +185,10 @@ class Settings:
         return cls(
             gcp_project_id=_env("GCP_PROJECT_ID"),
             gcp_region=os.environ.get("GCP_REGION", "asia-northeast3"),
-            gcs_raw_bucket=_env("GCS_RAW_BUCKET"),
-            gcs_normalized_bucket=_env("GCS_NORMALIZED_BUCKET"),
-            firestore_collection=os.environ.get("FIRESTORE_COLLECTION", "doc_state"),
-            firestore_database=os.environ.get("FIRESTORE_DATABASE", "doc-state"),
+            gcs_hwp_original_bucket=_env("GCS_HWP_ORIGINAL_BUCKET"),
+            gcs_source_bucket=_env("GCS_SOURCE_BUCKET"),
+            firestore_database=os.environ.get("FIRESTORE_DATABASE", "rag-sync-state"),
+            doc_state_collection=os.environ.get("DOC_STATE_COLLECTION", "doc_state"),
             sync_token_collection=os.environ.get(
                 "SYNC_TOKEN_COLLECTION", "sync_tokens"
             ),
@@ -223,8 +227,9 @@ class Settings:
             split_queue_collection=os.environ.get(
                 "SPLIT_QUEUE_COLLECTION", "doc_split_queue"
             ),
-            raw_upload_concurrency=max(
-                1, min(_env_int("RAW_UPLOAD_CONCURRENCY", 8), 32)
+            sync_job_collection=os.environ.get("SYNC_JOB_COLLECTION", "sync_jobs"),
+            ingest_concurrency=max(
+                1, min(_env_int("INGEST_CONCURRENCY", 8), 32)
             ),
             sync_max_changes=max(1, min(_env_int("SYNC_MAX_CHANGES", 200), 2000)),
         )

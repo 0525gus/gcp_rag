@@ -2,19 +2,19 @@
 
 배경 — 왜 이 스크립트가 필요한가
 
-`/sync/delete` 는 한동안 `normalized/` 만, 그것도 손으로 적은 확장자 목록으로
-지웠다. `raw/` 는 아예 손대지 않았다. 그래서 Drive 에서 지운 문서의 **원본이
+`/sync/delete` 는 한동안 source 버킷 만, 그것도 손으로 적은 확장자 목록으로
+지웠다. hwp-original 버킷 는 아예 손대지 않았다. 그래서 Drive 에서 지운 문서의 **원본이
 GCS 에 영구 잔존**했다(2026-07-30 실측: DELETED 100건 중 52건의 `.hwp` 원본).
-`raw/` 에는 명단·인사발령 같은 원문이 그대로 있어(docs/OPS_DEFERRED.md 6번)
+hwp-original 버킷 에는 명단·인사발령 같은 원문이 그대로 있어(docs/OPS_DEFERRED.md 6번)
 삭제가 이행되지 않는 것 자체가 문제다.
 
 삭제 경로는 prefix 훑기로 고쳤으므로 앞으로 새 잔존물은 생기지 않는다. 이
 스크립트는 (1) 고치기 전에 쌓인 것을 한 번 걷어내고, (2) 일시 오류로 삭제가
 반쯤 끝난 경우를 나중에 다시 훑기 위한 것이다.
 
-지우는 것이 안전한 이유: 두 버킷 모두 **파생물**이다. `raw/` 는 ingest 마다
-Drive 에서 다시 받아 올리고(`_ingest_hwp`: download_file → upload_raw), 그
-직후 파서가 한 번 읽는 것 외에는 아무도 읽지 않는다. `normalized/` 도 재색인
+지우는 것이 안전한 이유: 두 버킷 모두 **파생물**이다. hwp-original 버킷 는 ingest 마다
+Drive 에서 다시 받아 올리고(`_ingest_hwp`: download_file → upload_hwp_original), 그
+직후 파서가 한 번 읽는 것 외에는 아무도 읽지 않는다. source 버킷도 재색인
 경로가 다시 만든다. 원본은 Drive 다.
 
 사용:
@@ -115,15 +115,12 @@ def collect(
     settings: Settings, doc_status: dict[str, str], *, only_deleted: bool
 ) -> list[Candidate]:
     gcs = GcsClient(settings)
-    targets = [
-        (settings.gcs_raw_bucket, "raw"),
-        (settings.gcs_normalized_bucket, "normalized"),
-    ]
+    targets = [settings.gcs_hwp_original_bucket, settings.gcs_source_bucket]
     found: list[Candidate] = []
-    for bucket, prefix in targets:
+    for bucket in targets:
         if not bucket:
             continue
-        for name in gcs.list_blob_names(bucket, f"{prefix}/"):
+        for name in gcs.list_blob_names(bucket, ""):
             verdict = classify(name, doc_status, only_deleted=only_deleted)
             if verdict is None:
                 continue

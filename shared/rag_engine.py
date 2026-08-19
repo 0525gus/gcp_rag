@@ -321,7 +321,7 @@ class RagEngineClient:
                 continue
             display = getattr(f, "display_name", "") or ""
             source_uri = getattr(f, "source_uri", None)
-            # 정규화 산출물은 {fileId}{.partN}{확장자} 꼴이라 여기서 되돌린다.
+            # source 산출물은 {fileId}{.partN}{확장자} 꼴이라 여기서 되돌린다.
             # display_name 이 잘렸을 때를 대비해 source_uri 도 같이 넘긴다 —
             # 부분문자열 비교로 떨어지면 f1 을 지우며 f10 까지 지운다.
             index.setdefault(extract_file_id(display, source_uri), []).append(

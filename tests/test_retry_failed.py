@@ -84,7 +84,7 @@ def wire(monkeypatch):
 def test_recovered_file_is_indexed_and_dequeued(wire) -> None:
     store, indexed = wire(
         [_doc("f1")],
-        {"f1": {"status": "GCS_READY", "gcsUris": ["gs://b/normalized/f1.md"]}},
+        {"f1": {"status": "GCS_READY", "gcsUris": ["gs://b/f1.md"]}},
     )
     res = retry_failed(RetryFailedBody())
 
@@ -92,7 +92,7 @@ def test_recovered_file_is_indexed_and_dequeued(wire) -> None:
     assert res["totals"]["indexed"] == 1
     assert res["ok"] is True
     assert store.cleared == ["f1"]
-    assert indexed == [["gs://b/normalized/f1.md"]]
+    assert indexed == [["gs://b/f1.md"]]
 
 
 def test_attempt_is_recorded_before_ingest(wire) -> None:

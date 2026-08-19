@@ -22,7 +22,7 @@ class DocStateStore:
             project=self.settings.gcp_project_id,
             database=self.settings.firestore_database,
         )
-        self._col = self._db.collection(self.settings.firestore_collection)
+        self._col = self._db.collection(self.settings.doc_state_collection)
         self._tokens = self._db.collection(self.settings.sync_token_collection)
 
     def get(self, file_id: str) -> DocState | None:

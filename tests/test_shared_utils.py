@@ -22,9 +22,9 @@ from shared.search_postprocess import (
 
 # ---------------------------------------------------------------- gcs URI
 def test_parse_gs_uri_splits_bucket_and_blob() -> None:
-    assert parse_gs_uri("gs://my-bucket/normalized/f1.md") == (
+    assert parse_gs_uri("gs://my-bucket/f1.md") == (
         "my-bucket",
-        "normalized/f1.md",
+        "f1.md",
     )
 
 
@@ -188,17 +188,17 @@ def test_is_hwpx_distinguishes_from_hwp() -> None:
     [
         ("abc123.md", "abc123"),
         ("abc123.meta.md", "abc123"),
-        ("normalized/abc123.pdf", "abc123"),
-        ("gs://b/normalized/abc123.docx", "abc123"),
-        ("gs://b/normalized/abc123.doc", "abc123"),
+        ("abc123.pdf", "abc123"),
+        ("gs://b/abc123.docx", "abc123"),
+        ("gs://b/abc123.doc", "abc123"),
         ("noext", "noext"),
         # 파이프라인이 실제로 만드는 확장자인데 목록에 빠져 있었다.
         # 빠지면 fileId 로 안 접혀 코퍼스 삭제가 대상을 못 찾고,
         # _clean_file_ids 는 점 때문에 malformed 로 버린다.
-        ("raw/abc123.hwp", "abc123"),
-        ("raw/abc123.hwpx", "abc123"),
-        ("normalized/abc123.doc", "abc123"),
-        ("normalized/abc123.part12.pdf", "abc123"),
+        ("abc123.hwp", "abc123"),
+        ("abc123.hwpx", "abc123"),
+        ("abc123.doc", "abc123"),
+        ("abc123.part12.pdf", "abc123"),
     ],
 )
 def test_extract_file_id(display: str, expected: str) -> None:
@@ -206,7 +206,7 @@ def test_extract_file_id(display: str, expected: str) -> None:
 
 
 def test_extract_file_id_falls_back_to_source_uri() -> None:
-    assert extract_file_id("", "gs://b/normalized/xyz.md") == "xyz"
+    assert extract_file_id("", "gs://b/xyz.md") == "xyz"
 
 
 def test_unescape_chunk_text_normalizes_entities_and_newlines() -> None:

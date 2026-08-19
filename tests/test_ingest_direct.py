@@ -62,17 +62,17 @@ class _Gcs:
         self.sidecars: list[str] = []
         self.deleted: list[str] = []
 
-    def upload_normalized_md(self, markdown: str, file_id: str) -> str:
+    def upload_source_md(self, markdown: str, file_id: str) -> str:
         self.md.append((file_id, markdown))
-        return f"gs://nb/normalized/{file_id}.md"
+        return f"gs://nb/{file_id}.md"
 
     def upload_bytes(self, data, bucket, blob_name, content_type=None) -> str:  # noqa: ANN001
         self.blobs.append(blob_name)
         return f"gs://{bucket}/{blob_name}"
 
-    def upload_path_sidecar_md(self, markdown: str, file_id: str) -> str:
+    def upload_source_sidecar_md(self, markdown: str, file_id: str) -> str:
         self.sidecars.append(file_id)
-        return f"gs://nb/normalized/{file_id}.meta.md"
+        return f"gs://nb/{file_id}.meta.md"
 
     def delete(self, uri: str) -> None:
         self.deleted.append(uri)
@@ -100,7 +100,7 @@ class _Store:
 def _settings(**over: Any) -> Settings:
     base = {
         "gcp_project_id": "p",
-        "gcs_normalized_bucket": "nb",
+        "gcs_source_bucket": "nb",
         "max_gcs_bytes": 50 * 1024 * 1024,
     }
     base.update(over)
@@ -124,7 +124,7 @@ def test_xlsx_is_converted_to_markdown_body() -> None:
     res, gcs, _ = _run(_xlsx([["부서", "담당자"], ["교무처", "홍길동"]]))
 
     assert res["status"] == "GCS_READY"
-    assert res["gcsUris"] == ["gs://nb/normalized/f1.md"]
+    assert res["gcsUris"] == ["gs://nb/f1.md"]
     assert len(gcs.md) == 1
     assert "| 교무처 | 홍길동 |" in gcs.md[0][1]
     # 본문이 생겼으니 사이드카는 만들지 않는다
@@ -134,7 +134,7 @@ def test_xlsx_is_converted_to_markdown_body() -> None:
 def test_xlsx_body_drops_stale_sidecar() -> None:
     # 예전에 사이드카만 올려둔 문서가 있다. 남기면 청크가 두 벌 잡힌다
     _, gcs, _ = _run(_xlsx([["a"], ["b"]]))
-    assert gcs.deleted == ["gs://nb/normalized/f1.meta.md"]
+    assert gcs.deleted == ["gs://nb/f1.meta.md"]
 
 
 def test_unreadable_xlsx_falls_back_to_sidecar() -> None:
@@ -203,7 +203,7 @@ def test_text_file_keeps_breadcrumb_body_path() -> None:
         "본문 내용".encode(),
         body=_body(name="메모.txt", mime="text/plain"),
     )
-    assert res["gcsUris"] == ["gs://nb/normalized/f1.md"]
+    assert res["gcsUris"] == ["gs://nb/f1.md"]
     assert "본문 내용" in gcs.md[0][1]
 
 
@@ -212,7 +212,7 @@ def test_binary_file_keeps_copy_plus_sidecar() -> None:
         b"%PDF-1.4 fake",
         body=_body(name="문서.pdf", mime="application/pdf"),
     )
-    assert gcs.blobs == ["normalized/f1.pdf"]
+    assert gcs.blobs == ["f1.pdf"]
     assert gcs.sidecars == ["f1"]
     assert gcs.md == []
 

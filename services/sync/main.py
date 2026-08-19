@@ -342,7 +342,7 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     # Firestore/Storage 클라이언트는 스레드 안전하므로 워커들이 공유한다.
     gcs = GcsClient(settings)
     parser_url = body.parser_url or os.environ.get("PARSER_URL", "")
-    workers = settings.raw_upload_concurrency
+    workers = settings.ingest_concurrency
 
     snapshot = _build_backfill_changes(
         body.drive_id, store=store, drive=drive, settings=settings
@@ -641,20 +641,20 @@ def _already_evicted(existing: DocState | None) -> bool:
     )
 
 
-def _delete_gcs_prefix_for_file(gcs: GcsClient, bucket: str, prefix: str) -> int:
-    """Delete one file's objects below a prefix without matching longer file ids."""
+def _delete_gcs_objects_for_file(gcs: GcsClient, bucket: str, file_id: str) -> int:
+    """Delete one file's objects without matching longer file ids."""
     if not bucket:
         return 0
     blobs = list(
         gcs._client.list_blobs(
             bucket,
-            prefix=prefix,
+            prefix=file_id,
         )
     )
     deleted = 0
     failures: list[Exception] = []
     for blob in blobs:
-        rest = blob.name[len(prefix) :]
+        rest = blob.name[len(file_id) :]
         # A Drive id can be a prefix of another id. Only delete this id's
         # ``{file_id}.ext`` objects (including ``.meta.md``).
         if rest and not rest.startswith("."):
@@ -667,7 +667,7 @@ def _delete_gcs_prefix_for_file(gcs: GcsClient, bucket: str, prefix: str) -> int
             logger.exception("GCS cleanup failed: %s", blob.name)
     if failures:
         raise RuntimeError(
-            f"failed to delete {len(failures)} GCS object(s) under {prefix}"
+            f"failed to delete {len(failures)} GCS object(s) for {file_id}"
         ) from failures[0]
     return deleted
 
@@ -678,8 +678,8 @@ def _cleanup_out_of_scope_file(
     """Best-effort both cleanup targets, then fail if either target errored."""
     failures: list[Exception] = []
     rag_deleted = False
-    normalized_deleted = 0
-    raw_deleted = 0
+    source_deleted = 0
+    hwp_original_deleted = 0
     try:
         # False means no matching RAG file remained, which is an idempotent success.
         rag_deleted = RagEngineClient().delete_by_file_id(file_id)
@@ -699,20 +699,16 @@ def _cleanup_out_of_scope_file(
         except Exception as exc:
             failures.append(exc)
             logger.exception("out-of-scope 학생 코퍼스 cleanup failed: %s", file_id)
-    for bucket, prefix, kind in (
-        (
-            settings.gcs_normalized_bucket,
-            f"normalized/{file_id}",
-            "normalized",
-        ),
-        (settings.gcs_raw_bucket, f"raw/{file_id}", "raw"),
+    for bucket, kind in (
+        (settings.gcs_source_bucket, "source"),
+        (settings.gcs_hwp_original_bucket, "hwpOriginal"),
     ):
         try:
-            count = _delete_gcs_prefix_for_file(gcs, bucket, prefix)
-            if kind == "normalized":
-                normalized_deleted = count
+            count = _delete_gcs_objects_for_file(gcs, bucket, file_id)
+            if kind == "source":
+                source_deleted = count
             else:
-                raw_deleted = count
+                hwp_original_deleted = count
         except Exception as exc:
             failures.append(exc)
             logger.exception("out-of-scope %s GCS cleanup failed: %s", kind, file_id)
@@ -720,7 +716,7 @@ def _cleanup_out_of_scope_file(
         raise RuntimeError(
             f"out-of-scope cleanup failed for {file_id} ({len(failures)} target(s))"
         ) from failures[0]
-    return rag_deleted, normalized_deleted, raw_deleted
+    return rag_deleted, source_deleted, hwp_original_deleted
 
 
 @app.post("/sync/ingest")
@@ -764,8 +760,8 @@ def _ingest_with(
         or (folder_ids and not drive.is_in_sync_scope(body.file_id, folder_ids))
     ):
         rag_deleted = False
-        normalized_deleted = 0
-        raw_deleted = 0
+        source_deleted = 0
+        hwp_original_deleted = 0
         if _already_evicted(store.get(body.file_id)):
             # 이미 이 사유로 정리를 마친 파일이다. 다시 부르면 코퍼스를 파일마다
             # 전수 순회하는데(정리할 것도 없이), 범위 밖 파일은 바뀔 때마다 델타에
@@ -775,12 +771,12 @@ def _ingest_with(
                 "status": DocStatus.EXCLUDED.value,
                 "reason": _OUT_OF_SCOPE_REASON,
                 "ragDeleted": False,
-                "normalizedDeleted": 0,
-                "rawDeleted": 0,
+                "sourceDeleted": 0,
+                "hwpOriginalDeleted": 0,
                 "cleanupSkipped": True,
             }
         try:
-            rag_deleted, normalized_deleted, raw_deleted = (
+            rag_deleted, source_deleted, hwp_original_deleted = (
                 _cleanup_out_of_scope_file(gcs, settings, body.file_id)
             )
         except Exception as exc:
@@ -827,8 +823,8 @@ def _ingest_with(
             "status": DocStatus.EXCLUDED.value,
             "reason": _OUT_OF_SCOPE_REASON,
             "ragDeleted": rag_deleted,
-            "normalizedDeleted": normalized_deleted,
-            "rawDeleted": raw_deleted,
+            "sourceDeleted": source_deleted,
+            "hwpOriginalDeleted": hwp_original_deleted,
         }
 
     route = RouteKind(body.route) if body.route else classify_route(
@@ -1103,7 +1099,7 @@ def _ingest_hwp(
     audience = _resolve_audience(drive, settings, body)
     raw = drive.download_file(body.file_id)
     ext = src_ext
-    raw_uri = gcs.upload_raw(raw, body.file_id, ext)
+    raw_uri = gcs.upload_hwp_original(raw, body.file_id, ext)
 
     headers = _cloud_run_auth_headers(body.parser_url)
     with httpx.Client(timeout=600.0) as client:
@@ -1149,7 +1145,7 @@ def _ingest_hwp(
                 bundle=path_ctx.bundle,
             )
             # 거부된 원본은 아무도 다시 읽지 않는다 — 재시도도 Drive 에서 새로
-            # 내려받아 같은 경로를 덮어쓴다. 안 지우면 영구 실패 문서만큼 raw/ 가
+            # 내려받아 같은 경로를 덮어쓴다. 안 지우면 영구 실패 문서만큼 hwp-original 버킷이
             # 단조 증가한다. 실패해도 DLQ 결과를 뒤집지는 않는다.
             try:
                 gcs.delete(raw_uri)
@@ -1185,7 +1181,7 @@ def _ingest_hwp(
         return gated
 
     content_hash = sha256_text(md_text)
-    md_uri = gcs.upload_normalized_md(md_text, body.file_id)
+    md_uri = gcs.upload_source_md(md_text, body.file_id)
 
     if store.should_skip_reindex(body.file_id, content_hash):
         # 이미 INDEXED 이고 내용도 그대로다 — modifiedTime 만 전진시킨다.
@@ -1260,11 +1256,11 @@ def _ingest_google_export(
             "bundle": path_ctx.bundle,
         }
 
-    blob = f"normalized/{body.file_id}{ext}"
+    blob = f"{body.file_id}{ext}"
     gcs_uri = gcs.upload_bytes(
-        data, settings.gcs_normalized_bucket, blob, content_type=export_mime
+        data, settings.gcs_source_bucket, blob, content_type=export_mime
     )
-    meta_uri = gcs.upload_path_sidecar_md(sidecar, body.file_id)
+    meta_uri = gcs.upload_source_sidecar_md(sidecar, body.file_id)
     store.upsert(
         _state_fields(
             body,
@@ -1328,7 +1324,7 @@ def _ingest_sidecar_only(
             "bundle": path_ctx.bundle,
         }
 
-    uris = [gcs.upload_path_sidecar_md(sidecar, body.file_id)]
+    uris = [gcs.upload_source_sidecar_md(sidecar, body.file_id)]
     store.upsert(
         _state_fields(
             body,
@@ -1477,7 +1473,7 @@ def _ingest_direct(
             # 원본 xlsx 를 색인 목록에 넣으면 안 된다. RAG Engine 기본 파서는
             # xlsx 를 못 읽어 **매번 import 에서 거부**되는데, 지금까지는 그
             # 실패가 성공으로 집계돼 보이지 않았다(실측 27건이 상시 실패 중).
-            # 재색인 경로(_normalized_uris_for_file)는 이미 .xlsx 를 빼고
+            # 재색인 경로(_source_uris_for_file)는 이미 .xlsx 를 빼고
             # 있었다 — ingest 경로만 빠져 있었던 것이다.
             index_original = False
             skip_reason = f"XLSX_UNREADABLE:{exc}"
@@ -1519,7 +1515,7 @@ def _ingest_direct(
                 "path": path_ctx.path,
                 "bundle": path_ctx.bundle,
             }
-        gcs_uri = gcs.upload_normalized_md(md_text, body.file_id)
+        gcs_uri = gcs.upload_source_md(md_text, body.file_id)
         uris = [gcs_uri]
         _drop_stale_sidecar(gcs, settings, body.file_id)
     else:
@@ -1563,8 +1559,8 @@ def _ingest_direct(
                 uris.append(
                     gcs.upload_bytes(
                         part,
-                        settings.gcs_normalized_bucket,
-                        f"normalized/{body.file_id}.part{i}{ext}",
+                        settings.gcs_source_bucket,
+                        f"{body.file_id}.part{i}{ext}",
                         content_type=ctype,
                     )
                 )
@@ -1572,12 +1568,12 @@ def _ingest_direct(
             uris = [
                 gcs.upload_bytes(
                     data,
-                    settings.gcs_normalized_bucket,
-                    f"normalized/{body.file_id}{ext}",
+                    settings.gcs_source_bucket,
+                    f"{body.file_id}{ext}",
                     content_type=ctype,
                 )
             ]
-        uris.append(gcs.upload_path_sidecar_md(sidecar, body.file_id))
+        uris.append(gcs.upload_source_sidecar_md(sidecar, body.file_id))
 
     store.upsert(
         _state_fields(
@@ -1609,7 +1605,7 @@ def _drop_stale_sidecar(gcs: GcsClient, settings: Settings, file_id: str) -> Non
     xlsx 는 예전에 `.meta.md` 한 줄만 색인했다. 본문이 생긴 뒤에도 남겨두면
     같은 fileId 로 청크가 두 벌 잡혀, 문서당 청크 상한을 사이드카가 잡아먹는다.
     """
-    uri = gs_uri(settings.gcs_normalized_bucket, f"normalized/{file_id}.meta.md")
+    uri = gs_uri(settings.gcs_source_bucket, f"{file_id}.meta.md")
     try:
         gcs.delete(uri)
     except Exception as exc:  # noqa: BLE001
@@ -1829,14 +1825,11 @@ class ReindexPendingBody(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-_JOB_COLLECTION = "sync_jobs"
-
-
 def _job_set(job_id: str, **fields: Any) -> None:
     from google.cloud import firestore
 
     store = DocStateStore()
-    store._db.collection(_JOB_COLLECTION).document(job_id).set(  # noqa: SLF001
+    store._db.collection(get_settings().sync_job_collection).document(job_id).set(  # noqa: SLF001
         {"jobId": job_id, "updatedAt": firestore.SERVER_TIMESTAMP, **fields},
         merge=True,
     )
@@ -1845,7 +1838,8 @@ def _job_set(job_id: str, **fields: Any) -> None:
 @app.get("/sync/jobs/{job_id}")
 def job_status(job_id: str) -> dict[str, Any]:
     store = DocStateStore()
-    snap = store._db.collection(_JOB_COLLECTION).document(job_id).get()  # noqa: SLF001
+    jobs = store._db.collection(get_settings().sync_job_collection)  # noqa: SLF001
+    snap = jobs.document(job_id).get()
     if not snap.exists:
         raise HTTPException(status_code=404, detail=f"unknown job: {job_id}")
     return snap.to_dict() or {}
@@ -1856,7 +1850,7 @@ def job_status(job_id: str) -> dict[str, Any]:
 # meta.md 만 색인하고 문서 전체를 INDEXED 로 오인하므로 fail closed 한다.
 #
 # 스프레드시트 원본(.xlsx)을 빼고 싶어지지만 빼면 안 된다. 지금 ingest 는 xlsx 를
-# 변환한 .md 만 올리므로 normalized/ 에 남은 .xlsx 는 전부 그 변경 이전의 잔재고,
+# 변환한 .md 만 올리므로 source 버킷에 남은 .xlsx 는 전부 그 변경 이전의 잔재고,
 # 그런 문서는 재색인이 아니라 **재ingest** 가 필요하다. 여기서 빼면 import 는
 # 통과하지만 본문 없는 INDEXED 가 조용히 확정된다 — 매일 실패하는 편이 낫다.
 _INDEXABLE_SUFFIXES = (
@@ -1875,10 +1869,10 @@ _INDEXABLE_SUFFIXES = (
 )
 
 
-def _normalized_uris_for_file(
+def _source_uris_for_file(
     settings: Settings, file_id: str, gcs: GcsClient | None = None
 ) -> list[str]:
-    """존재하는 정규화 객체 중 인덱싱 가능 URI만 반환. 스프레드시트 원본은 제외.
+    """존재하는 source 객체 중 인덱싱 가능 URI만 반환. 스프레드시트 원본은 제외.
 
     fileId 경계 검사는 GcsClient 쪽에 모아 두었다 — 삭제 경로와 같은 규칙을
     써야 '색인은 됐는데 삭제는 안 되는' 확장자가 생기지 않는다.
@@ -1888,12 +1882,10 @@ def _normalized_uris_for_file(
     """
     client = gcs or GcsClient(settings)
     uris: list[str] = []
-    for name in client.list_blob_names_for_file(
-        settings.gcs_normalized_bucket, "normalized", file_id
-    ):
+    for name in client.list_blob_names_for_file(settings.gcs_source_bucket, file_id):
         lower = name.lower()
         if any(lower.endswith(suf) for suf in _INDEXABLE_SUFFIXES):
-            uris.append(gs_uri(settings.gcs_normalized_bucket, name))
+            uris.append(gs_uri(settings.gcs_source_bucket, name))
     return uris
 
 
@@ -2001,14 +1993,14 @@ def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
     resolved: list[tuple[str, list[str]]] = []
     for doc in targets:
         # gcs 는 run 당 하나다 — 문서마다 만들면 limit 200 에 클라이언트 200개다.
-        uris = _normalized_uris_for_file(settings, doc.file_id, gcs)
+        uris = _source_uris_for_file(settings, doc.file_id, gcs)
         if not uris:
             totals["skippedNoUri"] += 1
             totals["failed"] += 1
             try:
                 store.enqueue_dlq(
                     doc.file_id,
-                    "reindex_no_normalized_uri",
+                    "reindex_no_source_uri",
                     driveId=doc.drive_id,
                     name=doc.name,
                     mimeType=doc.mime_type,
@@ -2234,7 +2226,7 @@ def delete_file(body: DeleteBody) -> dict[str, Any]:
             logger.exception("학생 코퍼스 삭제 실패 fileId=%s", body.file_id)
             raise
 
-    # 정규화 산출물 + raw 원본을 prefix 로 훑어 지운다.
+    # RAG import 산출물 + raw 원본을 prefix 로 훑어 지운다.
     #
     # 예전에는 확장자 목록을 손으로 적었는데, 목록에 없는 것을 조용히 놓쳤다:
     #   .partN.pdf  분할 PDF 조각이 전량 남는다(실측 6건 존재)
@@ -2245,15 +2237,15 @@ def delete_file(body: DeleteBody) -> dict[str, Any]:
     # raw 에는 명단·인사발령 같은 원문이 그대로 있어(docs/OPS_DEFERRED.md 6번)
     # 삭제가 이행되지 않는 것 자체가 문제다.
     failures: list[Exception] = []
-    counts = {"normalized": 0, "raw": 0}
-    for bucket, prefix, kind in (
-        (settings.gcs_normalized_bucket, "normalized", "normalized"),
-        (settings.gcs_raw_bucket, "raw", "raw"),
+    counts = {"source": 0, "hwpOriginal": 0}
+    for bucket, kind in (
+        (settings.gcs_source_bucket, "source"),
+        (settings.gcs_hwp_original_bucket, "hwpOriginal"),
     ):
         if not bucket:
             continue
         try:
-            counts[kind] = len(gcs.delete_for_file(bucket, prefix, body.file_id))
+            counts[kind] = len(gcs.delete_for_file(bucket, body.file_id))
         except Exception as exc:
             failures.append(exc)
             logger.exception("delete %s GCS cleanup failed: %s", kind, body.file_id)
@@ -2262,8 +2254,8 @@ def delete_file(body: DeleteBody) -> dict[str, Any]:
     # 성공으로 위장하지 않고 올려 보내 재시도(=삭제 change 재생)되게 한다.
     store.mark_deleted(body.file_id)
     logger.info(
-        "deleted fileId=%s corpus=%s normalized=%s raw=%s",
-        body.file_id, ok, counts["normalized"], counts["raw"],
+        "deleted fileId=%s corpus=%s source=%s hwpOriginal=%s",
+        body.file_id, ok, counts["source"], counts["hwpOriginal"],
     )
     if failures:
         raise HTTPException(
@@ -2274,10 +2266,10 @@ def delete_file(body: DeleteBody) -> dict[str, Any]:
     return {
         "fileId": body.file_id,
         "deleted": ok,
-        "gcsDeleted": counts["normalized"] + counts["raw"],
+        "gcsDeleted": counts["source"] + counts["hwpOriginal"],
         "status": DocStatus.DELETED.value,
-        "normalizedDeleted": counts["normalized"],
-        "rawDeleted": counts["raw"],
+        "sourceDeleted": counts["source"],
+        "hwpOriginalDeleted": counts["hwpOriginal"],
     }
 
 

@@ -75,8 +75,8 @@ def test_sidecar_only_mimes_are_a_subset_of_file_copy():
 def test_quality_gate_density():
     settings = Settings(
         gcp_project_id="p",
-        gcs_raw_bucket="r",
-        gcs_normalized_bucket="n",
+        gcs_hwp_original_bucket="r",
+        gcs_source_bucket="n",
         rag_corpus_name="c",
         qg_density_threshold=0.01,
     )
@@ -88,8 +88,8 @@ def test_quality_gate_density():
 def test_quality_gate_relaxed_covers_corpus_fails():
     settings = Settings(
         gcp_project_id="p",
-        gcs_raw_bucket="r",
-        gcs_normalized_bucket="n",
+        gcs_hwp_original_bucket="r",
+        gcs_source_bucket="n",
         rag_corpus_name="c",
         qg_density_threshold=0.0005,
     )
@@ -180,7 +180,7 @@ def test_search_postprocess():
 
     assert extract_file_id("1abc.pdf") == "1abc"
     assert extract_file_id("1abc.meta.md") == "1abc"
-    assert extract_file_id("gs://b/normalized/1abc.md") == "1abc"
+    assert extract_file_id("gs://b/1abc.md") == "1abc"
     assert extract_file_id("1abc.txt") == "1abc"
     assert "&lt;표1&gt;" not in unescape_chunk_text("아래 &lt;표1&gt; 참고")
     assert "표1" in unescape_chunk_text("아래 &lt;표1&gt; 참고")
@@ -269,6 +269,16 @@ def test_rhwp_parser_mocked(monkeypatch):
     result = parse_hwp_bytes(b"fake-bytes", filename="a.hwp")
     assert "본문입니다" in result.markdown
     assert result.engine == "rhwp"
+
+
+def test_missing_bucket_env_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """버킷 env 가 비면 기동 시점에 죽는다 — 빈 버킷명으로 조용히 도는 것보다 낫다."""
+    monkeypatch.setenv("GCP_PROJECT_ID", "p")
+    monkeypatch.setenv("GCS_HWP_ORIGINAL_BUCKET", "hwp")
+    monkeypatch.delenv("GCS_SOURCE_BUCKET", raising=False)
+    monkeypatch.setenv("RAG_CORPUS_NAME", "c")
+    with pytest.raises(ValueError, match="GCS_SOURCE_BUCKET"):
+        Settings.from_env()
 
 
 if __name__ == "__main__":

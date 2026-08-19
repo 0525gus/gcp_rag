@@ -111,19 +111,19 @@ def test_excluded_is_not_a_live_status() -> None:
 
 def test_cleanup_targets_excluded_objects() -> None:
     statuses = {"abc123def456": DocStatus.EXCLUDED.value}
-    verdict = classify("normalized/abc123def456.md", statuses)
+    verdict = classify("abc123def456.md", statuses)
     assert verdict is not None
     assert verdict[0] == "abc123def456"
 
 
 def test_only_deleted_flag_leaves_excluded_alone() -> None:
     statuses = {"abc123def456": DocStatus.EXCLUDED.value}
-    assert classify("normalized/abc123def456.md", statuses, only_deleted=True) is None
+    assert classify("abc123def456.md", statuses, only_deleted=True) is None
 
 
 def test_cleanup_leaves_skipped_objects() -> None:
     statuses = {"abc123def456": DocStatus.SKIPPED.value}
-    assert classify("normalized/abc123def456.md", statuses) is None
+    assert classify("abc123def456.md", statuses) is None
 
 
 # ------------------------------------------------------------------ 상태 호환
@@ -153,8 +153,8 @@ def test_exclude_route_evicts_without_asking_drive_again(monkeypatch) -> None:
         student_folder_id_list: list[str] = []
         audience_split_enabled = False
         rag_corpus_name_student = ""
-        gcs_normalized_bucket = "nb"
-        gcs_raw_bucket = "rb"
+        gcs_source_bucket = "nb"
+        gcs_hwp_original_bucket = "rb"
 
     class _Store:
         def __init__(self) -> None:
@@ -193,7 +193,7 @@ def test_exclude_route_evicts_without_asking_drive_again(monkeypatch) -> None:
 
     assert result["status"] == DocStatus.EXCLUDED.value
     assert result["reason"] == "out_of_folder_scope"
-    assert (result["ragDeleted"], result["normalizedDeleted"], result["rawDeleted"]) == (
+    assert (result["ragDeleted"], result["sourceDeleted"], result["hwpOriginalDeleted"]) == (
         True,
         2,
         1,

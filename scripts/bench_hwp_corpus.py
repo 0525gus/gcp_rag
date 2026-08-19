@@ -49,8 +49,8 @@ class Row:
 def _settings() -> Settings:
     return Settings(
         gcp_project_id="bench",
-        gcs_raw_bucket="b",
-        gcs_normalized_bucket="b",
+        gcs_hwp_original_bucket="b",
+        gcs_source_bucket="b",
         rag_corpus_name="projects/b/locations/asia-northeast3/ragCorpora/c",
         qg_density_threshold=0.0005,
         qg_mode="log",

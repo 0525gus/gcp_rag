@@ -250,27 +250,44 @@ class _FakeBlob:
 
 
 class _FakeGcsBackend:
-    """list_blobs / bucket().blob() 만 흉내내는 최소 스텁."""
+    """list_blobs / bucket().blob() 만 흉내내는 최소 스텁.
 
-    def __init__(self, names: list[str]) -> None:
+    객체 키에서 prefix 를 없앤 뒤로는 **버킷을 구분해야** 한다 — 예전에는
+    `source/` 와 `hwp-original/` 이 달라서 버킷을 무시해도 결과가 갈렸다.
+    """
+
+    def __init__(self, names: list[str] | dict[str, list[str]]) -> None:
+        # 리스트면 어느 버킷이든 같은 목록 (단일 버킷 테스트용)
         self.names = names
         self.deleted: list[str] = []
 
-    def bucket(self, _name: str) -> object:
+    def _names_for(self, bucket) -> list[str]:
+        if isinstance(self.names, dict):
+            return self.names.get(getattr(bucket, "name", bucket), [])
+        return self.names
+
+    def bucket(self, name: str) -> object:
         backend = self
 
         class _B:
+            def __init__(self) -> None:
+                self.name = name
+
             @staticmethod
             def blob(n: str) -> _FakeBlob:
                 return _FakeBlob(n, backend.deleted)
 
         return _B()
 
-    def list_blobs(self, _bucket, prefix: str = "") -> list[_FakeBlob]:
-        return [_FakeBlob(n, self.deleted) for n in self.names if n.startswith(prefix)]
+    def list_blobs(self, bucket, prefix: str = "") -> list[_FakeBlob]:
+        return [
+            _FakeBlob(n, self.deleted)
+            for n in self._names_for(bucket)
+            if n.startswith(prefix)
+        ]
 
 
-def _fake_gcs(names: list[str]):
+def _fake_gcs(names: list[str] | dict[str, list[str]]):
     from shared.gcs import GcsClient
 
     client = object.__new__(GcsClient)
@@ -283,13 +300,13 @@ def test_delete_for_file_catches_suffixes_a_hardcoded_list_missed() -> None:
     """손으로 적은 확장자 목록이 놓쳤던 것들 — 분할 PDF 조각과 .rtf."""
     client, backend = _fake_gcs(
         [
-            "normalized/abc123.part1.pdf",
-            "normalized/abc123.part2.pdf",
-            "normalized/abc123.meta.md",
-            "normalized/abc123.rtf",
+            "abc123.part1.pdf",
+            "abc123.part2.pdf",
+            "abc123.meta.md",
+            "abc123.rtf",
         ]
     )
-    removed = client.delete_for_file("b", "normalized", "abc123")
+    removed = client.delete_for_file("b", "abc123")
     assert len(removed) == 4
     assert sorted(backend.deleted) == sorted(removed)
 
@@ -298,14 +315,14 @@ def test_delete_for_file_respects_file_id_boundary() -> None:
     """prefix 만으로 걸면 fileId 가 남의 fileId 접두사일 때 남의 파일을 지운다."""
     client, backend = _fake_gcs(
         [
-            "normalized/abc123.md",
-            "normalized/abc123456.md",  # 다른 문서 — 건드리면 안 된다
-            "normalized/abc123",  # 확장자 없는 정확 일치는 대상
+            "abc123.md",
+            "abc123456.md",  # 다른 문서 — 건드리면 안 된다
+            "abc123",  # 확장자 없는 정확 일치는 대상
         ]
     )
-    removed = client.delete_for_file("b", "normalized", "abc123")
-    assert sorted(removed) == ["normalized/abc123", "normalized/abc123.md"]
-    assert "normalized/abc123456.md" not in backend.deleted
+    removed = client.delete_for_file("b", "abc123")
+    assert sorted(removed) == ["abc123", "abc123.md"]
+    assert "abc123456.md" not in backend.deleted
 
 
 def test_delete_file_also_clears_the_raw_original(monkeypatch) -> None:
@@ -313,14 +330,14 @@ def test_delete_file_also_clears_the_raw_original(monkeypatch) -> None:
     from services.sync.main import DeleteBody, delete_file
 
     class FakeSettings:
-        gcs_normalized_bucket = "norm"
-        gcs_raw_bucket = "raw-b"
+        gcs_source_bucket = "norm"
+        gcs_hwp_original_bucket = "raw-b"
         # 학생/교직원 분리가 꺼진 기본 배포 형상
         audience_split_enabled = False
         rag_corpus_name_student = ""
 
     client, backend = _fake_gcs(
-        ["normalized/abc123.md", "raw/abc123.hwp"]
+        {"norm": ["abc123.md"], "raw-b": ["abc123.hwp"]}
     )
     monkeypatch.setattr(sync_main, "get_settings", lambda: FakeSettings())
     monkeypatch.setattr(sync_main, "GcsClient", lambda *a, **k: client)
@@ -337,7 +354,7 @@ def test_delete_file_also_clears_the_raw_original(monkeypatch) -> None:
 
     res = delete_file(DeleteBody(fileId="abc123"))
     assert res["gcsDeleted"] == 2
-    assert "raw/abc123.hwp" in backend.deleted
+    assert "abc123.hwp" in backend.deleted
 
 
 # ------------------------------------------------------------- 빈 fileId

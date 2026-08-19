@@ -200,7 +200,7 @@ def test_reindex_pending_moves_past_no_uri_first_page(monkeypatch) -> None:
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s: object())
     monkeypatch.setattr(
         sync_main,
-        "_normalized_uris_for_file",
+        "_source_uris_for_file",
         lambda settings, file_id, _c=None: (
             ["gs://bucket/f3.pdf"] if file_id == "f3" else []
         ),

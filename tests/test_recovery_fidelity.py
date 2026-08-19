@@ -57,8 +57,8 @@ class _LinkStore:
 
 
 class _Gcs:
-    def upload_normalized_md(self, _md: str, fid: str) -> str:
-        return f"gs://norm/normalized/{fid}.md"
+    def upload_source_md(self, _md: str, fid: str) -> str:
+        return f"gs://norm/{fid}.md"
 
 
 class _Drive:
@@ -80,8 +80,8 @@ class _Settings:
     audience_split_enabled = False
     rag_corpus_name_student = ""
     max_gcs_bytes = 10**9
-    gcs_normalized_bucket = "norm"
-    gcs_raw_bucket = "raw"
+    gcs_source_bucket = "norm"
+    gcs_hwp_original_bucket = "raw"
 
 
 DRIVE_LINK = "https://drive.google.com/file/d/f1/view"
@@ -129,7 +129,7 @@ def test_retry_does_not_resurrect_a_gcs_uri_as_a_link(
         name="doc.txt",
         mime_type="text/plain",
         status=DocStatus.FAILED,
-        source_uri="gs://norm/normalized/f1.md",
+        source_uri="gs://norm/f1.md",
     )
     store = _LinkStore(doc)
     _wire_retry(monkeypatch, store)
@@ -261,17 +261,17 @@ def test_delete_removes_raw_original_and_unlisted_extensions(
         monkeypatch,
         {
             # 대문자·목록에 없는 확장자 — 구 구현은 전부 놓쳤다
-            "norm": ["normalized/f1.DOCX", "normalized/f1.meta.md"],
+            "norm": ["f1.DOCX", "f1.meta.md"],
             # raw 원본 — 구 구현은 아예 대상이 아니었다
-            "raw": ["raw/f1.hwp"],
+            "raw": ["f1.hwp"],
         },
     )
 
     result = sync_main.delete_file(sync_main.DeleteBody(fileId="f1"))
 
-    assert sorted(gcs.deleted) == ["normalized/f1.DOCX", "normalized/f1.meta.md", "raw/f1.hwp"]
-    assert result["rawDeleted"] == 1
-    assert result["normalizedDeleted"] == 2
+    assert sorted(gcs.deleted) == ["f1.DOCX", "f1.hwp", "f1.meta.md"]
+    assert result["hwpOriginalDeleted"] == 1
+    assert result["sourceDeleted"] == 2
     assert store.deleted == ["f1"]
 
 
@@ -280,18 +280,18 @@ def test_delete_does_not_touch_a_file_whose_id_shares_a_prefix(
 ) -> None:
     gcs, _ = _wire_delete(
         monkeypatch,
-        {"norm": ["normalized/f1.md", "normalized/f10.md"], "raw": []},
+        {"norm": ["f1.md", "f10.md"], "raw": []},
     )
 
     sync_main.delete_file(sync_main.DeleteBody(fileId="f1"))
 
-    assert gcs.deleted == ["normalized/f1.md"], "f1 삭제가 f10 까지 지웠다"
+    assert gcs.deleted == ["f1.md"], "f1 삭제가 f10 까지 지웠다"
 
 
 def test_delete_surfaces_gcs_failure_instead_of_swallowing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gcs, store = _wire_delete(monkeypatch, {"norm": ["normalized/f1.md"], "raw": []})
+    gcs, store = _wire_delete(monkeypatch, {"norm": ["f1.md"], "raw": []})
 
     def _boom(*_a: Any, **_k: Any) -> list[str]:
         raise RuntimeError("permission denied")
@@ -316,7 +316,7 @@ def _hit(text: str, name: str, score: float = 0.5) -> SearchHit:
         source=SearchSource(
             file_id="",
             name=name,
-            source_uri=f"gs://norm/normalized/{name}",
+            source_uri=f"gs://norm/{name}",
         ),
     )
 
@@ -411,8 +411,8 @@ def test_reindex_deletes_existing_chunks_before_importing(
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s: object())
     monkeypatch.setattr(
         sync_main,
-        "_normalized_uris_for_file",
-        lambda _s, fid, _c=None: [f"gs://norm/normalized/{fid}.md"],
+        "_source_uris_for_file",
+        lambda _s, fid, _c=None: [f"gs://norm/{fid}.md"],
     )
 
     result = sync_main._reindex_pending_sync(sync_main.ReindexPendingBody())
@@ -463,8 +463,8 @@ def test_reindex_scans_the_corpus_only_once_for_the_whole_run(
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s: object())
     monkeypatch.setattr(
         sync_main,
-        "_normalized_uris_for_file",
-        lambda _s, fid, _c=None: [f"gs://norm/normalized/{fid}.md"],
+        "_source_uris_for_file",
+        lambda _s, fid, _c=None: [f"gs://norm/{fid}.md"],
     )
 
     sync_main._reindex_pending_sync(sync_main.ReindexPendingBody(indexBatchSize=2))

@@ -15,8 +15,8 @@ class _FakeSettings:
     student_folder_id_list: list[str] = []
     audience_split_enabled = False
     rag_corpus_name_student = ""
-    gcs_normalized_bucket = "normalized-bucket"
-    gcs_raw_bucket = "raw-bucket"
+    gcs_source_bucket = "source-bucket"
+    gcs_hwp_original_bucket = "hwp-original-bucket"
 
 
 class _FakeBlob:
@@ -114,14 +114,14 @@ def _body() -> IngestBody:
 
 
 def test_existing_out_of_scope_doc_is_evicted_before_skipped(monkeypatch) -> None:
-    normalized_blobs = [
-        _FakeBlob("normalized/f1.pdf"),
-        _FakeBlob("normalized/f1.meta.md"),
-        _FakeBlob("normalized/f10.pdf"),
+    source_blobs = [
+        _FakeBlob("f1.pdf"),
+        _FakeBlob("f1.meta.md"),
+        _FakeBlob("f10.pdf"),
     ]
-    raw_blobs = [_FakeBlob("raw/f1.hwp"), _FakeBlob("raw/f10.hwp")]
+    hwp_original_blobs = [_FakeBlob("f1.hwp"), _FakeBlob("f10.hwp")]
     gcs = _FakeGcs(
-        {"normalized-bucket": normalized_blobs, "raw-bucket": raw_blobs}
+        {"source-bucket": source_blobs, "hwp-original-bucket": hwp_original_blobs}
     )
     store = _FakeStore(
         DocState(file_id="f1", drive_id="drive-1", status=DocStatus.INDEXED)
@@ -135,26 +135,26 @@ def test_existing_out_of_scope_doc_is_evicted_before_skipped(monkeypatch) -> Non
 
     assert rag_calls == ["f1"]
     assert gcs._client.calls == [
-        ("normalized-bucket", "normalized/f1"),
-        ("raw-bucket", "raw/f1"),
+        ("source-bucket", "f1"),
+        ("hwp-original-bucket", "f1"),
     ]
-    assert [blob.deleted for blob in normalized_blobs] == [True, True, False]
-    assert [blob.deleted for blob in raw_blobs] == [True, False]
+    assert [blob.deleted for blob in source_blobs] == [True, True, False]
+    assert [blob.deleted for blob in hwp_original_blobs] == [True, False]
     assert result == {
         "fileId": "f1",
         "status": "EXCLUDED",
         "reason": "out_of_folder_scope",
         "ragDeleted": True,
-        "normalizedDeleted": 2,
-        "rawDeleted": 1,
+        "sourceDeleted": 2,
+        "hwpOriginalDeleted": 1,
     }
     assert [state.status for state in store.upserts] == [DocStatus.EXCLUDED]
     assert store.dlq == []
 
 
 def test_missing_state_still_cleans_orphaned_scope_artifacts(monkeypatch) -> None:
-    orphan = _FakeBlob("normalized/f1.pdf")
-    gcs = _FakeGcs({"normalized-bucket": [orphan], "raw-bucket": []})
+    orphan = _FakeBlob("f1.pdf")
+    gcs = _FakeGcs({"source-bucket": [orphan], "hwp-original-bucket": []})
     store = _FakeStore(None)
     rag_calls: list[str] = []
     _patch_ingest_dependencies(
@@ -169,8 +169,8 @@ def test_missing_state_still_cleans_orphaned_scope_artifacts(monkeypatch) -> Non
     assert result["status"] == "EXCLUDED"
     # No RAG match is already clean and must remain an idempotent success.
     assert result["ragDeleted"] is False
-    assert result["normalizedDeleted"] == 1
-    assert result["rawDeleted"] == 0
+    assert result["sourceDeleted"] == 1
+    assert result["hwpOriginalDeleted"] == 0
     assert orphan.deleted is True
     assert rag_calls == ["f1"]
 
@@ -182,7 +182,7 @@ def test_already_evicted_file_does_not_rescan_the_corpus(monkeypatch) -> None:
     파일은 바뀔 때마다 델타에 다시 오므로, 생략하지 않으면 그 비용이 매 실행
     반복되고 대량 변경 시 list 쿼터를 넘겨 SKIP 분기를 실패시킨다.
     """
-    gcs = _FakeGcs({"normalized-bucket": [], "raw-bucket": []})
+    gcs = _FakeGcs({"source-bucket": [], "hwp-original-bucket": []})
     store = _FakeStore(
         DocState(
             file_id="f1",
@@ -206,8 +206,8 @@ def test_already_evicted_file_does_not_rescan_the_corpus(monkeypatch) -> None:
 
 def test_skipped_for_another_reason_still_cleans_the_corpus(monkeypatch) -> None:
     """SKIPPED 만으로 생략하면 안 된다 — 미지원 MIME 로 바뀐 문서는 청크가 남는다."""
-    blob = _FakeBlob("normalized/f1.pdf")
-    gcs = _FakeGcs({"normalized-bucket": [blob], "raw-bucket": []})
+    blob = _FakeBlob("f1.pdf")
+    gcs = _FakeGcs({"source-bucket": [blob], "hwp-original-bucket": []})
     store = _FakeStore(
         DocState(file_id="f1", drive_id="drive-1", status=DocStatus.SKIPPED)
     )
@@ -261,7 +261,7 @@ def test_out_of_scope_cleanup_also_removes_from_student_corpus(monkeypatch) -> N
     기본 클라이언트는 교직원 코퍼스만 본다. 학생 쪽을 빼면 범위 밖으로 나간
     문서가 교직원 검색에서만 사라지고 **학생에게는 계속 검색된다**.
     """
-    gcs = _FakeGcs({"normalized-bucket": [], "raw-bucket": []})
+    gcs = _FakeGcs({"source-bucket": [], "hwp-original-bucket": []})
     store = _FakeStore(
         DocState(file_id="f1", drive_id="drive-1", status=DocStatus.INDEXED)
     )
@@ -276,7 +276,7 @@ def test_out_of_scope_cleanup_also_removes_from_student_corpus(monkeypatch) -> N
 
 def test_student_corpus_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) -> None:
     """학생 코퍼스 삭제 실패를 삼키면 안 된다 — 내려야 할 자료가 남는다."""
-    gcs = _FakeGcs({"normalized-bucket": [], "raw-bucket": []})
+    gcs = _FakeGcs({"source-bucket": [], "hwp-original-bucket": []})
     store = _FakeStore(
         DocState(file_id="f1", drive_id="drive-1", status=DocStatus.INDEXED)
     )
@@ -295,8 +295,8 @@ def test_student_corpus_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) ->
 
 
 def test_rag_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) -> None:
-    blob = _FakeBlob("normalized/f1.pdf")
-    gcs = _FakeGcs({"normalized-bucket": [blob], "raw-bucket": []})
+    blob = _FakeBlob("f1.pdf")
+    gcs = _FakeGcs({"source-bucket": [blob], "hwp-original-bucket": []})
     store = _FakeStore(
         DocState(file_id="f1", drive_id="drive-1", status=DocStatus.INDEXED)
     )
@@ -321,10 +321,10 @@ def test_rag_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) -> None:
 
 def test_gcs_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) -> None:
     blobs = [
-        _FakeBlob("normalized/f1.pdf", error=RuntimeError("gcs unavailable")),
-        _FakeBlob("normalized/f1.meta.md"),
+        _FakeBlob("f1.pdf", error=RuntimeError("gcs unavailable")),
+        _FakeBlob("f1.meta.md"),
     ]
-    gcs = _FakeGcs({"normalized-bucket": blobs, "raw-bucket": []})
+    gcs = _FakeGcs({"source-bucket": blobs, "hwp-original-bucket": []})
     store = _FakeStore(
         DocState(file_id="f1", drive_id="drive-1", status=DocStatus.INDEXED)
     )

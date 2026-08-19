@@ -107,8 +107,8 @@ class _Settings:
     audience_split_enabled = False
     rag_corpus_name_student = ""
     max_gcs_bytes = 50 * MB
-    gcs_normalized_bucket = "norm"
-    gcs_raw_bucket = "raw"
+    gcs_source_bucket = "norm"
+    gcs_hwp_original_bucket = "raw"
 
 
 class _Store:
@@ -145,17 +145,17 @@ class _CountingDrive:
 
 
 class _Gcs:
-    def upload_normalized_md(self, _md: str, fid: str) -> str:
-        return f"gs://norm/normalized/{fid}.md"
+    def upload_source_md(self, _md: str, fid: str) -> str:
+        return f"gs://norm/{fid}.md"
 
     def upload_bytes(self, *_a: Any, **_k: Any) -> str:
         return "gs://norm/x"
 
-    def upload_path_sidecar_md(self, _md: str, fid: str) -> str:
-        return f"gs://norm/normalized/{fid}.meta.md"
+    def upload_source_sidecar_md(self, _md: str, fid: str) -> str:
+        return f"gs://norm/{fid}.meta.md"
 
-    def upload_raw(self, *_a: Any, **_k: Any) -> str:
-        return "gs://raw/x"
+    def upload_hwp_original(self, *_a: Any, **_k: Any) -> str:
+        return "gs://x"
 
 
 def test_oversized_pdf_is_rejected_without_downloading() -> None:

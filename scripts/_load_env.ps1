@@ -1,6 +1,6 @@
 # .env 로더 + 배포 필수값 검사. deploy.ps1 / deploy_mcp.ps1 이 dot-source 한다.
 # 셸에 이미 있는 값은 건드리지 않는다 (일회성 오버라이드 허용).
-# 규칙 변경 시 scripts/_load_env.sh (pytest) 도 같이 맞출 것.
+# 규칙 변경 시 tests/test_deploy_env_ps1.py 도 맞출 것.
 
 function Load-Dotenv {
   param([string]$Path = ".env")
@@ -32,11 +32,11 @@ function Get-EnvOr {
 }
 
 function Get-McpStaffServiceName {
-  return Get-EnvOr MCP_SERVICE_NAME_STAFF "rag-mcp"
+  return Get-EnvOr MCP_SERVICE_NAME_STAFF "rag-mcp-cs-staff"
 }
 
 function Get-McpStudentServiceName {
-  return Get-EnvOr MCP_SERVICE_NAME_STUDENT "rag-mcp-student"
+  return Get-EnvOr MCP_SERVICE_NAME_STUDENT "rag-mcp-cs-student"
 }
 
 # 이번 실행 타깃. MCP_SERVICE_NAME 은 세션 오버라이드(.env 에 두지 말 것).
@@ -100,8 +100,8 @@ function Assert-EnvErrors {
 function Require-FullDeployEnv {
   $errs = [System.Collections.Generic.List[string]]::new()
   Add-RequiredEnv $errs GCP_PROJECT_ID
-  Add-RequiredEnv $errs GCS_RAW_BUCKET
-  Add-RequiredEnv $errs GCS_NORMALIZED_BUCKET
+  Add-RequiredEnv $errs GCS_HWP_ORIGINAL_BUCKET
+  Add-RequiredEnv $errs GCS_SOURCE_BUCKET
   Add-RequiredEnv $errs RAG_CORPUS_NAME "Vertex RAG corpus path"
   Add-RequiredEnv $errs DRIVE_IDS "shared drive id"
   Add-RequiredEnv $errs MCP_API_KEY "set MCP_API_KEY_STAFF"
@@ -136,7 +136,11 @@ function Require-McpDeployEnv {
     if ($env:MCP_API_KEY_STAFF -and $env:MCP_API_KEY -eq $env:MCP_API_KEY_STAFF) {
       $errs.Add("MCP_API_KEY: student service must not reuse MCP_API_KEY_STAFF")
     }
-    if ($env:RAG_CORPUS_NAME_STUDENT -and $env:RAG_CORPUS_NAME -ne $env:RAG_CORPUS_NAME_STUDENT) {
+    # 학생 배포에는 학생 코퍼스가 무조건 있어야 한다. 비어 있으면 deploy_mcp.ps1 의
+    # 코퍼스 교체가 통째로 건너뛰어져 RAG_CORPUS_NAME 이 교직원 값 그대로 남는다
+    # — 학생 서비스가 교직원 전량을 검색하게 되므로 조용히 통과시키면 안 된다.
+    Add-RequiredEnv $errs RAG_CORPUS_NAME_STUDENT "student deploy needs its own corpus"
+    if ($env:RAG_CORPUS_NAME -ne $env:RAG_CORPUS_NAME_STUDENT) {
       $errs.Add("RAG_CORPUS_NAME: student deploy must use RAG_CORPUS_NAME_STUDENT")
     }
   } elseif ($env:RAG_CORPUS_NAME_STUDENT -and $env:RAG_CORPUS_NAME -eq $env:RAG_CORPUS_NAME_STUDENT) {

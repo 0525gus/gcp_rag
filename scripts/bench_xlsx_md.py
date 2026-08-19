@@ -5,7 +5,7 @@ DEV_SPEC "1-1. XLSX 셀 → 마크다운 표" 의 수치를 재현한다.
 
 사용:
     # GCS 에서 받아서
-    gcloud storage cp "gs://<normalized-bucket>/normalized/*.xlsx" ./xlsx_sample/
+    gcloud storage cp "gs://<source-bucket>/*.xlsx" ./xlsx_sample/
     python scripts/bench_xlsx_md.py ./xlsx_sample
 """
 
