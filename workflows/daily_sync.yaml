@@ -19,6 +19,9 @@ main:
   steps:
     - init:
         assign:
+          # Workflows 표현식 안에서는 {} 맵 리터럴을 못 쓴다([] 는 된다).
+          # default(..., {}) 가 파싱 에러로 배포를 막으므로 변수로 빼 둔다.
+          - empty_map: {}
           - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
           - region: "asia-northeast3"
           - sync_url: ${default(map.get(args, "syncUrl"), "https://SYNC_SERVICE_URL")}
@@ -699,7 +702,7 @@ main:
                   call: sys.log
                   args:
                     severity: "ERROR"
-                    text: ${"reindex-pending incomplete " + json.encode_to_string(default(reindex_resp.body.totals, {}))}
+                    text: ${"reindex-pending incomplete " + json.encode_to_string(default(reindex_resp.body.totals, empty_map))}
               - continue_to_failed_recovery:
                   next: recover_failed
 
@@ -707,7 +710,7 @@ main:
         call: sys.log
         args:
           severity: "INFO"
-          text: ${"reindex-pending " + json.encode_to_string(default(reindex_resp.body.totals, {}))}
+          text: ${"reindex-pending " + json.encode_to_string(default(reindex_resp.body.totals, empty_map))}
 
     - recover_failed:
         try:
@@ -755,7 +758,7 @@ main:
                   call: sys.log
                   args:
                     severity: "ERROR"
-                    text: ${"retry-failed incomplete " + json.encode_to_string(default(retry_resp.body.totals, {}))}
+                    text: ${"retry-failed incomplete " + json.encode_to_string(default(retry_resp.body.totals, empty_map))}
               - finish_after_retry_incomplete:
                   next: return_summary
 
@@ -763,7 +766,7 @@ main:
         call: sys.log
         args:
           severity: "INFO"
-          text: ${"retry-failed " + json.encode_to_string(default(retry_resp.body.totals, {}))}
+          text: ${"retry-failed " + json.encode_to_string(default(retry_resp.body.totals, empty_map))}
 
     - warn_if_parked:
         switch:

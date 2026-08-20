@@ -1,4 +1,10 @@
-# 배포 전 GCP 실물 검사. 리소스를 만들지 않는다.
+# 배포 전 GCP 실물 검사. 버킷·DB·코퍼스는 만들지 않는다(존재만 본다).
+# 예외 두 가지만 고친다 — 둘 다 "없으면 배포가 조용히 헛도는" 것들이다.
+#   1) 기본 컴퓨팅 SA 가 없으면 물어보고 compute.googleapis.com 을 켠다
+#      (SA 를 직접 만들 수는 없다 — API 를 켜야 Google 이 만든다)
+#   2) 공유드라이브에 그 SA 가 없으면 물어보고 뷰어로 초대한다(대화형일 때만)
+# 자동 조치를 끄려면 $env:PREFLIGHT_NO_FIX = "1"
+#
 # 사용: .\scripts\preflight.ps1
 # deploy.ps1 이 API enable 뒤에 호출한다. 건너뛰려면 $env:SKIP_PREFLIGHT = "1"
 #
@@ -108,6 +114,144 @@ function Test-FirestoreNative {
   if (-not $r.Ok) { return @{ Ok = $false; Type = ""; Text = $r.Text } }
   $type = $r.Text.Trim()
   return @{ Ok = ($type -eq "FIRESTORE_NATIVE"); Type = $type; Text = $r.Text }
+}
+
+function Test-PreflightCanFix {
+  <#
+    .SYNOPSIS
+      자동 조치를 해도 되는 상황인지. CI·비대화형에서는 묻지 않고 실패시킨다.
+  #>
+  if ((Get-EnvOr PREFLIGHT_NO_FIX "") -eq "1") { return $false }
+  if ($env:CI) { return $false }
+  return [Environment]::UserInteractive
+}
+
+function Confirm-PreflightAction {
+  # 상태·결과 출력은 개조식, 사용자에게 묻는 문장만 경어체로 쓴다.
+  param([string]$Question)
+  if (-not (Test-PreflightCanFix)) { return $false }
+  $ans = Read-Host "$Question [y/N]"
+  return $ans -match '^(y|yes)$'
+}
+
+function Add-DriveMember {
+  <#
+    .SYNOPSIS
+      공유드라이브에 계정을 멤버로 추가한다.
+    .NOTES
+      서비스 계정은 알림 메일을 못 받으므로 sendNotificationEmail=false 가 필수다.
+  #>
+  param([string]$DriveId, [string]$Email, [string]$Role, [string]$Token)
+
+  $uri = "https://www.googleapis.com/drive/v3/files/$DriveId/permissions" +
+         "?supportsAllDrives=true&sendNotificationEmail=false"
+  $body = (@{ type = "user"; role = $Role; emailAddress = $Email } | ConvertTo-Json -Compress)
+  try {
+    $res = Invoke-RestMethod -Method Post -Uri $uri `
+      -Headers @{ Authorization = "Bearer $Token" } `
+      -ContentType "application/json; charset=utf-8" -Body $body
+    return @{ Ok = $true; Body = $res }
+  } catch {
+    $code = 0
+    if ($_.Exception.Response -and $null -ne $_.Exception.Response.StatusCode) {
+      $code = [int]$_.Exception.Response.StatusCode
+    }
+    return @{ Ok = $false; Code = $code; Error = $_.Exception.Message }
+  }
+}
+
+function Invoke-JsonPost {
+  param([string]$Uri, [hashtable]$Headers, [string]$Body)
+  try {
+    $res = Invoke-RestMethod -Method Post -Uri $Uri -Headers $Headers `
+      -ContentType "application/json; charset=utf-8" -Body $Body
+    return @{ Ok = $true; Body = $res }
+  } catch {
+    $code = 0
+    if ($_.Exception.Response -and $null -ne $_.Exception.Response.StatusCode) {
+      $code = [int]$_.Exception.Response.StatusCode
+    }
+    return @{ Ok = $false; Code = $code; Error = $_.Exception.Message }
+  }
+}
+
+function New-ImpersonatedToken {
+  <#
+    .SYNOPSIS
+      SA 를 가장한 액세스 토큰을 발급한다. 스코프를 지정할 수 있는 게 핵심이다.
+    .NOTES
+      호출자는 cloud-platform 스코프면 충분하다 — Drive 스코프는 발급받는 토큰에
+      붙는다. 대신 호출자에게 그 SA 의 roles/iam.serviceAccountTokenCreator 가
+      있어야 한다. 부여 직후에는 IAM 전파에 수십 초가 걸린다.
+  #>
+  param([string]$Sa, [string[]]$Scopes, [string]$CallerToken)
+
+  $body = (@{ scope = $Scopes; lifetime = "300s" } | ConvertTo-Json -Compress)
+  $uri = "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${Sa}:generateAccessToken"
+  $r = Invoke-JsonPost -Uri $uri -Headers @{ Authorization = "Bearer $CallerToken" } -Body $body
+  if (-not $r.Ok) { return @{ Ok = $false; Code = $r.Code; Error = $r.Error } }
+  return @{ Ok = $true; Token = [string]$r.Body.accessToken }
+}
+
+function Test-SaDriveAccess {
+  <#
+    .SYNOPSIS
+      SA 가 실제로 그 공유드라이브를 읽는지 본다. 멤버 목록 조회보다 정확하다 —
+      "봇이 읽을 수 있나" 를 런타임 신원으로 직접 답한다.
+    .NOTES
+      startPageToken 까지 보는 이유: DRIVE_IDS 에 폴더 ID 를 넣으면 파일 조회는
+      되는데 델타 진입점만 실패한다. 백필은 되고 증분만 조용히 죽는 형태라
+      배포 후에는 알아채기 어렵다.
+  #>
+  param([string]$Sa, [string]$DriveId, [string]$CallerToken)
+
+  $tok = New-ImpersonatedToken -Sa $Sa -CallerToken $CallerToken `
+    -Scopes @("https://www.googleapis.com/auth/drive.readonly")
+  if (-not $tok.Ok) {
+    return @{ Ok = $false; Stage = "impersonate"; Code = $tok.Code; Detail = $tok.Error }
+  }
+  $h = @{ Authorization = "Bearer $($tok.Token)" }
+
+  $drive = Get-JsonUri -Uri "https://www.googleapis.com/drive/v3/drives/${DriveId}?fields=id,name" -Headers $h
+  if (-not $drive.Ok) {
+    return @{ Ok = $false; Stage = "access"; Code = $drive.Code; Detail = $drive.Error }
+  }
+  $delta = Get-JsonUri -Headers $h `
+    -Uri "https://www.googleapis.com/drive/v3/changes/startPageToken?driveId=${DriveId}&supportsAllDrives=true"
+  if (-not $delta.Ok) {
+    return @{ Ok = $false; Stage = "delta"; Code = $delta.Code; Detail = $delta.Error; Name = $drive.Body.name }
+  }
+  return @{ Ok = $true; Name = $drive.Body.name }
+}
+
+function Restore-DefaultComputeSa {
+  <#
+    .SYNOPSIS
+      기본 컴퓨팅 SA 를 되살린다. 직접 만들 수는 없고 Compute Engine API 를 켜면
+      Google 이 만들어 준다. 생성까지 시차가 있어 잠시 기다린다.
+  #>
+  param([string]$Project, [string]$Email)
+
+  Write-Host "     compute.googleapis.com 을 켜는 중 (기본 SA 생성)"
+  $r = Get-GcloudText -GcloudArgs @("services", "enable", "compute.googleapis.com", "--project=$Project")
+  if (-not $r.Ok) {
+    Write-Host "     API enable 실패: $($r.Text)"
+    return $false
+  }
+  for ($i = 1; $i -le 6; $i++) {
+    Start-Sleep -Seconds 5
+    if (Test-ServiceAccountExists -Project $Project -Email $Email) { return $true }
+    Write-Host "     대기 중... ($i/6)"
+  }
+  return $false
+}
+
+function Test-ServiceAccountExists {
+  param([string]$Project, [string]$Email)
+  $r = Get-GcloudText -GcloudArgs @(
+    "iam", "service-accounts", "describe", $Email, "--project=$Project", "--format=value(email)"
+  )
+  return $r.Ok
 }
 
 function Test-RagCorpusExists {
@@ -223,26 +367,99 @@ function Assert-GcpPrereqs {
   $sa = ""
   if ($numR.Ok -and $numR.Text) {
     $sa = "$($numR.Text.Trim())-compute@developer.gserviceaccount.com"
-    Write-Host "ok   Cloud Run SA $sa"
+    # 주소를 조립만 하고 ok 를 찍던 자리다. 기본 컴퓨팅 SA 는 Compute Engine API 를
+    # 켤 때 생기므로, 안 켠 프로젝트에는 **계정 자체가 없다**. 그런데도 ok 로 넘어가면
+    # 다음 Drive 단계에서 "Google 계정이 없는 이메일 주소" 라는 엉뚱한 메시지를 만나
+    # 공유 정책 문제로 오해하게 된다 — 실제로는 없는 계정을 공유하려 한 것이다.
+    $saOk = Test-ServiceAccountExists -Project $project -Email $sa
+    if (-not $saOk) {
+      Write-Host "MISS Cloud Run SA $sa — 없다"
+      if (Confirm-PreflightAction "     생성하시겠습니까? (compute.googleapis.com 활성화)") {
+        $saOk = Restore-DefaultComputeSa -Project $project -Email $sa
+      }
+    }
+    Add-PreflightResult $errs $saOk `
+      "Cloud Run SA $sa" `
+      ("service account missing. 수동: gcloud services enable compute.googleapis.com --project=$project " +
+       "— 켠 뒤에도 안 생기면 GCP 콘솔 IAM 및 관리자 > 서비스 계정 에서 확인할 것")
   } else {
     $errs.Add("project number: cannot resolve default compute SA")
   }
 
   $driveIds = @((Get-EnvOr DRIVE_IDS "") -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-  if ($token -and $sa -and $driveIds.Count -gt 0) {
+  # Drive 호출은 토큰을 따로 잡는다. `auth print-access-token` 은 cloud-platform
+  # 스코프뿐이라 Drive API 가 403 을 낸다. Drive 스코프는 ADC 쪽에만 붙일 수 있어
+  # (`auth application-default login --scopes=...`) 그쪽을 우선 쓴다 — 이걸 안 하면
+  # 실패 안내문대로 재로그인해도 preflight 는 계속 같은 403 을 낸다.
+  $adcR = Get-GcloudText -GcloudArgs @("auth", "application-default", "print-access-token")
+  $driveToken = if ($adcR.Ok -and $adcR.Text) { $adcR.Text.Split("`n")[0].Trim() } else { $token }
+
+  if ($driveToken -and $sa -and $driveIds.Count -gt 0) {
     foreach ($did in $driveIds) {
-      $perm = Get-DrivePermissions -DriveId $did -Token $token
-      if (-not $perm.Ok) {
-        Write-Host "WARN Drive $did : SA 멤버십을 확인하지 못함 (Drive 스코프 없는 토큰이면 정상). 콘솔에서 $sa 를 공유드라이브 멤버(뷰어 이상)로 초대할 것"
-        continue
-      }
       $hit = $false
-      foreach ($em in $perm.Emails) {
-        if ($em.Equals($sa, [StringComparison]::OrdinalIgnoreCase)) { $hit = $true; break }
+      $conclusive = $false   # 판정을 신뢰할 수 있는가 (아니면 WARN 으로 남긴다)
+
+      # 1순위: SA 를 가장해 실제로 읽어 본다. 사람 토큰에 Drive 스코프가 없어도 되고,
+      # 멤버 목록 조회와 달리 "봇이 읽을 수 있나" 를 직접 답한다.
+      $probe = Test-SaDriveAccess -Sa $sa -DriveId $did -CallerToken $token
+      if ($probe.Ok) {
+        Write-Host "     SA 실접근 확인: $($probe.Name)"
+        $hit = $true; $conclusive = $true
+      } elseif ($probe.Stage -eq "delta") {
+        # 드라이브는 읽히는데 델타 진입점만 실패 = 공유드라이브가 아니라 폴더 ID.
+        Write-Host "FAIL Drive $did : 파일은 읽히는데 델타 시작점이 없다 (HTTP $($probe.Code))"
+        Write-Host "     DRIVE_IDS 가 공유드라이브가 아니라 폴더 ID 일 가능성이 높다"
+        Write-Host "     폴더는 SYNC_FOLDER_IDS 로 옮기고 DRIVE_IDS 에는 0A... 형태를 넣을 것"
+        $errs.Add("Drive ${did}: 델타 시작점 없음 — 공유드라이브 ID 가 맞는지 확인")
+        continue
+      } elseif ($probe.Stage -eq "access") {
+        Write-Host "MISS Drive $did : SA 가 접근하지 못한다 (HTTP $($probe.Code))"
+        $conclusive = $true
+      } else {
+        # 가장 자체가 안 됨(Token Creator 없음 등). 멤버 목록 조회로 물러난다.
+        $perm = Get-DrivePermissions -DriveId $did -Token $driveToken
+        if ($perm.Ok) {
+          foreach ($em in $perm.Emails) {
+            if ($em.Equals($sa, [StringComparison]::OrdinalIgnoreCase)) { $hit = $true; break }
+          }
+          $conclusive = $true
+          if (-not $hit) { Write-Host "MISS Drive $did : $sa 가 멤버가 아니다" }
+        } else {
+          Write-Host "WARN Drive $did : 확인 경로 둘 다 막힘 (가장 $($probe.Code) / 목록 $($perm.Code))"
+          Write-Host "     SA 가장을 쓰려면: gcloud iam service-accounts add-iam-policy-binding $sa --member=user:<본인> --role=roles/iam.serviceAccountTokenCreator"
+        }
       }
-      Add-PreflightResult $errs $hit `
-        "Drive $did share($sa)" `
-        "Cloud Run SA 가 멤버가 아님. 공유드라이브 관리에서 $sa 를 뷰어 이상으로 초대"
+
+      if (-not $hit) {
+        if (Confirm-PreflightAction "     뷰어로 초대하시겠습니까?") {
+          $add = Add-DriveMember -DriveId $did -Email $sa -Role "reader" -Token $driveToken
+          if ($add.Ok) {
+            Write-Host "     초대 완료 — SA 실접근으로 다시 확인한다"
+            $again = Test-SaDriveAccess -Sa $sa -DriveId $did -CallerToken $token
+            if ($again.Ok) {
+              $hit = $true; $conclusive = $true
+            } else {
+              # 가장이 막힌 환경이면 초대 성공 자체를 근거로 삼는다.
+              $hit = $true
+            }
+          } else {
+            Write-Host "     초대 실패 HTTP $($add.Code): $($add.Error)"
+            if ($add.Code -eq 401 -or $add.Code -eq 403) {
+              Write-Host "     Drive 스코프 토큰이 필요하다:"
+              Write-Host "       gcloud auth application-default login --scopes=https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive"
+            }
+          }
+        }
+      }
+      if ($hit -or $conclusive) {
+        Add-PreflightResult $errs $hit `
+          "Drive $did share($sa)" `
+          "Cloud Run SA 가 접근하지 못함. .\scripts\share_drive.ps1 또는 공유드라이브 관리에서 $sa 를 뷰어 이상으로 초대"
+      } else {
+        # 확인 경로가 둘 다 막혔다. 여기서 실패로 처리하면 Token Creator 도 Drive
+        # 스코프도 없는 정상 환경(예: CI)까지 배포가 막힌다 — 경고로 남긴다.
+        Write-Host "WARN Drive $did share($sa) : 확인 불가. 콘솔에서 $sa 를 뷰어 이상으로 초대할 것"
+      }
     }
   }
 

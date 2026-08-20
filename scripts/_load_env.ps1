@@ -1,5 +1,8 @@
-# .env 로더 + 배포 필수값 검사. deploy.ps1 / deploy_mcp.ps1 이 dot-source 한다.
-# 셸에 이미 있는 값은 건드리지 않는다 (일회성 오버라이드 허용).
+# .env 로더 + 배포 필수값 검사.
+# deploy.ps1 / deploy_mcp.ps1 / preflight.ps1 / share_drive.ps1 이 dot-source 한다.
+# 셸에 **값이 든** 변수는 건드리지 않는다 (일회성 오버라이드 허용).
+# 빈 문자열은 .env 가 덮어쓴다 — 존재만 보면 한 번 비었던 값이 그 창에서 영원히
+# .env 를 가려서, 고쳐도 같은 에러가 반복됐다.
 # 규칙 변경 시 tests/test_deploy_env_ps1.py 도 맞출 것.
 
 function Load-Dotenv {
@@ -12,7 +15,11 @@ function Load-Dotenv {
     $key = $key.Trim()
     if ($key.StartsWith("export ")) { $key = $key.Substring(7).Trim() }
     if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { return }
-    if (Test-Path -LiteralPath "Env:$key") { return }
+    # 셸에 **실제 값**이 있을 때만 양보한다. Test-Path 는 빈 문자열 변수도 True 라,
+    # 존재만 보면 한 번 비어 있던 값이 그 창에서 영원히 .env 를 가린다 —
+    # .env 를 고쳐도 같은 에러가 반복된다(빈 키가 많아 누구나 밟는다).
+    $cur = [Environment]::GetEnvironmentVariable($key)
+    if (-not [string]::IsNullOrWhiteSpace($cur)) { return }
     $val = $val.Trim()
     if ($val.Length -ge 2) {
       $q = $val[0]
@@ -104,6 +111,7 @@ function Require-FullDeployEnv {
   Add-RequiredEnv $errs GCS_SOURCE_BUCKET
   Add-RequiredEnv $errs RAG_CORPUS_NAME "Vertex RAG corpus path"
   Add-RequiredEnv $errs DRIVE_IDS "shared drive id"
+  Add-RequiredEnv $errs SYNC_FOLDER_IDS "folder id from Drive URL folders/"
   Add-RequiredEnv $errs MCP_API_KEY "set MCP_API_KEY_STAFF"
 
   $studentCorpus = $env:RAG_CORPUS_NAME_STUDENT
@@ -117,6 +125,11 @@ function Require-FullDeployEnv {
   }
   if ($hasCorpus -and (Test-PlaceholderValue $studentCorpus)) {
     $errs.Add("RAG_CORPUS_NAME_STUDENT: example value ($studentCorpus)")
+  }
+  # 분리가 켜지면 deploy.ps1 이 학생 MCP 까지 올린다 — 키가 없으면 거기서 멈추므로
+  # .env 검사 단계에서 먼저 잡는다.
+  if ($hasCorpus -and $hasFolders -and [string]::IsNullOrWhiteSpace($env:MCP_API_KEY_STUDENT)) {
+    $errs.Add("MCP_API_KEY_STUDENT: empty (student split is on — set a key different from MCP_API_KEY_STAFF)")
   }
   if ($env:MCP_API_KEY_STUDENT -and $env:MCP_API_KEY -and $env:MCP_API_KEY_STUDENT -eq $env:MCP_API_KEY) {
     $errs.Add("MCP_API_KEY_STUDENT: must differ from MCP_API_KEY_STAFF")

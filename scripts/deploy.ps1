@@ -1,6 +1,10 @@
 # Cloud Run / Workflows / Scheduler 배포
 # 사용: .\scripts\deploy.ps1
 #
+# 올리는 것: rag-parser, rag-sync, 교직원 MCP, (분리가 켜져 있으면) 학생 MCP,
+#            Workflows, Scheduler, 그 SA·IAM.
+# MCP 공개 여부는 ALLOW_UNAUTH (기본 true = 공개). deploy_mcp.ps1 과 같은 스위치.
+#
 # --set-env-vars 는 Cloud Run env 를 통째로 치환한다. 안 넘긴 값은 사라진다.
 # DRIVE_IDS / SYNC_FOLDER_IDS 에 콤마가 있어 구분자는 | (^|^...).
 
@@ -34,6 +38,15 @@ $PARSER_TIMEOUT = Get-EnvOr PARSER_TIMEOUT "540"
 $PARSER_CONCURRENCY = Get-EnvOr PARSER_CONCURRENCY "4"
 $PARSER_MAX_INSTANCES = Get-EnvOr PARSER_MAX_INSTANCES "10"
 $SYNC_CONCURRENCY = Get-EnvOr SYNC_CONCURRENCY "4"
+# deploy_mcp.ps1 과 같은 값이어야 한다. 한쪽만 넘기면 그쪽으로 재배포할 때마다
+# 동시성이 Cloud Run 기본값으로 되돌아간다.
+$MCP_CONCURRENCY = Get-EnvOr MCP_CONCURRENCY "40"
+# MCP 공개 여부. deploy_mcp.ps1 과 같은 스위치를 쓴다 — 두 스크립트가 다르면
+# 어느 쪽으로 재배포했느냐에 따라 공개 상태가 조용히 뒤집힌다.
+# 기본 true: FactChat 커넥터가 정적 헤더만 보내므로 Cloud Run IAM 을 열어야 한다.
+# 경계는 앱 계층 키(MCP_API_KEY)뿐이다 — 키가 새면 코퍼스 전량이 열린다.
+$ALLOW_UNAUTH = Get-EnvOr ALLOW_UNAUTH "true"
+$mcpAuthArgs = if ($ALLOW_UNAUTH -eq "true") { @("--allow-unauthenticated") } else { @("--no-allow-unauthenticated") }
 $INGEST_CONC = Get-EnvOr INGEST_CONCURRENCY "8"
 $RAG_DEL_PACE = Get-EnvOr RAG_DELETE_PACING_SECONDS "1.1"
 $RAG_DEL_CONC = Get-EnvOr RAG_DELETE_CONCURRENCY "1"
@@ -55,8 +68,10 @@ Assert-LastExit
 Write-Host "== Enable APIs =="
 gcloud services enable `
   run.googleapis.com `
+  compute.googleapis.com `
   workflows.googleapis.com `
   cloudscheduler.googleapis.com `
+  appengine.googleapis.com `
   drive.googleapis.com `
   documentai.googleapis.com `
   aiplatform.googleapis.com `
@@ -115,16 +130,37 @@ gcloud run deploy rag-sync `
   --concurrency=$SYNC_CONCURRENCY
 Assert-LastExit
 
-# IAM ID 토큰용. FactChat 공개 URL 은 deploy_mcp.ps1.
+# ALLOW_UNAUTH=true(기본)면 공개 URL 로 올라가 FactChat 이 바로 붙는다.
 $MCP_SERVICE = Get-McpStaffServiceName
 $mcpEnv = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|RAG_CORPUS_NAME=$CORPUS|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|FIRESTORE_DATABASE=$FS_DB|DOC_STATE_COLLECTION=$FS_COL|MCP_API_KEY=$MCP_API_KEY|TOP_K_DEFAULT=$TOP_K|SEARCH_FETCH_MULTIPLIER=$FETCH_MULT|SEARCH_FETCH_MAX=$FETCH_MAX"
 gcloud run deploy $MCP_SERVICE `
   --image="$IMAGE_BASE/mcp:latest" `
   --region=$REGION `
-  --no-allow-unauthenticated `
+  @mcpAuthArgs `
   --set-env-vars=$mcpEnv `
-  --memory=1Gi --cpu=1 --timeout=60
+  --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY
 Assert-LastExit
+
+# 학생 분리가 켜져 있으면 학생 MCP 도 같이 올린다. 코퍼스와 키를 학생 값으로
+# 갈아끼우는 게 핵심 — 비우고 배포하면 학생 서비스가 교직원 전량을 검색한다.
+# 스위치는 .env 두 값이며 config.py 의 audience_split_enabled 와 같은 조건이다.
+$STUDENT_MCP_SERVICE = ""
+if ($STUDENT_CORPUS -and $STUDENT_FOLDERS) {
+  $STUDENT_MCP_SERVICE = Get-McpStudentServiceName
+  $STUDENT_KEY = Get-EnvOr MCP_API_KEY_STUDENT ""
+  if (-not $STUDENT_KEY) {
+    throw "MCP_API_KEY_STUDENT: 학생 분리가 켜져 있으면 필요하다 (교직원 키와 다른 값)"
+  }
+  Write-Host "== 학생 MCP ($STUDENT_MCP_SERVICE) =="
+  $studentMcpEnv = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|RAG_CORPUS_NAME=$STUDENT_CORPUS|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|FIRESTORE_DATABASE=$FS_DB|DOC_STATE_COLLECTION=$FS_COL|MCP_API_KEY=$STUDENT_KEY|TOP_K_DEFAULT=$TOP_K|SEARCH_FETCH_MULTIPLIER=$FETCH_MULT|SEARCH_FETCH_MAX=$FETCH_MAX"
+  gcloud run deploy $STUDENT_MCP_SERVICE `
+    --image="$IMAGE_BASE/mcp:latest" `
+    --region=$REGION `
+    @mcpAuthArgs `
+    --set-env-vars=$studentMcpEnv `
+    --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY
+  Assert-LastExit
+}
 
 $PARSER_URL = gcloud run services describe rag-parser --region=$REGION --format="value(status.url)"
 Assert-LastExit
@@ -136,6 +172,18 @@ Assert-LastExit
 Write-Host "PARSER_URL=$PARSER_URL"
 Write-Host "SYNC_URL=$SYNC_URL"
 Write-Host "MCP_URL=$MCP_URL"
+if ($STUDENT_MCP_SERVICE) {
+  $STUDENT_MCP_URL = gcloud run services describe $STUDENT_MCP_SERVICE --region=$REGION --format="value(status.url)"
+  Assert-LastExit
+  Write-Host "STUDENT_MCP_URL=$STUDENT_MCP_URL"
+}
+Write-Host ""
+if ($ALLOW_UNAUTH -eq "true") {
+  Write-Host "MCP 는 공개(--allow-unauthenticated). 경계는 API 키뿐이다."
+  Write-Host "FactChat 커넥터: {URL}/mcp · Streamable HTTP · Authorization: Bearer {키}"
+} else {
+  Write-Host "MCP 는 IAM 전용(ALLOW_UNAUTH=$ALLOW_UNAUTH). FactChat 은 붙지 못한다."
+}
 
 $driveIds = @($DRIVE_IDS -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $driveJson = "[" + (($driveIds | ForEach-Object { '"' + $_ + '"' }) -join ",") + "]"
@@ -162,6 +210,9 @@ gcloud projects add-iam-policy-binding $PROJECT_ID `
   --condition=None | Out-Null
 Assert-LastExit
 
+# Cloud Scheduler 는 프로젝트에 App Engine 앱이 있어야 잡을 만든다.
+# appengine.googleapis.com 이 enable 목록에 없으면 여기 create 가 실패하고,
+# Cloud Run·Workflows 까지 다 올라간 뒤 마지막에 죽는다(실측).
 gcloud app describe --project=$PROJECT_ID 2>$null
 if ($LASTEXITCODE -ne 0) {
   gcloud app create --region=$REGION --project=$PROJECT_ID

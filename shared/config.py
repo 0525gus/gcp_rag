@@ -51,7 +51,8 @@ class Settings:
     docai_location: str = "asia-northeast3"
     drive_ids: str = ""
 
-    # 공유 드라이브 내부에서 RAG/GCS 대상 폴더만 (비우면 드라이브 전체)
+    # 공유 드라이브 내부에서 RAG/GCS 대상 폴더만. 배포는 필수(비우면 거부).
+    # 런타임에 비면 드라이브 전체 — 테스트/우회용이지 운영 기본이 아니다.
     sync_folder_ids: str = ""
 
     # 이 폴더 트리 아래 문서만 학생 코퍼스에 실린다. sync_folder_ids 의 부분집합이며

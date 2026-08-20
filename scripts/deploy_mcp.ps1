@@ -1,4 +1,9 @@
 # MCP 서버만 Cloud Run 배포 (FactChat MCP 커넥터용)
+#
+# deploy.ps1 도 MCP 를 올리지만 --no-allow-unauthenticated (IAM 전용)라 FactChat 이
+# 못 붙는다. 공개 URL 은 여기서만 나온다(ALLOW_UNAUTH, 기본 true).
+# 이미지도 mcp 하나만 빌드하므로 MCP 설정만 바꿨을 때 재배포용으로도 쓴다.
+#
 # 사용: .\scripts\deploy_mcp.ps1
 # 학생: $env:MCP_AUDIENCE = "student"; .\scripts\deploy_mcp.ps1
 # 이름은 .env 의 MCP_SERVICE_NAME_STAFF / MCP_SERVICE_NAME_STUDENT
@@ -41,6 +46,8 @@ $FS_DB = Get-EnvOr FIRESTORE_DATABASE "rag-sync-state"
 $FS_COL = Get-EnvOr DOC_STATE_COLLECTION "doc_state"
 $FETCH_MULT = Get-EnvOr SEARCH_FETCH_MULTIPLIER "3"
 $FETCH_MAX = Get-EnvOr SEARCH_FETCH_MAX "60"
+# deploy.ps1 과 같은 기본값을 쓴다.
+$MCP_CONCURRENCY = Get-EnvOr MCP_CONCURRENCY "40"
 
 gcloud config set project $PROJECT_ID
 Assert-LastExit
@@ -71,7 +78,7 @@ gcloud run deploy $SERVICE `
   --region=$REGION `
   @authArgs `
   --set-env-vars=$envVars `
-  --memory=1Gi --cpu=1 --timeout=60 --concurrency=40
+  --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY
 Assert-LastExit
 
 $MCP_URL = gcloud run services describe $SERVICE --region=$REGION --format="value(status.url)"

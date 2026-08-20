@@ -80,7 +80,7 @@ Google Drive
 #### 가. rag-sync
 
 - Drive 변경 감지 → 다운로드 → 변환 위임 → GCS 적재 → RAG 색인
-- CPU 2 / MEM 2Gi / timeout 3600s / concurrency 4
+- CPU 2 / MEM 2Gi / timeout 3600s / concurrency 4 (`SYNC_CONCURRENCY`)
 - 엔드포인트
 
 | 경로 | 기능 |
@@ -98,7 +98,8 @@ Google Drive
 #### 나. rag-parser
 
 - HWP/HWPX → 마크다운, 품질 게이트
-- CPU 2 / MEM 2Gi / timeout 900s
+- CPU 2 / MEM 2Gi / timeout 540s (`PARSER_TIMEOUT`) / concurrency 4 (`PARSER_CONCURRENCY`) / max 10 인스턴스
+  - sync 의 httpx 타임아웃 600s 보다 짧아야 한다 — 서버가 먼저 포기해야 sync 가 오류를 받는다
 - 엔진: `.hwp` = rhwp, `.hwpx` = python-hwpx (부재 시 rhwp)
 - 게이트: `log` / `reject` / `fallback`
   - 실제 발동은 G1 밀도, G2 표 손실, EMPTY_TEXT
@@ -109,10 +110,12 @@ Google Drive
 #### 다. rag-mcp-cs-staff / rag-mcp-cs-student
 
 - MCP 도구 `search`, `answer`
-- CPU 1 / MEM 1Gi / timeout 60s / concurrency 40
+- CPU 1 / MEM 1Gi / timeout 60s / concurrency 40 (`MCP_CONCURRENCY`)
 - 기동 시 코퍼스 하나. 툴 인자로 대상을 고르지 않음
-- 공개 URL + API 키 (`Authorization: Bearer` 또는 `X-API-Key`). 서비스마다 키를 다르게 둠
-- 배포: 교직원 `scripts/deploy_mcp.ps1`, 학생은 `MCP_AUDIENCE=student` 로 한 번 더
+- API 키 (`Authorization: Bearer` 또는 `X-API-Key`). 서비스마다 키를 다르게 둠
+- 배포: `deploy.ps1` 이 교직원·학생 둘 다 올린다. 공개 여부는 `ALLOW_UNAUTH` (기본 `true` = 공개)
+- `scripts/deploy_mcp.ps1` 은 MCP 만 재배포할 때 (학생은 `MCP_AUDIENCE=student`)
+- 학생 MCP 는 `RAG_CORPUS_NAME_STUDENT` + `STUDENT_FOLDER_IDS` 가 둘 다 있을 때만 배포됨
 - 서비스 이름: `.env` 의 `MCP_SERVICE_NAME_STAFF` / `MCP_SERVICE_NAME_STUDENT`
 
 ```
@@ -168,7 +171,7 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 ### 1-1. Drive 경로 → 소속
 
 - `DRIVE_IDS`: 공유 드라이브 ID (`folders/` URL의 `0A…`)
-- `SYNC_FOLDER_IDS`: 수집 범위. 지정 폴더와 하위. 비우면 드라이브 전체
+- `SYNC_FOLDER_IDS`: 수집 범위. 지정 폴더와 하위. **배포 필수**(비우면 거부)
 - `STUDENT_FOLDER_IDS`: 학생 코퍼스에 실을 폴더. `SYNC_FOLDER_IDS`의 부분집합. 여기서 빼면 수집 자체가 안 됨
 - 판정: ingest 때 조상 폴더가 `STUDENT_FOLDER_IDS` 안이면 `STUDENT`, 아니면 `STAFF`
 - 실패·필드 없음·모르는 값 → `STAFF`
@@ -335,8 +338,8 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 
 | 서비스 | 방식 |
 |---|---|
-| rag-mcp | 공개 URL + 교직원 키 |
-| rag-mcp-cs-student | 공개 URL + 학생 키 (교직원과 다른 값) |
+| rag-mcp-cs-staff | 공개 URL + 교직원 키 (`ALLOW_UNAUTH=false` 면 IAM 전용) |
+| rag-mcp-cs-student | 학생 키 (교직원과 다른 값). 공개 여부는 위와 같음 |
 | rag-sync | 프로젝트 IAM |
 | rag-parser | rag-sync SA |
 

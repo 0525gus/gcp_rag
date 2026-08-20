@@ -91,7 +91,7 @@ gcloud firestore databases create --database=rag-sync-state --location=asia-nort
 Copy-Item .env.example .env
 ```
 
-**필수 6개** — 하나라도 비거나 `{project}` 같은 예시값이면 배포가 거부됩니다.
+**필수 7개** — 하나라도 비거나 `{project}` 같은 예시값이면 배포가 거부됩니다.
 
 | 키 | 값 |
 |---|---|
@@ -100,13 +100,13 @@ Copy-Item .env.example .env
 | `GCS_SOURCE_BUCKET` | RAG import 산출물 버킷 |
 | `RAG_CORPUS_NAME` | `projects/.../locations/asia-northeast3/ragCorpora/...` |
 | `DRIVE_IDS` | 공유드라이브 ID (쉼표 구분) |
+| `SYNC_FOLDER_IDS` | 수집 폴더 ID (`folders/` 뒤, 쉼표 구분) |
 | `MCP_API_KEY_STAFF` | 교직원 MCP 키 |
 
 **조건부**
 
 - `RAG_CORPUS_NAME_STUDENT` 와 `STUDENT_FOLDER_IDS` 는 **짝**. 하나만 채우면 거부된다
 - `MCP_API_KEY_STUDENT` 는 교직원 키와 **달라야** 한다
-- `SYNC_FOLDER_IDS` 를 비우면 **드라이브 전체**가 대상이 된다
 - `QG_MODE` 는 `log` 유지. `fallback` 은 parser 이미지에 LibreOffice 가 없어 런타임에 실패한다
 
 **주의**
@@ -144,13 +144,15 @@ Copy-Item .env.example .env
 | | `deploy.ps1` | `deploy_mcp.ps1` |
 |---|---|---|
 | 빌드 | parser · sync · mcp (3개) | mcp (1개) |
-| Cloud Run | `rag-parser` `rag-sync` **교직원 MCP** | **MCP 1개** (타깃 지정) |
+| Cloud Run | `rag-parser` `rag-sync` **MCP(교직원 + 학생)** | **MCP 1개** (타깃 지정) |
+| MCP 공개 여부 | `ALLOW_UNAUTH` (기본 공개) | 〃 (같은 스위치) |
 | Workflows · Scheduler · IAM | 만든다 | 안 건드린다 |
-| 학생 MCP | **못 만든다** | 만든다 |
-| 인증 모드 | 항상 공개 | `ALLOW_UNAUTH` 로 전환 |
 
-- 교직원만 쓸 거면 **`deploy.ps1` 하나로 끝난다** — 교직원 MCP 가 여기 포함돼 있다
-- `deploy_mcp.ps1` 이 필요한 경우는 둘뿐: **학생 MCP 배포**, **MCP 설정만 바꾼 재배포**
+- **`deploy.ps1` 한 번이면 FactChat 연결까지 끝난다** — MCP 가 공개(`ALLOW_UNAUTH=true`, 기본)로 올라간다
+- 학생 분리(`RAG_CORPUS_NAME_STUDENT` + `STUDENT_FOLDER_IDS`)가 켜져 있으면 **학생 MCP 도 같이** 올린다. `MCP_API_KEY_STUDENT` 가 비면 배포 전에 거부된다
+- `deploy_mcp.ps1` 은 **MCP 만 재배포**할 때 쓴다 (검색 파라미터·키 교체 등)
+- `ALLOW_UNAUTH=false` 로 두면 IAM 전용이 되고 FactChat 은 붙지 못한다
+- **공개 MCP 의 경계는 API 키뿐이다.** 키가 새면 그 코퍼스 전량이 열린다 — 교직원 키는 특히 주의
 
 ### 1) 전체
 
@@ -158,18 +160,21 @@ Copy-Item .env.example .env
 .\scripts\deploy.ps1
 ```
 
-- 끝나면 `PARSER_URL` `SYNC_URL` `MCP_URL` 을 출력한다
+- 끝나면 `PARSER_URL` `SYNC_URL` `MCP_URL` (분리 시 `STUDENT_MCP_URL`) 을 출력한다
+- 학생 분리가 켜져 있으면 **학생 MCP 도 여기서 같이** 올라간다 — 코퍼스와 키를 학생 값으로 갈아끼운다
+- MCP 서버는 기동 시점의 코퍼스 하나만 본다. 그래서 분리 = 서비스 두 벌
 
-### 2) 학생 MCP (분리를 켠 경우만)
+### 2) MCP 만 재배포 (필요할 때)
+
+검색 파라미터·키만 바꿨으면 이미지 하나만 다시 빌드한다.
 
 ```powershell
-$env:MCP_AUDIENCE = "student"
-.\scripts\deploy_mcp.ps1
+.\scripts\deploy_mcp.ps1                                # 교직원
+$env:MCP_AUDIENCE = "student"; .\scripts\deploy_mcp.ps1   # 학생
+Remove-Item Env:MCP_AUDIENCE
 ```
 
-- 타깃이 학생이면 코퍼스와 키를 **학생 값으로 갈아끼운다**
-- MCP 서버는 기동 시점의 코퍼스 하나만 본다. 그래서 분리 = 서비스 두 벌
-- 끝나면 `Remove-Item Env:MCP_AUDIENCE` — 남아 있으면 다음 실행도 학생으로 간다
+- 마지막 줄 잊지 말 것 — 남아 있으면 다음 실행도 학생으로 간다
 
 ### 3) FactChat 커넥터
 
@@ -178,11 +183,38 @@ $env:MCP_AUDIENCE = "student"
 - Header: `Authorization: Bearer {키}` 또는 `X-API-Key: {키}`
 - 확인: `curl -s {MCP_URL}/health`
 
-### 첫 색인
+### 첫 색인 · 수동 동기화
 
-- 배포만으로는 색인이 비어 있다
-- Scheduler 가 **00:00 KST** 에 처음 돈다
-- 기다리지 않으려면 `rag-daily-sync` 워크플로를 콘솔에서 수동 실행
+배포만으로는 색인이 비어 있다. Scheduler 는 **00:00 KST** 에 처음 돈다.
+
+기다리지 않으려면 워크플로를 직접 실행한다.
+
+```powershell
+$P = $env:GCP_PROJECT_ID; $R = "asia-northeast3"
+$SYNC   = (gcloud run services describe rag-sync   --region=$R --project=$P --format="value(status.url)").Trim()
+$PARSER = (gcloud run services describe rag-parser --region=$R --project=$P --format="value(status.url)").Trim()
+
+# 첫 적재 = 전체 백필
+gcloud workflows run rag-daily-sync --location=$R --project=$P `
+  --data="{\"syncUrl\":\"$SYNC\",\"parserUrl\":\"$PARSER\",\"driveIds\":[\"<공유드라이브ID>\"],\"backfill\":true}"
+```
+
+| 인자 | 기본 | 뜻 |
+|---|---|---|
+| `backfill` | `false` | `true` = 전체 재수집. **처음엔 이걸로** |
+| `maxChanges` | 200 | 델타 1페이지당 변경 수 (Workflows 변수 512KB 한도 대비) |
+| `indexBatchSize` | 10 | RAG import 배치 |
+| `recoverLimit` | 200 | DLQ 회수 상한 |
+
+- `backfill` 없이 돌리면 델타 모드다. 다만 **최초 토큰이 없으면 자동으로 백필 스냅샷**을 탄다
+- 콘솔에서도 된다: Workflows → `rag-daily-sync` → 실행 → 위 JSON 붙여넣기
+
+진행 확인:
+
+```powershell
+gcloud workflows executions list --workflow=rag-daily-sync --location=$R --project=$P --limit=3
+gcloud logging read 'resource.labels.service_name="rag-sync"' --project=$P --limit=30
+```
 
 ---
 

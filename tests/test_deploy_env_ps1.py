@@ -36,6 +36,7 @@ VALID = {
     "GCS_SOURCE_BUCKET": "rag-source-my-proj",
     "RAG_CORPUS_NAME": "projects/my-proj/locations/asia-northeast3/ragCorpora/abc",
     "DRIVE_IDS": "0ABrealDriveId",
+    "SYNC_FOLDER_IDS": "1ABrealFolderId",
     "MCP_API_KEY": "a-long-random-staff-secret",
 }
 
@@ -71,6 +72,98 @@ def _run(
     )
 
 
+def _run_dotenv(tmp_path, dotenv: str, preset: dict[str, str], key: str):
+    """임시 .env 를 만들고 Load-Dotenv 를 돌린 뒤 key 의 최종 값을 돌려준다."""
+    (tmp_path / ".env").write_text(dotenv, encoding="utf-8")
+    assigns = "; ".join(f"$env:{k} = '{v}'" for k, v in preset.items())
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"{assigns}; "
+        f". '{LOADER}'; "
+        "Load-Dotenv; "
+        f"Write-Output $env:{key}"
+    )
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
+        "WINDIR": os.environ.get("WINDIR", ""),
+        "PSModulePath": os.environ.get("PSModulePath", ""),
+    }
+    return subprocess.run(
+        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        cwd=str(tmp_path),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_dotenv_overrides_an_empty_shell_var(tmp_path) -> None:
+    """셸에 빈 값이 남아 있으면 .env 가 이겨야 한다.
+
+    Test-Path 는 빈 문자열 변수도 True 라, 존재만 보고 건너뛰면 한 번 비어 있던
+    값이 그 창에서 영원히 .env 를 가린다 — .env 를 고쳐도 같은 에러가 반복됐다.
+    .env 에 빈 키가 여럿 있어(STUDENT_FOLDER_IDS= 등) 누구나 밟는 함정이었다.
+    """
+    p = _run_dotenv(
+        tmp_path,
+        "RAG_CORPUS_NAME_STUDENT=projects/p/locations/l/ragCorpora/stu\n",
+        {"RAG_CORPUS_NAME_STUDENT": ""},
+        "RAG_CORPUS_NAME_STUDENT",
+    )
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip() == "projects/p/locations/l/ragCorpora/stu"
+
+
+def test_dotenv_yields_to_a_real_shell_var(tmp_path) -> None:
+    """실제 값이 있는 셸 변수는 여전히 이긴다 (일회성 오버라이드)."""
+    p = _run_dotenv(
+        tmp_path,
+        "RAG_CORPUS_NAME_STUDENT=from-dotenv\n",
+        {"RAG_CORPUS_NAME_STUDENT": "from-shell"},
+        "RAG_CORPUS_NAME_STUDENT",
+    )
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip() == "from-shell"
+
+
+def test_preflight_autofix_is_off_when_not_interactive() -> None:
+    """CI·비대화형에서는 자동 조치를 하지 않는다.
+
+    deploy.ps1 이 preflight 를 dot-source 하므로, 여기서 Read-Host 가 걸리면
+    파이프라인이 멈춘다. PREFLIGHT_NO_FIX / CI 둘 다 차단 스위치여야 한다.
+    """
+    for guard in ({"PREFLIGHT_NO_FIX": "1"}, {"CI": "true"}):
+        p = _run(guard, "if (Test-PreflightCanFix) { exit 1 } else { exit 0 }", source_preflight=True)
+        assert p.returncode == 0, f"{guard} 에서 자동 조치가 켜져 있다: {p.stderr or p.stdout}"
+
+
+def test_preflight_confirm_returns_false_without_prompt() -> None:
+    """자동 조치가 꺼져 있으면 묻지 않고 바로 False (블로킹 금지)."""
+    p = _run(
+        {"PREFLIGHT_NO_FIX": "1"},
+        "if (Confirm-PreflightAction 'x') { exit 1 } else { exit 0 }",
+        source_preflight=True,
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+
+
+def test_student_split_requires_student_key() -> None:
+    """분리가 켜지면 학생 키가 필수다.
+
+    deploy.ps1 이 학생 MCP 까지 올리는데, 키가 없으면 배포 도중 멈춘다.
+    이미지 3개를 빌드한 뒤에 죽는 것보다 .env 검사에서 잡는 편이 싸다.
+    """
+    env = dict(VALID)
+    env["SYNC_FOLDER_IDS"] = "f1"
+    env["RAG_CORPUS_NAME_STUDENT"] = "projects/my-proj/locations/asia-northeast3/ragCorpora/stu"
+    env["STUDENT_FOLDER_IDS"] = "f1"
+    p = _run(env, "Require-FullDeployEnv")
+    assert p.returncode != 0
+    assert "MCP_API_KEY_STUDENT" in (p.stderr + p.stdout)
+
+
 def test_ps1_scripts_parse() -> None:
     for name in (
         "deploy.ps1",
@@ -78,6 +171,7 @@ def test_ps1_scripts_parse() -> None:
         "_load_env.ps1",
         "preflight.ps1",
         "setup_alerts.ps1",
+        "share_drive.ps1",
     ):
         path = ROOT / "scripts" / name
         script = (
@@ -99,6 +193,14 @@ def test_ps1_scripts_parse() -> None:
 def test_full_deploy_accepts_real_values() -> None:
     p = _run(VALID, "Require-FullDeployEnv")
     assert p.returncode == 0, p.stderr or p.stdout
+
+
+def test_full_deploy_rejects_empty_sync_folder_ids() -> None:
+    env = dict(VALID)
+    env["SYNC_FOLDER_IDS"] = ""
+    p = _run(env, "Require-FullDeployEnv")
+    assert p.returncode != 0
+    assert "SYNC_FOLDER_IDS" in (p.stderr + p.stdout)
 
 
 def test_full_deploy_rejects_example_env() -> None:
