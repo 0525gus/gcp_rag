@@ -267,6 +267,66 @@ function Test-RagCorpusExists {
   return $false
 }
 
+function Test-RagCorpusUsable {
+  <#
+    .SYNOPSIS
+      코퍼스가 색인을 받을 수 있는 상태인지 본다.
+    .NOTES
+      Test-RagCorpusExists 는 존재만 본다. state 가 ACTIVE 가 아니면 색인이
+      전부 실패하는데 워크플로는 그래도 SUCCEEDED 로 끝나 조용히 빈 코퍼스로
+      남는다 — 배포·백필 전에 여기서 막는다.
+      corpusStatus 가 없는 응답(구 API)은 통과로 본다. 못 읽는 것과
+      비정상인 것을 섞으면 정상 코퍼스까지 배포가 막힌다.
+  #>
+  param([string]$Name, [string]$Token)
+  $loc = Get-RagCorpusLocation $Name
+  if (-not $loc) {
+    return @{ Ok = $false; State = ""; Detail = "코퍼스 경로 형식이 아니다: $Name" }
+  }
+  $headers = @{ Authorization = "Bearer $Token" }
+  $last = ""
+  foreach ($ver in @("v1", "v1beta1")) {
+    $got = Get-JsonUri -Uri "https://${loc}-aiplatform.googleapis.com/${ver}/${Name}" -Headers $headers
+    if (-not $got.Ok) { $last = "HTTP $($got.Code)"; continue }
+    $state = [string]$got.Body.corpusStatus.state
+    if (-not $state) { return @{ Ok = $true; State = "UNKNOWN"; Detail = "" } }
+    if ($state -eq "ACTIVE") { return @{ Ok = $true; State = $state; Detail = "" } }
+    $why = [string]$got.Body.corpusStatus.errorStatus
+    return @{ Ok = $false; State = $state; Detail = ("state=$state $why").Trim() }
+  }
+  return @{ Ok = $false; State = ""; Detail = "조회 실패 ($last)" }
+}
+
+function Get-RagCorpusFileCount {
+  <#
+    .SYNOPSIS
+      코퍼스에 실린 파일 수. 조회 실패는 -1 — 0 과 섞으면 멀쩡한 코퍼스에
+      전체 백필을 다시 걸게 된다.
+    .NOTES
+      용도는 "비었는가" 판정이라 상한($Max)까지만 센다.
+  #>
+  param([string]$Name, [string]$Token, [int]$Max = 2000)
+  $loc = Get-RagCorpusLocation $Name
+  if (-not $loc) { return -1 }
+  $headers = @{ Authorization = "Bearer $Token" }
+  foreach ($ver in @("v1", "v1beta1")) {
+    $count = 0
+    $page = ""
+    $ok = $true
+    while ($count -lt $Max) {
+      $uri = "https://${loc}-aiplatform.googleapis.com/${ver}/${Name}/ragFiles?pageSize=100"
+      if ($page) { $uri = "$uri&pageToken=$page" }
+      $got = Get-JsonUri -Uri $uri -Headers $headers
+      if (-not $got.Ok) { $ok = $false; break }
+      $count += @($got.Body.ragFiles).Where({ $null -ne $_ }).Count
+      $page = [string]$got.Body.nextPageToken
+      if ([string]::IsNullOrWhiteSpace($page)) { break }
+    }
+    if ($ok) { return $count }
+  }
+  return -1
+}
+
 function Test-DocAiProcessor {
   param([string]$Project, [string]$Location, [string]$ProcessorId)
   $id = $ProcessorId

@@ -46,7 +46,10 @@ $MCP_CONCURRENCY = Get-EnvOr MCP_CONCURRENCY "40"
 # 기본 true: FactChat 커넥터가 정적 헤더만 보내므로 Cloud Run IAM 을 열어야 한다.
 # 경계는 앱 계층 키(MCP_API_KEY)뿐이다 — 키가 새면 코퍼스 전량이 열린다.
 $ALLOW_UNAUTH = Get-EnvOr ALLOW_UNAUTH "true"
-$mcpAuthArgs = if ($ALLOW_UNAUTH -eq "true") { @("--allow-unauthenticated") } else { @("--no-allow-unauthenticated") }
+# @(...) 로 감싼다. if 결과를 그냥 담으면 1개짜리 배열이 문자열로 풀리고,
+# 아래 @mcpAuthArgs 스플랫이 그 문자열을 글자 단위로 넘긴다 —
+# gcloud 가 "unrecognized arguments: - a l o w ..." 로 죽었다(실측).
+$mcpAuthArgs = @(if ($ALLOW_UNAUTH -eq "true") { "--allow-unauthenticated" } else { "--no-allow-unauthenticated" })
 $INGEST_CONC = Get-EnvOr INGEST_CONCURRENCY "8"
 $RAG_DEL_PACE = Get-EnvOr RAG_DELETE_PACING_SECONDS "1.1"
 $RAG_DEL_CONC = Get-EnvOr RAG_DELETE_CONCURRENCY "1"
@@ -254,3 +257,33 @@ Write-Host "Done."
 Write-Host "PARSER_URL=$PARSER_URL"
 Write-Host "SYNC_URL=$SYNC_URL"
 Write-Host "MCP_URL=$MCP_URL"
+
+# 배포가 끝났으니 코퍼스가 실제로 찼는지 본다. 비어 있으면 첫 백필을 물어본다.
+# ACTIVE 가 아니면 색인이 통째로 실패하므로 그 사실을 먼저 알린다 —
+# 워크플로는 그래도 SUCCEEDED 로 끝나서 조용히 빈 코퍼스로 남는다.
+$corpusToken = (Get-GcloudText -GcloudArgs @("auth", "print-access-token")).Text.Split("`n")[0].Trim()
+if ($corpusToken) {
+  $usable = Test-RagCorpusUsable -Name $CORPUS -Token $corpusToken
+  if (-not $usable.Ok) {
+    Write-Host ""
+    Write-Host "WARN 코퍼스를 쓸 수 없다: $($usable.Detail)"
+    Write-Host "     이 상태로는 색인이 전부 실패한다. 백필을 걸지 않는다."
+  } else {
+    $files = Get-RagCorpusFileCount -Name $CORPUS -Token $corpusToken
+    Write-Host ""
+    # -1 = 조회 실패. 0 과 섞으면 멀쩡한 코퍼스에 전체 백필을 다시 건다.
+    if ($files -lt 0) {
+      Write-Host "코퍼스 적재량을 확인하지 못했다 — 백필은 걸지 않는다."
+    } else {
+      Write-Host "코퍼스 적재: $files 건"
+    }
+    if ($files -eq 0) {
+      Write-Host "비어 있다 — 첫 적재가 필요하다."
+      if (Confirm-PreflightAction "지금 전체 백필을 실행하시겠습니까? (수 분~수십 분 소요)") {
+        & (Join-Path $PSScriptRoot "backfill.ps1")
+      } else {
+        Write-Host "건너뜀. 나중에: scripts\backfill.ps1"
+      }
+    }
+  }
+}

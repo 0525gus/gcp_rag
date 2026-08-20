@@ -172,6 +172,7 @@ def test_ps1_scripts_parse() -> None:
         "preflight.ps1",
         "setup_alerts.ps1",
         "share_drive.ps1",
+        "backfill.ps1",
     ):
         path = ROOT / "scripts" / name
         script = (
@@ -330,3 +331,37 @@ def test_preflight_fallback_requires_processor() -> None:
     p = _run(env, "Assert-PreflightConfig", source_preflight=True)
     assert p.returncode != 0
     assert "DOCAI_PROCESSOR_ID" in (p.stderr + p.stdout)
+
+
+@pytest.mark.parametrize(
+    ("allow_unauth", "flag"),
+    [("true", "--allow-unauthenticated"), ("false", "--no-allow-unauthenticated")],
+)
+def test_mcp_auth_arg_splats_as_one_whole_flag(allow_unauth: str, flag: str) -> None:
+    """deploy.ps1 의 인증 스위치가 통짜 플래그 하나로 넘어가야 한다.
+
+    if 결과를 그냥 담으면 1개짜리 배열이 문자열로 풀리고, @mcpAuthArgs 스플랫이
+    그 문자열을 글자 단위로 넘긴다 — gcloud 가
+    "unrecognized arguments: - a l o w ..." 로 죽었다(실측, rag-sync 배포 직후).
+    """
+    line = next(
+        ln
+        for ln in (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8").splitlines()
+        if ln.startswith("$mcpAuthArgs")
+    )
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$ALLOW_UNAUTH = '{allow_unauth}'; "
+        f"{line}; "
+        "function Show-Args { $args -join '|' }; "
+        "Write-Output (Show-Args --region=x @mcpAuthArgs --memory=1Gi)"
+    )
+    p = subprocess.run(
+        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    assert p.stdout.strip() == f"--region=x|{flag}|--memory=1Gi"
