@@ -7,7 +7,19 @@
 #
 # --set-env-vars 는 Cloud Run env 를 통째로 치환한다. 안 넘긴 값은 사라진다.
 # DRIVE_IDS / SYNC_FOLDER_IDS 에 콤마가 있어 구분자는 | (^|^...).
+#
+# ---- 1. 환경 로드 · 필수값 검증 (Load-Dotenv, Require-FullDeployEnv) ----
+# ---- 2. gcloud 프로젝트 설정 · API enable ----
+# ---- 3. Artifact Registry 확인/생성 ----
+# ---- 4. 이미지 빌드 · 푸시 (parser → sync → mcp) ----
+# ---- 5. Cloud Run 배포 (rag-parser → rag-sync → MCP 교직원 → (분리 시) MCP 학생) ----
+# ---- 6. 서비스 URL 조회 ----
+# ---- 7. Workflow 배포 (rag-daily-sync) ----
+# ---- 8. Scheduler SA · App Engine 준비 ----
+# ---- 9. Cloud Scheduler job 등록/갱신 (00:00 Asia/Seoul) ----
+# ---- 10. 코퍼스 적재량 확인 · 비어있으면 첫 백필 여부 확인 ----
 
+# ---- 1. 환경 로드 · 필수값 검증 ----
 $ErrorActionPreference = "Stop"
 # describe 실패를 throw 로 올리지 않는다 (없으면 create).
 if ($PSVersionTable.PSVersion.Major -ge 7) {
@@ -65,6 +77,7 @@ $GCS_SOURCE = $env:GCS_SOURCE_BUCKET
 $CORPUS = $env:RAG_CORPUS_NAME
 $DRIVE_IDS = $env:DRIVE_IDS
 
+# ---- 2. gcloud 프로젝트 설정 · API enable ----
 gcloud config set project $PROJECT_ID
 Assert-LastExit
 
@@ -88,6 +101,7 @@ Assert-LastExit
 
 Assert-GcpPrereqs
 
+# ---- 3. Artifact Registry 확인/생성 ----
 Write-Host "== Artifact Registry =="
 gcloud artifacts repositories describe $REPO --location=$REGION 2>$null
 if ($LASTEXITCODE -ne 0) {
@@ -99,6 +113,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $IMAGE_BASE = "$REGION-docker.pkg.dev/$PROJECT_ID/$REPO"
 
+# ---- 4. 이미지 빌드 · 푸시 (parser → sync → mcp) ----
 Write-Host "== Build & push images =="
 gcloud builds submit --config=cloudbuild.parser.yaml --substitutions="_IMAGE=$IMAGE_BASE/parser:latest"
 Assert-LastExit
@@ -107,9 +122,13 @@ Assert-LastExit
 gcloud builds submit --config=cloudbuild.mcp.yaml --substitutions="_IMAGE=$IMAGE_BASE/mcp:latest"
 Assert-LastExit
 
+# ---- 5. Cloud Run 배포 (rag-parser → rag-sync → MCP 교직원 → (분리 시) MCP 학생) ----
 Write-Host "== Deploy Cloud Run =="
 # parser timeout 540 < sync httpx 600. 서버가 먼저 포기해야 sync 가 오류를 받는다.
 # concurrency 4: 요청당 메모리 한계. 넘치는 요청은 새 인스턴스로.
+# min-instances=0 은 기본값과 같지만 명시한다 — 콜드스타트를 감수하겠다는 의도
+# 표시(docs/OPS_DEFERRED.md #7). MCP 응답 지연이 문제되면 MCP 쪽만 1로 올릴 것,
+# sync/parser 는 배치라 0 유지.
 $parserEnv = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|RAG_CORPUS_NAME=$CORPUS|DOCAI_PROCESSOR_ID=$DOCAI|QG_MODE=$QG_MODE|FIRESTORE_DATABASE=$FS_DB|DOC_STATE_COLLECTION=$FS_COL"
 gcloud run deploy rag-parser `
   --image="$IMAGE_BASE/parser:latest" `
@@ -118,7 +137,8 @@ gcloud run deploy rag-parser `
   --set-env-vars=$parserEnv `
   --memory=2Gi --cpu=2 --timeout=$PARSER_TIMEOUT `
   --concurrency=$PARSER_CONCURRENCY `
-  --max-instances=$PARSER_MAX_INSTANCES
+  --max-instances=$PARSER_MAX_INSTANCES `
+  --min-instances=0
 Assert-LastExit
 
 # sync timeout 3600. 워크플로우 스텝(1800s)에 맞추면 안 됨 — backfill 이 토큰을 못 남긴다.
@@ -130,7 +150,8 @@ gcloud run deploy rag-sync `
   --no-allow-unauthenticated `
   --set-env-vars=$syncEnv `
   --memory=2Gi --cpu=2 --timeout=3600 `
-  --concurrency=$SYNC_CONCURRENCY
+  --concurrency=$SYNC_CONCURRENCY `
+  --min-instances=0
 Assert-LastExit
 
 # ALLOW_UNAUTH=true(기본)면 공개 URL 로 올라가 FactChat 이 바로 붙는다.
@@ -141,7 +162,8 @@ gcloud run deploy $MCP_SERVICE `
   --region=$REGION `
   @mcpAuthArgs `
   --set-env-vars=$mcpEnv `
-  --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY
+  --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY `
+  --min-instances=0
 Assert-LastExit
 
 # 학생 분리가 켜져 있으면 학생 MCP 도 같이 올린다. 코퍼스와 키를 학생 값으로
@@ -161,10 +183,12 @@ if ($STUDENT_CORPUS -and $STUDENT_FOLDERS) {
     --region=$REGION `
     @mcpAuthArgs `
     --set-env-vars=$studentMcpEnv `
-    --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY
+    --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY `
+    --min-instances=0
   Assert-LastExit
 }
 
+# ---- 6. 서비스 URL 조회 ----
 $PARSER_URL = gcloud run services describe rag-parser --region=$REGION --format="value(status.url)"
 Assert-LastExit
 $SYNC_URL = gcloud run services describe rag-sync --region=$REGION --format="value(status.url)"
@@ -194,10 +218,12 @@ $innerJson = '{"syncUrl":"' + $SYNC_URL.Trim() + '","parserUrl":"' + $PARSER_URL
 $escaped = $innerJson.Replace("\", "\\").Replace('"', '\"')
 $bodyJson = '{"argument":"' + $escaped + '"}'
 
+# ---- 7. Workflow 배포 (rag-daily-sync) ----
 Write-Host "== Deploy Workflow =="
 gcloud workflows deploy rag-daily-sync --location=$REGION --source=workflows/daily_sync.yaml
 Assert-LastExit
 
+# ---- 8. Scheduler SA · App Engine 준비 ----
 $SCHEDULER_SA = Get-EnvOr SCHEDULER_SA "scheduler@${PROJECT_ID}.iam.gserviceaccount.com"
 Write-Host "== Ensure Scheduler SA / App Engine =="
 gcloud iam service-accounts describe $SCHEDULER_SA --project=$PROJECT_ID 2>$null
@@ -222,6 +248,7 @@ if ($LASTEXITCODE -ne 0) {
   Assert-LastExit
 }
 
+# ---- 9. Cloud Scheduler job 등록/갱신 (00:00 Asia/Seoul) ----
 Write-Host "== Cloud Scheduler (00:00 Asia/Seoul) =="
 $bodyFile = [System.IO.Path]::GetTempFileName()
 try {
@@ -258,6 +285,7 @@ Write-Host "PARSER_URL=$PARSER_URL"
 Write-Host "SYNC_URL=$SYNC_URL"
 Write-Host "MCP_URL=$MCP_URL"
 
+# ---- 10. 코퍼스 적재량 확인 · 비어있으면 첫 백필 여부 확인 ----
 # 배포가 끝났으니 코퍼스가 실제로 찼는지 본다. 비어 있으면 첫 백필을 물어본다.
 # ACTIVE 가 아니면 색인이 통째로 실패하므로 그 사실을 먼저 알린다 —
 # 워크플로는 그래도 SUCCEEDED 로 끝나서 조용히 빈 코퍼스로 남는다.

@@ -73,12 +73,14 @@ if ($ALLOW_UNAUTH -ne "true") {
 
 $envVars = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|RAG_CORPUS_NAME=$($env:RAG_CORPUS_NAME)|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|FIRESTORE_DATABASE=$FS_DB|DOC_STATE_COLLECTION=$FS_COL|MCP_API_KEY=$MCP_API_KEY|TOP_K_DEFAULT=$TOP_K|SEARCH_FETCH_MULTIPLIER=$FETCH_MULT|SEARCH_FETCH_MAX=$FETCH_MAX"
 
+# min-instances=0 은 deploy.ps1 과 같은 값 — 어긋나면 재배포 쪽으로 조용히 뒤집힌다.
 gcloud run deploy $SERVICE `
   --image=$IMAGE `
   --region=$REGION `
   @authArgs `
   --set-env-vars=$envVars `
-  --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY
+  --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY `
+  --min-instances=0
 Assert-LastExit
 
 $MCP_URL = gcloud run services describe $SERVICE --region=$REGION --format="value(status.url)"
