@@ -1,0 +1,3 @@
+dept_config.py 가 DEPARTMENTS_JSON 생성
+deploy.ps1 이 sync 에 전달 + common.yaml 에 미이관 8개
+.env 삭제 + 파이썬 스크립트 전환

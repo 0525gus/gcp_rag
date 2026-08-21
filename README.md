@@ -168,6 +168,22 @@ Copy-Item .env.example .env
 
 검색 파라미터·키만 바꿨으면 이미지 하나만 다시 빌드한다.
 
+**학과별 배포 (권장)** — 설정은 `config/departments/<학과>.yaml` 에서 온다:
+
+```powershell
+.\scripts\deploy_mcp.ps1 -Dept cs                    # 교직원
+.\scripts\deploy_mcp.ps1 -Dept cs -Audience student  # 학생
+.\scripts\deploy_mcp.ps1 -All                        # 전 학과 x 양쪽
+```
+
+- `-Dept` 를 쓰면 **`.env` 를 읽지 않는다** — 코퍼스·키·버킷 모두 학과 yaml 이 원본
+- `-All` 은 이미지를 **한 번만** 빌드하고 같은 digest 를 전 학과에 배포한다.
+  학과마다 빌드하면 requirements 가 범위 지정이라 학과별로 다른 의존성이 잡힐 수 있다
+- 요약표의 키는 기본으로 가려진다. 필요하면 `-ShowKeys`
+- 자세한 것은 [config/departments/README.md](config/departments/README.md)
+
+**레거시 (`.env` 기반, 학과 개념 없음)**:
+
 ```powershell
 .\scripts\deploy_mcp.ps1                                # 교직원
 $env:MCP_AUDIENCE = "student"; .\scripts\deploy_mcp.ps1   # 학생
@@ -175,6 +191,7 @@ Remove-Item Env:MCP_AUDIENCE
 ```
 
 - 마지막 줄 잊지 말 것 — 남아 있으면 다음 실행도 학생으로 간다
+- `deploy.ps1`(parser·sync·Workflows)은 아직 이쪽만 지원한다
 
 ### 3) FactChat 커넥터
 

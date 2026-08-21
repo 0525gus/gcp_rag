@@ -1,0 +1,37 @@
+# 템플릿. cp 후 <학과>.yaml 로 저장.
+# 파일명 = 학과 코드. 서비스: rag-mcp-{학과}-{staff|student}
+# 배포: .\scripts\deploy_mcp.ps1 -Dept <학과>
+
+name: 학과 이름
+
+# staff ≠ student. 같으면 배포 거부.
+corpora:
+  staff: projects/PROJECT/locations/asia-northeast3/ragCorpora/CHANGE_ME
+  student: projects/PROJECT/locations/asia-northeast3/ragCorpora/CHANGE_ME
+
+# 추측 불가·서로 다른 값. python -c "import secrets;print(secrets.token_urlsafe(32))"
+keys:
+  staff: CHANGE_ME
+  student: CHANGE_ME
+
+# 학과마다 따로 만든다. 이름은 GCS 전역 유일 — 프로젝트명을 접미사로.
+#   gcloud storage buckets create gs://NAME --location=asia-northeast3
+# 짝으로 적을 것(한쪽만이면 거부). 생략하면 common.yaml 공용 버킷 상속.
+# 나중에 나누면 코퍼스 재import 가 붙으니 처음부터 따로 둘 것.
+buckets:
+  hwpOriginal: rag-DEPT-hwp-PROJECT
+  source: rag-DEPT-source-PROJECT
+
+# rag-sync 전용. studentFolderIds ⊆ syncFolderIds.
+drive:
+  driveIds:
+    - SHARED_DRIVE_ID
+  syncFolderIds:
+    - FOLDER_ID
+  studentFolderIds:
+    - FOLDER_ID
+
+# 0 = cold start 감수. 1 = 상주.
+minInstances:
+  staff: 0
+  student: 0

@@ -19,9 +19,14 @@ class _Settings:
     rag_corpus_name_student = ""
     ingest_concurrency = 1
     gcp_project_id = "project"
+    gcp_region = "asia-northeast3"
     gcs_source_bucket = "src-bkt"
     rag_chunk_size = 1024
     rag_chunk_overlap = 256
+    # 복구 경로가 이제 **이 설정으로** RagEngineClient 를 만든다.
+    # 예전에는 인자 없이 만들어 전역 기본 코퍼스를 봤다 — 학과를 갈라 놓고도
+    # 전부 한 코퍼스로 들어가던 원인이다.
+    rag_corpus_name = "corpus-under-test"
 
 
 class _LockableStore:
@@ -60,7 +65,14 @@ class _BackfillDrive:
 
 
 class _NoopRag:
-    """백필 시작 시의 기존 청크 일괄 제거 (코퍼스 1회 순회)."""
+    """백필 시작 시의 기존 청크 일괄 제거 (코퍼스 1회 순회).
+
+    백필은 이제 학과(=드라이브) 설정을 넘겨 클라이언트를 만든다
+    (`RagEngineClient(settings)`) — 안 넘기면 전역 기본 코퍼스를 보게 된다.
+    """
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        pass
 
     def delete_files_by_ids(self, _file_ids: list[str]) -> int:
         return 0
@@ -259,6 +271,10 @@ def test_backfill_does_not_delete_chunks_of_documents_it_will_not_reimport(
     imported: list[list[str]] = []
 
     class _Rag:
+        # 백필이 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
         def delete_files_by_ids(self, file_ids: list[str]) -> int:
             deleted.append(sorted(file_ids))
             return len(file_ids)
@@ -356,6 +372,10 @@ def test_index_gcs_does_not_mark_state_on_incomplete_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeRag:
+        # index-gcs 가 학과(=드라이브)별 클라이언트를 만든다 — RagEngineClient(settings).
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
         def delete_files_by_ids(self, _file_ids: list[str]) -> int:
             return 0
 
@@ -390,6 +410,10 @@ def test_index_gcs_stops_when_predelete_fails(
     calls: list[str] = []
 
     class FakeRag:
+        # index-gcs 가 학과(=드라이브)별 클라이언트를 만든다 — RagEngineClient(settings).
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
         def delete_files_by_ids(self, _file_ids: list[str]) -> int:
             calls.append("delete")
             raise RuntimeError("delete unavailable")
@@ -432,6 +456,13 @@ def test_reindex_failure_is_counted_for_threshold_and_final_flush(
     class FailingRag:
         def import_from_gcs(self, _uris: list[str]) -> list[str]:
             raise RuntimeError("RAG unavailable")
+
+        # 복구·색인 경로가 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
+
+        def __init__(self, *_a: object, **_kw: object) -> None:
+
+            pass
+
 
         def delete_files_by_ids(self, _file_ids: list[str]) -> int:
             # 사전 일괄 삭제는 성공하고 import 만 실패하는 상황을 만든다.

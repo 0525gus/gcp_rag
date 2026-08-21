@@ -1,0 +1,26 @@
+# 공통 배포값.
+#
+# 우선순위: 셸 환경변수 > config/departments/<학과>.yaml > 이 파일 > .env > 코드 기본값
+#   - 학과 파일이 같은 키를 쓰면 그쪽이 이긴다
+#
+# 키 이름은 서비스가 읽는 환경변수명과 1:1 로 맞춘다.
+
+GCP_PROJECT_ID: constant-cubist-506002-h7
+GCP_REGION: asia-northeast3
+ARTIFACT_REPO: rag-mcp
+
+GCS_HWP_ORIGINAL_BUCKET: test-rag-hwp-bkt
+GCS_SOURCE_BUCKET: test-rag-source-bkt
+
+FIRESTORE_DATABASE: rag-sync-state
+DOC_STATE_COLLECTION: doc_state
+
+# 검색 튜닝. 근거는 shared/config.py 주석 참고
+TOP_K_DEFAULT: 5
+SEARCH_FETCH_MULTIPLIER: 3
+SEARCH_FETCH_MAX: 60
+
+MCP_CONCURRENCY: 40
+# true 여야 FactChat 커넥터가 붙는다(정적 헤더만 보내므로).
+# 이때 경계는 앱 계층 키 하나뿐이다 — 키가 새면 그 학과 그 코퍼스가 열린다.
+ALLOW_UNAUTH: true

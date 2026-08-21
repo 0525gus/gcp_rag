@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def _env(key: str, default: str | None = None) -> str:
@@ -31,6 +36,80 @@ def _env_bool(key: str, default: bool = False) -> bool:
     return raw.lower() in ("1", "true", "yes")
 
 
+class UnknownDriveError(RuntimeError):
+    """학과 맵이 있는데 이 드라이브가 거기 없다.
+
+    조용히 기본 코퍼스로 떨어뜨리면 **남의 학과 자료가 섞인다.** 그건 되돌리려면
+    코퍼스에서 파일을 골라 지워야 하는 사고라, 모르는 드라이브는 처리하지 않고
+    소리를 낸다. 호출부가 그 드라이브만 건너뛰고 나머지를 계속 돌리면 된다.
+    """
+
+
+@dataclass(frozen=True)
+class Department:
+    """학과 하나. 공유 드라이브가 곧 학과 경계다.
+
+    드라이브가 학과마다 다르므로 `driveId` 가 학과 키가 된다 — doc_state 에
+    이미 driveId 가 있어서 문서에 학과 필드를 따로 둘 필요가 없다.
+    (같은 드라이브를 여러 학과가 나눠 쓰면 이 전제가 깨진다. 그때는
+    sync_tokens 커서도 드라이브 단위라 학과별 sync 자체가 성립하지 않는다.)
+    """
+
+    code: str
+    drive_ids: tuple[str, ...] = ()
+    staff_corpus: str = ""
+    student_corpus: str = ""
+    hwp_bucket: str = ""
+    source_bucket: str = ""
+    student_folder_ids: tuple[str, ...] = ()
+    sync_folder_ids: tuple[str, ...] = ()
+
+
+def _departments_from_json(raw: str) -> tuple[Department, ...]:
+    """DEPARTMENTS_JSON 파싱. 깨졌으면 **비운다**(=단일 학과 동작).
+
+    여기서 예외를 올리면 설정 오타 하나로 sync 가 기동조차 못 한다. 반대로
+    잘못된 맵을 반쯤 들고 도는 것이 더 위험하므로, 파싱 실패는 전부 버리고
+    경고를 남긴 뒤 기존 단일 코퍼스 경로로 간다.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        logger.exception("DEPARTMENTS_JSON 파싱 실패 — 단일 학과로 동작한다")
+        return ()
+    if not isinstance(data, dict):
+        logger.error("DEPARTMENTS_JSON 이 매핑이 아니다 — 단일 학과로 동작한다")
+        return ()
+
+    def _tuple(v: object) -> tuple[str, ...]:
+        if isinstance(v, str):
+            return tuple(x.strip() for x in v.split(",") if x.strip())
+        if isinstance(v, (list, tuple)):
+            return tuple(str(x).strip() for x in v if str(x).strip())
+        return ()
+
+    out = []
+    for code, d in data.items():
+        if not isinstance(d, dict):
+            continue
+        out.append(
+            Department(
+                code=str(code),
+                drive_ids=_tuple(d.get("driveIds")),
+                staff_corpus=str(d.get("staffCorpus") or ""),
+                student_corpus=str(d.get("studentCorpus") or ""),
+                hwp_bucket=str(d.get("hwpBucket") or ""),
+                source_bucket=str(d.get("sourceBucket") or ""),
+                student_folder_ids=_tuple(d.get("studentFolderIds")),
+                sync_folder_ids=_tuple(d.get("syncFolderIds")),
+            )
+        )
+    return tuple(out)
+
+
 @dataclass(frozen=True)
 class Settings:
     gcp_project_id: str
@@ -54,6 +133,10 @@ class Settings:
     # 공유 드라이브 내부에서 RAG/GCS 대상 폴더만. 배포는 필수(비우면 거부).
     # 런타임에 비면 드라이브 전체 — 테스트/우회용이지 운영 기본이 아니다.
     sync_folder_ids: str = ""
+
+    # 학과 맵. 비어 있으면 **지금까지와 똑같이** 단일 학과로 동작한다 —
+    # 이 필드가 도입돼도 기존 배포가 달라지지 않게 하는 장치다.
+    departments: tuple[Department, ...] = ()
 
     # 이 폴더 트리 아래 문서만 학생 코퍼스에 실린다. sync_folder_ids 의 부분집합이며
     # 여기 없는 문서는 전부 교직원 전용이다(판정 불가도 교직원 — 안전한 쪽).
@@ -178,6 +261,45 @@ class Settings:
         """
         return bool(self.rag_corpus_name_student and self.student_folder_id_list)
 
+    def department_for_drive(self, drive_id: str) -> Department | None:
+        if not self.departments:
+            return None
+        for d in self.departments:
+            if drive_id in d.drive_ids:
+                return d
+        return None
+
+    def for_drive(self, drive_id: str) -> Settings:
+        """이 드라이브(=학과)용 설정으로 바꾼 사본.
+
+        핸들러 진입점에서 한 번만 갈아끼우면 그 아래 호출들(RagEngineClient,
+        GcsClient, 폴더 스코프)이 전부 학과 값을 쓴다 — 25곳을 각각 고치지
+        않아도 되는 이유다.
+
+        학과가 값을 안 적었으면 공용값(common.yaml)을 그대로 둔다. 기존 학과를
+        옮기지 않고 새 학과만 자기 버킷을 갖는 이관 방식을 그대로 따른다.
+        """
+        if not self.departments:
+            return self
+        dept = self.department_for_drive(drive_id)
+        if dept is None:
+            raise UnknownDriveError(f"학과 맵에 없는 드라이브: {drive_id}")
+
+        changed: dict[str, Any] = {}
+        if dept.staff_corpus:
+            changed["rag_corpus_name"] = dept.staff_corpus
+        if dept.student_corpus:
+            changed["rag_corpus_name_student"] = dept.student_corpus
+        if dept.hwp_bucket:
+            changed["gcs_hwp_original_bucket"] = dept.hwp_bucket
+        if dept.source_bucket:
+            changed["gcs_source_bucket"] = dept.source_bucket
+        if dept.student_folder_ids:
+            changed["student_folder_ids"] = ",".join(dept.student_folder_ids)
+        if dept.sync_folder_ids:
+            changed["sync_folder_ids"] = ",".join(dept.sync_folder_ids)
+        return replace(self, **changed) if changed else self
+
     @classmethod
     def from_env(cls) -> Settings:
         mode = os.environ.get("QG_MODE", "log").strip().lower()
@@ -200,6 +322,9 @@ class Settings:
             drive_ids=os.environ.get("DRIVE_IDS", ""),
             sync_folder_ids=os.environ.get("SYNC_FOLDER_IDS", ""),
             student_folder_ids=os.environ.get("STUDENT_FOLDER_IDS", ""),
+            departments=_departments_from_json(
+                os.environ.get("DEPARTMENTS_JSON", "")
+            ),
             qg_density_threshold=_env_float("QG_DENSITY_THRESHOLD", 0.0005),
             qg_table_loss_ratio=_env_float("QG_TABLE_LOSS_RATIO", 0.3),
             qg_min_text_length=_env_int("QG_MIN_TEXT_LENGTH", 20),

@@ -34,3 +34,6 @@ sample/*
 tests/_bench_out/_tmp*
 # 벤치 중간 산출물(36MB) — 근거 데이터(csv/json)만 추적한다
 tests/_bench_out/_tmp/
+
+# 학과 실설정 — 코퍼스 ID 와 MCP 키가 들어간다. 템플릿(*.yaml.example)만 추적한다
+config/departments/*.yaml

@@ -28,7 +28,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from shared.config import Settings, get_settings  # noqa: E402
+from shared.config import Settings, UnknownDriveError, get_settings  # noqa: E402
 from shared.drive import DriveClient, parse_drive_size  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.gcs import GcsClient, gs_uri  # noqa: E402
@@ -287,7 +287,7 @@ def backfill(body: BackfillBody) -> dict[str, Any]:
     """초기 셋업용 파일 목록만 반환 (소량/디버그). 대량은 /sync/backfill-run 사용."""
     store = DocStateStore()
     drive = DriveClient()
-    settings = get_settings()
+    settings = _settings_for_drive(get_settings(), body.drive_id)
     logger.info(
         "backfill list drive=%s folders=%s force=%s",
         body.drive_id,
@@ -337,7 +337,7 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    settings = get_settings()
+    settings = _settings_for_drive(get_settings(), body.drive_id)
     drive = DriveClient()
     # Firestore/Storage 클라이언트는 스레드 안전하므로 워커들이 공유한다.
     gcs = GcsClient(settings)
@@ -384,7 +384,7 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     # 빠져 재import 되지 않으므로, 미리 지운 청크가 그대로 유실된다 — 그러고도
     # totals 는 unchanged 로 세고 ok=true 로 보고했다. 삭제는 import 하는 배치에서만
     # 한다(_import_and_mark). 클라이언트를 공유해 코퍼스 순회는 1회로 유지한다.
-    rag = RagEngineClient()
+    rag = RagEngineClient(settings)
 
     def _take_batch(min_size: int) -> tuple[list[str], list[str]] | None:
         """조건을 만족하면 대기열을 통째로 떼어 온다. 반드시 lock 밖에서 import 할 것."""
@@ -549,7 +549,7 @@ def list_changes(body: ChangesBody) -> dict[str, Any]:
     """
     store = DocStateStore()
     drive = DriveClient()
-    settings = get_settings()
+    settings = _settings_for_drive(get_settings(), body.drive_id)
     folder_ids = settings.sync_folder_id_list
     token = store.get_start_page_token(body.drive_id)
     if not token:
@@ -682,7 +682,10 @@ def _cleanup_out_of_scope_file(
     hwp_original_deleted = 0
     try:
         # False means no matching RAG file remained, which is an idempotent success.
-        rag_deleted = RagEngineClient().delete_by_file_id(file_id)
+        # **settings 를 넘긴다.** 인자를 빼면 전역 기본 코퍼스를 지우게 되어,
+        # 학과를 갈라 놓아도 교직원 쪽 문서는 실제 코퍼스에 그대로 남는다
+        # (바로 아래 학생 코퍼스는 처음부터 settings 를 쓰고 있었다 — 비대칭이었다).
+        rag_deleted = RagEngineClient(settings).delete_by_file_id(file_id)
     except Exception as exc:
         failures.append(exc)
         logger.exception("out-of-scope RAG cleanup failed: %s", file_id)
@@ -727,7 +730,7 @@ def ingest(body: IngestBody) -> dict[str, Any]:
     if not body.file_id.strip():
         raise HTTPException(status_code=400, detail="fileId is required")
 
-    settings = get_settings()
+    settings = _settings_for_drive(get_settings(), body.drive_id)
     return _ingest_with(
         body,
         store=DocStateStore(),
@@ -1709,6 +1712,116 @@ def _sync_student_corpus(
     }
 
 
+def _group_docs_by_drive(
+    targets: list[DocState], settings: Settings
+) -> list[tuple[Settings, list[DocState]]]:
+    """복구 대상을 학과(=드라이브)별로 가른다.
+
+    `_split_by_drive` 와 달리 Firestore 를 다시 안 읽는다 — DocState 가 이미
+    driveId 를 들고 있다(문서 200건이면 조회 200번을 아낀다).
+
+    driveId 가 비었거나 학과 맵에 없는 문서는 **버린다.** 어느 코퍼스·어느
+    버킷인지 모르는 채 전역 기본값으로 처리하면 남의 학과에 섞이거나, 없는
+    버킷을 뒤져 DLQ 로 보낸다. 안 건드리면 다음 주기가 다시 집는다.
+    (doc_state 가 유실된 문서는 driveId 없이 stub 으로 만들어질 수 있다 —
+     DocStateStore.mark_indexed 의 경고 참고.)
+    """
+    if not getattr(settings, "departments", ()):
+        return [(settings, targets)]
+
+    groups: dict[str, list[DocState]] = {}
+    dropped: list[str] = []
+    for doc in targets:
+        drive_id = doc.drive_id or ""
+        if not drive_id or settings.department_for_drive(drive_id) is None:
+            dropped.append(doc.file_id)
+            continue
+        groups.setdefault(drive_id, []).append(doc)
+    if dropped:
+        logger.warning(
+            "학과 판정 불가로 복구 보류 %s건: %s", len(dropped), dropped[:10]
+        )
+    return [(settings.for_drive(d), docs) for d, docs in groups.items()]
+
+
+def _merge_outcomes(a: ImportOutcome, b: ImportOutcome) -> ImportOutcome:
+    """학과별로 나눠 import 한 결과를 하나로 합친다.
+
+    ok 는 **모든 부분이 성공했을 때만** True 다. 한 학과라도 부분 실패면
+    워크플로의 커밋 조건(indexed == uris)이 안 맞아 pageToken 이 안 넘어가고,
+    다음 주기가 같은 변경을 재생한다 — 그게 의도된 동작이다.
+    """
+    return ImportOutcome(
+        uris=a.uris + b.uris,
+        imported=a.imported + b.imported,
+        failed=a.failed + b.failed,
+        skipped=a.skipped + b.skipped,
+    )
+
+
+def _settings_for_drive(base: Settings, drive_id: str | None) -> Settings:
+    """이 드라이브(=학과)용 설정. 학과 맵이 비면 그대로 돌려준다.
+
+    모르는 드라이브는 UnknownDriveError 를 그대로 올린다 — 기본 코퍼스로
+    떨어뜨리면 남의 학과 자료가 섞이고, 되돌리려면 코퍼스에서 파일을 골라
+    지워야 한다. 호출부가 그 드라이브만 건너뛰고 나머지를 계속 돌리면 된다.
+    """
+    # getattr 인 이유: 테스트·스크립트가 넘기는 가벼운 설정 대역에는 이 필드가
+    # 없다. 없으면 '학과 맵 없음' = 기존 단일 코퍼스 동작으로 본다.
+    if not getattr(base, "departments", ()):
+        return base
+    if not drive_id:
+        raise UnknownDriveError("driveId 없이 학과를 정할 수 없다")
+    return base.for_drive(drive_id)
+
+
+def _split_by_drive(
+    store: DocStateStore,
+    gcs_uris: list[str],
+    file_ids: list[str],
+    settings: Settings,
+) -> list[tuple[Settings, list[str], list[str]]]:
+    """URI·fileId 를 학과(=드라이브)별로 가른다.
+
+    학과 맵이 없으면 통째로 하나 — 기존 동작 그대로다. 있으면 doc_state 의
+    driveId 로 나눈다. **driveId 를 모르는 문서는 버린다**: 어느 코퍼스로 갈지
+    모르는 채 기본 코퍼스에 넣으면 남의 학과에 섞이기 때문이다(그쪽이 더 비싼
+    사고다 — 안 넣으면 다음 주기가 다시 집는다).
+    """
+    if not getattr(settings, "departments", ()):
+        return [(settings, gcs_uris, file_ids)]
+
+    groups: dict[str, tuple[list[str], list[str]]] = {}
+    dropped: list[str] = []
+
+    def _bucket(fid: str) -> tuple[list[str], list[str]] | None:
+        state = store.get(fid)
+        drive_id = state.drive_id if state else ""
+        if not drive_id or settings.department_for_drive(drive_id) is None:
+            dropped.append(fid)
+            return None
+        return groups.setdefault(drive_id, ([], []))
+
+    for uri in gcs_uris:
+        fid = extract_file_id(uri)
+        g = _bucket(fid)
+        if g is not None:
+            g[0].append(uri)
+    for fid in file_ids:
+        g = _bucket(fid)
+        if g is not None and fid not in g[1]:
+            g[1].append(fid)
+
+    if dropped:
+        logger.warning(
+            "학과 판정 불가로 색인 보류 %s건: %s", len(dropped), sorted(set(dropped))[:10]
+        )
+    return [
+        (settings.for_drive(drive_id), uris, ids)
+        for drive_id, (uris, ids) in groups.items()
+    ]
+
+
 def _import_and_mark(
     store: DocStateStore,
     gcs_uris: list[str],
@@ -1776,12 +1889,25 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
     # 기존 청크 제거는 _import_and_mark 안에서 import 바로 앞에 한다. 여기서 한 번
     # 더 지우면 같은 배치에 코퍼스를 두 번 순회하게 된다.
     # 부분 실패면 INDEXED 로 올리지 않고 PARSED 로 남는다(회수 경로 유지).
-    outcome = _import_and_mark(store, body.gcs_uris, file_ids)
+    #
+    # 이 엔드포인트만 요청에 driveId 가 없다(URI 목록만 받는다). 그래서 학과는
+    # doc_state 의 driveId 로 되짚어 **학과별로 갈라서** import 한다 — 안 가르면
+    # 전부 전역 기본 코퍼스로 들어가 학과가 둘 이상인 순간 서로 섞인다.
+    # 학과 맵이 비면 그룹이 하나뿐이라 예전과 동일한 경로다.
+    outcome = ImportOutcome(uris=[], imported=0, failed=0, skipped=0)
+    student: dict[str, Any] = {"enabled": False}
+    for dept_settings, uris, ids in _split_by_drive(
+        store, body.gcs_uris, file_ids, settings
+    ):
+        part = _import_and_mark(
+            store, uris, ids, rag=RagEngineClient(dept_settings)
+        )
+        outcome = _merge_outcomes(outcome, part)
 
-    # 교직원 코퍼스가 끝난 뒤에 학생 코퍼스를 맞춘다. 순서가 중요하다 — 학생
-    # 코퍼스가 실패해도 교직원 쪽 색인과 doc_state 는 이미 확정돼 있어야
-    # 다음 배치가 같은 일을 처음부터 다시 하지 않는다.
-    student = _sync_student_corpus(body.gcs_uris, file_ids, settings, store)
+        # 교직원 코퍼스가 끝난 뒤에 학생 코퍼스를 맞춘다. 순서가 중요하다 — 학생
+        # 코퍼스가 실패해도 교직원 쪽 색인과 doc_state 는 이미 확정돼 있어야
+        # 다음 배치가 같은 일을 처음부터 다시 하지 않는다.
+        student = _sync_student_corpus(uris, ids, dept_settings, store)
 
     return {
         # 하위 호환: 예전부터 '보낸 URI 목록'이었다. 성공 목록이 아니다.
@@ -1922,50 +2048,23 @@ def _run_reindex_job(job_id: str, body: ReindexPendingBody) -> None:
         _job_set(job_id, status="FAILED", error=str(exc)[:1000])
 
 
-def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
-    settings = get_settings()
-    store = DocStateStore()
+def _reindex_group(
+    body: ReindexPendingBody,
+    settings: Settings,
+    store: DocStateStore,
+    targets: list[DocState],
+    totals: dict[str, int],
+) -> None:
+    """한 학과분 재색인. totals 는 그룹들이 함께 누적한다."""
     # 문서마다 storage.Client 를 새로 만들면 200건에 200번 만든다 — 한 번만.
     gcs = GcsClient(settings)
-
-    targets: list[DocState] = []
-    if body.force:
-        # stream 제한 — status 필터 두 번
-        targets.extend(
-            store.list_by_status(
-                DocStatus.PARSED,
-                limit=body.limit,
-                cursor_key="reindex-pending",
-            )
-        )
-        remain = body.limit - len(targets)
-        if remain > 0:
-            targets.extend(
-                store.list_by_status(
-                    DocStatus.INDEXED,
-                    limit=remain,
-                    cursor_key="reindex-pending",
-                )
-            )
-    else:
-        targets = store.list_by_status(
-            DocStatus.PARSED,
-            limit=body.limit,
-            cursor_key="reindex-pending",
-        )
-
     pending_uris: list[str] = []
     pending_ids: list[str] = []
-    totals = {
-        "candidates": len(targets),
-        "withUris": 0,
-        "indexed": 0,
-        "skippedNoUri": 0,
-        "failed": 0,
-    }
 
-    # run 전체가 공유 → 코퍼스 순회는 첫 배치에서 1회.
-    rag = RagEngineClient()
+    # 그룹(=학과) 전체가 공유 → 코퍼스 순회는 첫 배치에서 1회.
+    # **settings 를 반드시 넘긴다.** 안 넘기면 전역 기본 코퍼스를 보게 되어
+    # 학과를 갈라 놓고도 전부 한 코퍼스로 들어간다.
+    rag = RagEngineClient(settings)
 
     def flush() -> None:
         nonlocal pending_uris, pending_ids
@@ -2045,6 +2144,54 @@ def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
         totals["failed"] += len(pending_uris)
         pending_uris, pending_ids = [], []
 
+
+
+def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
+    base_settings = get_settings()
+    store = DocStateStore()
+
+    targets: list[DocState] = []
+    if body.force:
+        # stream 제한 — status 필터 두 번
+        targets.extend(
+            store.list_by_status(
+                DocStatus.PARSED,
+                limit=body.limit,
+                cursor_key="reindex-pending",
+            )
+        )
+        remain = body.limit - len(targets)
+        if remain > 0:
+            targets.extend(
+                store.list_by_status(
+                    DocStatus.INDEXED,
+                    limit=remain,
+                    cursor_key="reindex-pending",
+                )
+            )
+    else:
+        targets = store.list_by_status(
+            DocStatus.PARSED,
+            limit=body.limit,
+            cursor_key="reindex-pending",
+        )
+
+    totals = {
+        "candidates": len(targets),
+        "withUris": 0,
+        "indexed": 0,
+        "skippedNoUri": 0,
+        "failed": 0,
+    }
+
+    # 학과(=드라이브)별로 갈라 돌린다. 복구 대상은 status 로만 뽑히므로
+    # (list_by_status 에 드라이브 필터가 없다) 전 학과가 한 배치에 섞여 있다.
+    # 그대로 돌리면 (1) 전역 기본 코퍼스에 전부 넣고 (2) 전역 버킷에서 URI 를
+    # 찾아 학과 버킷 문서를 전부 skippedNoUri → DLQ 로 보낸다.
+    # 학과 맵이 비면 그룹이 하나뿐이라 예전과 같은 경로다.
+    for dept_settings, group in _group_docs_by_drive(targets, base_settings):
+        _reindex_group(body, dept_settings, store, group, totals)
+
     logger.info("reindex-pending done totals=%s", totals)
     # skippedNoUri 는 failed 에도 함께 더해지므로 따로 조건에 넣을 필요가 없다.
     return {
@@ -2095,9 +2242,23 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
     # discovery build 가 문서 수만큼 돌고, parents/name 캐시가 인스턴스 단위라
     # 같은 폴더의 조상을 문서마다 다시 조회한다. run 당 하나씩만 만든다.
     # 회수할 게 없는 날(대부분)에는 아예 만들지 않는다.
-    settings = get_settings() if targets else None
-    gcs = GcsClient(settings) if targets else None
+    base_settings = get_settings() if targets else None
     drive = DriveClient() if targets else None
+
+    # 회수 대상은 status 로만 뽑혀 전 학과가 섞여 있다. **쓰기 버킷**이 문제다 —
+    # 전역 settings 로 재적재하면 ee 원본이 cs 버킷에 저장되고, 이후 재색인은
+    # ee 버킷을 뒤지므로 못 찾아 다시 DLQ 로 돌아온다(회수 장치가 무한 루프).
+    # 코퍼스 쪽은 flush() 가 index_gcs() 를 거치므로 거기서 이미 갈라진다.
+    #
+    # GcsClient 는 학과당 하나만 만든다 — 문서마다 만들면 limit 100 에 100개다.
+    _dept_cache: dict[str, tuple[Settings, Any]] = {}
+
+    def _dept_ctx(drive_id: str) -> tuple[Settings, Any]:
+        key = drive_id or ""
+        if key not in _dept_cache:
+            dept_settings = _settings_for_drive(base_settings, drive_id)
+            _dept_cache[key] = (dept_settings, GcsClient(dept_settings))
+        return _dept_cache[key]
 
     totals = {
         "candidates": len(targets),
@@ -2134,6 +2295,15 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
     for doc in targets:
         if store.get_dlq_attempts(doc.file_id) >= body.max_attempts:
             totals["exhausted"] += 1
+            continue
+
+        try:
+            settings, gcs = _dept_ctx(doc.drive_id)
+        except UnknownDriveError:
+            # 어느 학과인지 모르는 채 재적재하면 남의 버킷에 쓴다. 시도 횟수도
+            # 올리지 않는다 — 설정이 고쳐지면 그대로 회수되어야 한다.
+            logger.warning("학과 판정 불가로 회수 보류: %s", doc.file_id)
+            totals["stillFailed"] += 1
             continue
 
         store.record_dlq_attempt(doc.file_id)
@@ -2211,7 +2381,20 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
 @app.post("/sync/delete")
 def delete_file(body: DeleteBody) -> dict[str, Any]:
     store = DocStateStore()
+
+    # 엉뚱한 코퍼스·버킷을 지우면 아무 일도 안 일어난다 — Drive 에서 지운 문서가
+    # 계속 검색되는, 가장 알아채기 어려운 형태의 잔존이 된다.
+    # 워크플로는 driveId 를 항상 넘긴다(daily_sync.yaml 의 do_delete). 수동 호출로
+    # 빠졌을 때만 doc_state 에서 되짚는다.
     settings = get_settings()
+    if getattr(settings, "departments", ()):
+        drive_id = body.drive_id or ""
+        if not drive_id:
+            # 맵이 있을 때만 되짚는다 — 없으면 결과가 같은데 삭제마다 Firestore
+            # 읽기가 한 번씩 더 늘 뿐이다.
+            state = store.get(body.file_id)
+            drive_id = state.drive_id if state else ""
+        settings = _settings_for_drive(settings, drive_id)
     gcs = GcsClient(settings)
 
     ok = RagEngineClient(settings).delete_by_file_id(body.file_id)

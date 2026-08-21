@@ -226,9 +226,21 @@ Assert-LastExit
 # ---- 8. Scheduler SA · App Engine 준비 ----
 $SCHEDULER_SA = Get-EnvOr SCHEDULER_SA "scheduler@${PROJECT_ID}.iam.gserviceaccount.com"
 Write-Host "== Ensure Scheduler SA / App Engine =="
+# 이메일이 다른 프로젝트를 가리키면 조용히 어긋난다: describe 는 "없다" 하고
+# create 는 ALREADY_EXISTS 로 터진다(실측 — .env 에 예시값이 남아 있던 경우).
+# 예전에는 describe 가 전체 이메일을, create 가 하드코딩 "scheduler" 를 봐서
+# 확인 대상과 생성 대상이 아예 달랐다. 계정 ID 는 이메일에서 뽑아 하나로 쓴다.
+# 이 스크립트는 SA 를 $PROJECT_ID 안에만 만들므로 도메인도 거기로 맞춘다.
+$SCHEDULER_SA_ID = ($SCHEDULER_SA -split "@")[0]
+$SCHEDULER_SA_EXPECTED = "${SCHEDULER_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+if ($SCHEDULER_SA -ne $SCHEDULER_SA_EXPECTED) {
+  Write-Host "!! SCHEDULER_SA 가 $PROJECT_ID 밖을 가리킨다 ($SCHEDULER_SA)"
+  Write-Host "   $SCHEDULER_SA_EXPECTED 로 진행한다 — .env 를 고칠 것"
+  $SCHEDULER_SA = $SCHEDULER_SA_EXPECTED
+}
 gcloud iam service-accounts describe $SCHEDULER_SA --project=$PROJECT_ID 2>$null
 if ($LASTEXITCODE -ne 0) {
-  gcloud iam service-accounts create scheduler `
+  gcloud iam service-accounts create $SCHEDULER_SA_ID `
     --display-name="RAG daily sync scheduler" `
     --project=$PROJECT_ID
   Assert-LastExit
