@@ -8,7 +8,7 @@
 # 사용: .\scripts\preflight.ps1
 # deploy.ps1 이 API enable 뒤에 호출한다. 건너뛰려면 $env:SKIP_PREFLIGHT = "1"
 #
-# _load_env.ps1 의 Require-FullDeployEnv 는 .env 문자열만 본다.
+# _load_env.ps1 의 Require-FullDeployEnv 는 config 문자열만 본다.
 # 여기가 버킷·DB·코퍼스·(가능하면) Drive 공유의 실존을 본다.
 
 function Test-RagCorpusNameFormat {
@@ -542,8 +542,7 @@ if ($MyInvocation.InvocationName -ne '.') {
   }
   Set-Location (Split-Path -Parent $PSScriptRoot)
   . (Join-Path $PSScriptRoot "_load_env.ps1")
-  Load-Dotenv
-  if (-not $env:MCP_API_KEY) { $env:MCP_API_KEY = $env:MCP_API_KEY_STAFF }
+  Set-BaseDeployConfig | Out-Null
   Require-FullDeployEnv
   Assert-GcpPrereqs
 }

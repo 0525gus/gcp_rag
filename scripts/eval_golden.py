@@ -5,10 +5,13 @@ Vertex retrieveContexts 를 직접 부르면 거리 임계값·어휘 재정렬�
 그쪽을 잰다.
 
 사용:
-    export MCP_URL=https://<서비스>/mcp
-    export MCP_API_KEY=<키>
-    python scripts/eval_golden.py tests/golden50.json
+    $env:MCP_URL = "https://<서비스>/mcp"
+    python scripts/eval_golden.py tests/golden50.json --dept cs
+    python scripts/eval_golden.py tests/golden50.json --dept cs --audience student
     python scripts/eval_golden.py tests/golden50.json --top-k 10 --out result.json
+
+키는 `--dept` 로 config/departments/<학과>.yaml 에서 꺼낸다. 안 주면
+`MCP_API_KEY` 환경변수를 본다.
 
 지표를 세 가지로 나눠 내는 이유:
 
@@ -32,6 +35,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.dept_config import build_env  # noqa: E402
 
 DEFAULT_TOP_K = 5
 
@@ -106,13 +115,22 @@ def main() -> int:
     ap.add_argument("--top-k", type=int, default=DEFAULT_TOP_K)
     ap.add_argument("--out", type=Path, help="상세 결과를 쓸 JSON 경로")
     ap.add_argument("--sleep", type=float, default=0.3, help="질의 사이 간격(초)")
+    # 키는 학과 설정에서 꺼내 온다. 손으로 넣으면 셸 히스토리에 남고, 학과가
+    # 늘면 어느 키가 어느 서비스 것인지도 헷갈린다.
+    ap.add_argument("--dept", help="MCP 키를 이 학과 설정에서 가져온다")
+    ap.add_argument("--audience", default="staff", choices=("staff", "student"))
     args = ap.parse_args()
 
     url = os.environ.get("MCP_URL", "").strip()
     if not url:
         print("MCP_URL 이 없습니다 (예: https://<서비스>/mcp)", file=sys.stderr)
         return 2
-    key = os.environ.get("MCP_API_KEY", "").strip()
+    # --dept 를 줬으면 그쪽이 이긴다. setdefault 로 두면 셸에 남은 옛 키가
+    # 조용히 이겨서 "왜 다른 학과 결과가 나오지" 가 된다.
+    if args.dept:
+        key = build_env(args.dept, args.audience)["MCP_API_KEY"]
+    else:
+        key = os.environ.get("MCP_API_KEY", "").strip()
 
     golden = json.loads(args.golden.read_text(encoding="utf-8"))
     rows: list[dict[str, Any]] = []

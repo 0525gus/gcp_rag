@@ -42,7 +42,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts._env import force_utf8_stdout, load_dotenv  # noqa: E402
+from scripts._env import force_utf8_stdout  # noqa: E402
+from scripts.dept_config import load_config_env  # noqa: E402
 from shared.config import Settings, get_settings  # noqa: E402
 from shared.gcs import GcsClient, gs_uri  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
@@ -111,6 +112,17 @@ def _load_doc_status(settings: Settings) -> dict[str, str]:
     return DocStateStore(settings).all_statuses()
 
 
+def dept_settings(base: Settings) -> list[tuple[str, Settings]]:
+    """(학과 코드, 그 학과 설정) 목록. 학과 맵이 비면 기본 설정 한 벌.
+
+    `for_drive` 를 그대로 쓴다 — 서비스가 버킷을 고르는 코드와 같은 경로여야
+    "정리 도구는 다른 버킷을 봤다" 가 생기지 않는다.
+    """
+    if not base.departments:
+        return [("", base)]
+    return [(d.code, base.for_drive(d.drive_ids[0])) for d in base.departments if d.drive_ids]
+
+
 def collect(
     settings: Settings, doc_status: dict[str, str], *, only_deleted: bool
 ) -> list[Candidate]:
@@ -151,7 +163,6 @@ def _report(candidates: list[Candidate], total_note: str) -> None:
 
 def main() -> int:
     force_utf8_stdout()
-    load_dotenv()
     setup_logging()
     ap = argparse.ArgumentParser(description=__doc__ and __doc__.splitlines()[0])
     ap.add_argument(
@@ -163,14 +174,31 @@ def main() -> int:
         help="doc_state=DELETED 만 대상. 상태를 모르는 객체는 건드리지 않는다",
     )
     ap.add_argument("--csv", help="근거 목록을 CSV 로 저장")
+    ap.add_argument("--dept", help="이 학과만 (기본: 전 학과)")
     args = ap.parse_args()
 
+    # parse_args 뒤에 부른다 — 앞에 두면 `--help` 조차 학과 yaml 을 요구한다.
+    load_config_env()
+
     settings = get_settings()
+    # doc_state 는 학과 공용이라(fileId 키) 한 번만 읽는다. 버킷만 학과마다 다르다.
     doc_status = _load_doc_status(settings)
     live = sum(1 for s in doc_status.values() if s in _LIVE_STATUSES)
     print(f"doc_state {len(doc_status)}건 (살아 있는 문서 {live}건)")
 
-    candidates = collect(settings, doc_status, only_deleted=args.only_deleted)
+    targets = dept_settings(settings)
+    if args.dept:
+        targets = [(code, s) for code, s in targets if code == args.dept]
+        if not targets:
+            raise SystemExit(f"학과 맵에 없다: {args.dept}")
+    candidates: list[Candidate] = []
+    for code, dept in targets:
+        # 학과마다 버킷이 다르다 — 한 학과만 훑으면 나머지 잔존물이 그대로 남는다.
+        found = collect(dept, doc_status, only_deleted=args.only_deleted)
+        if code:
+            print(f"  학과 {code:<10} {len(found)}건")
+        candidates.extend(found)
+    candidates.sort(key=lambda c: c.uri)
     _report(candidates, "" if args.apply else "  (조회만: 삭제는 --apply)")
 
     if args.csv:
@@ -184,6 +212,7 @@ def main() -> int:
     if not args.apply or not candidates:
         return 0
 
+    # gs:// URI 로 지우므로 클라이언트는 한 벌이면 된다(버킷은 URI 에 들어 있다).
     gcs = GcsClient(settings)
     failed = 0
     for c in candidates:

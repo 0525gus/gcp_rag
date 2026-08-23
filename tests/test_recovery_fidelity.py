@@ -399,6 +399,13 @@ def test_reindex_deletes_existing_chunks_before_importing(
             order.append(f"delete:{sorted(file_ids)}")
             return len(file_ids)
 
+        # 복구·색인 경로가 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
+
+        def __init__(self, *_a: object, **_kw: object) -> None:
+
+            pass
+
+
         def import_from_gcs(self, uris: list[str]) -> ImportOutcome:
             order.append(f"import:{len(uris)}")
             return ImportOutcome(
@@ -440,9 +447,12 @@ def test_reindex_scans_the_corpus_only_once_for_the_whole_run(
     scans: list[int] = []
 
     class _Rag:
-        """실제 RagEngineClient 처럼 첫 삭제에서만 코퍼스를 순회한다."""
+        """실제 RagEngineClient 처럼 첫 삭제에서만 코퍼스를 순회한다.
 
-        def __init__(self) -> None:
+        복구 경로가 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
+        """
+
+        def __init__(self, *_a: object, **_kw: object) -> None:
             self._scanned = False
 
         def delete_files_by_ids(self, file_ids: list[str]) -> int:

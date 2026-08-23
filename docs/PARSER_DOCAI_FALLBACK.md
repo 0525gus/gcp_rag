@@ -58,7 +58,7 @@ Document AI 는 호출조차 되지 않는다.
 | 방법 | 얻는 것 | 비용 |
 |---|---|---|
 | ① Dockerfile 에 LibreOffice 추가 | 폴백이 실제로 동작 | 이미지 ~1GB 증가, 콜드스타트 지연. HWP→PDF 변환 품질은 **미검증** |
-| ② 폴백 경로 제거 | 죽은 코드·죽은 설정 소멸, documentai 의존성 제거 | `QG_MODE=fallback` 옵션 삭제 (README·.env.example 동반 수정) |
+| ② 폴백 경로 제거 | 죽은 코드·죽은 설정 소멸, documentai 의존성 제거 | `QG_MODE=fallback` 옵션 삭제 (README·config/common.yaml 동반 수정) |
 | ③ 기동 시 가드 | 잘못된 설정으로 켜는 것을 막음 | `ENABLE_DOCAI_FALLBACK=true` 인데 `soffice` 가 없으면 파서가 기동 실패 또는 `/health` degraded — 코드 몇 줄 |
 
 ②를 택하면 선례(`6113864`)와 일관되고, ①을 택하면 변환 품질부터 실측해야 한다.

@@ -14,7 +14,7 @@ param(
   [switch]$Delta,
   # 실행을 걸고 완료를 기다리지 않는다.
   [switch]$NoWait,
-  # .env 의 DRIVE_IDS 대신 쓸 값 (쉼표 구분).
+  # 전 학과 드라이브 대신 쓸 값 (쉼표 구분). 한 학과만 다시 적재할 때.
   [string]$DriveIds = "",
   [int]$MaxChanges = 0,
   [int]$IndexBatchSize = 0
@@ -28,7 +28,9 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
 Set-Location (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot "_load_env.ps1")
 . (Join-Path $PSScriptRoot "preflight.ps1")
-Load-Dotenv
+# DRIVE_IDS 는 전 학과 union 이 된다 — 기본 동작이 "전 학과 백필" 이다.
+Set-BaseDeployConfig | Out-Null
+$DEPT_MAP = Get-DepartmentMap
 
 $errs = [System.Collections.Generic.List[string]]::new()
 Add-RequiredEnv $errs GCP_PROJECT_ID
@@ -52,16 +54,34 @@ $tokenR = Get-GcloudText -GcloudArgs @("auth", "print-access-token")
 if (-not $tokenR.Ok) { throw "gcloud auth print-access-token 실패 — gcloud auth login" }
 $token = $tokenR.Text.Split("`n")[0].Trim()
 
-foreach ($pair in @(
-    @{ Key = "RAG_CORPUS_NAME"; Name = (Get-EnvOr RAG_CORPUS_NAME "") },
-    @{ Key = "RAG_CORPUS_NAME_STUDENT"; Name = (Get-EnvOr RAG_CORPUS_NAME_STUDENT "") }
-  )) {
-  if (-not $pair.Name) { continue }
-  $u = Test-RagCorpusUsable -Name $pair.Name -Token $token
-  if (-not $u.Ok) {
-    throw "$($pair.Key) 을 쓸 수 없다: $($u.Detail)"
+# 대상 드라이브가 속한 학과의 코퍼스만 본다 — 한 학과를 다시 적재하는데 남의
+# 학과 코퍼스 상태로 막히면 안 된다.
+$owners = @()
+foreach ($p in $DEPT_MAP.PSObject.Properties) {
+  if (@($p.Value.driveIds | Where-Object { $ids -contains $_ }).Count -gt 0) {
+    $owners += $p
   }
-  Write-Host "ok   $($pair.Key) state=$($u.State)"
+}
+# 맵에 없는 드라이브를 넘기면 sync 가 그 문서를 전부 건너뛴다(UnknownDriveError).
+# 워크플로는 그래도 SUCCEEDED 로 끝나므로 여기서 먼저 막는다.
+$known = @($owners | ForEach-Object { $_.Value.driveIds } )
+$unknown = @($ids | Where-Object { $known -notcontains $_ })
+if ($unknown.Count -gt 0) {
+  throw "학과 맵에 없는 드라이브: $($unknown -join ', ') — config/departments 를 볼 것"
+}
+
+foreach ($p in $owners) {
+  foreach ($pair in @(
+      @{ Key = "$($p.Name)/staff"; Name = $p.Value.staffCorpus },
+      @{ Key = "$($p.Name)/student"; Name = $p.Value.studentCorpus }
+    )) {
+    if (-not $pair.Name) { continue }
+    $u = Test-RagCorpusUsable -Name $pair.Name -Token $token
+    if (-not $u.Ok) {
+      throw "$($pair.Key) 을 쓸 수 없다: $($u.Detail)"
+    }
+    Write-Host "ok   $($pair.Key) state=$($u.State)"
+  }
 }
 
 $SYNC_URL = (Get-GcloudText -GcloudArgs @(

@@ -28,7 +28,8 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
 Set-Location (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot "_load_env.ps1")
 . (Join-Path $PSScriptRoot "preflight.ps1")
-Load-Dotenv
+# DRIVE_IDS 는 전 학과 union 이 된다 — SA 는 모든 공유드라이브에 들어가야 한다.
+Set-BaseDeployConfig | Out-Null
 
 # Add-DriveMember 는 preflight.ps1 이 제공한다 (초대 로직 단일화).
 

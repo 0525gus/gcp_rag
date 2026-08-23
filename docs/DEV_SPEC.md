@@ -113,17 +113,17 @@ Google Drive
 - CPU 1 / MEM 1Gi / timeout 60s / concurrency 40 (`MCP_CONCURRENCY`)
 - 기동 시 코퍼스 하나. 툴 인자로 대상을 고르지 않음
 - API 키 (`Authorization: Bearer` 또는 `X-API-Key`). 서비스마다 키를 다르게 둠
-- 배포: `deploy.ps1` 이 교직원·학생 둘 다 올린다. 공개 여부는 `ALLOW_UNAUTH` (기본 `true` = 공개)
-- `scripts/deploy_mcp.ps1` 은 MCP 만 재배포할 때 (학생은 `MCP_AUDIENCE=student`)
-- 학생 MCP 는 `RAG_CORPUS_NAME_STUDENT` + `STUDENT_FOLDER_IDS` 가 둘 다 있을 때만 배포됨
-- 서비스 이름: `.env` 의 `MCP_SERVICE_NAME_STAFF` / `MCP_SERVICE_NAME_STUDENT`
+- 배포: `deploy.ps1` 이 전 학과 x 교직원·학생을 올린다(`deploy_mcp.ps1 -All` 에 위임).
+  공개 여부는 `ALLOW_UNAUTH` (기본 `true` = 공개)
+- `scripts/deploy_mcp.ps1` 은 MCP 만 재배포할 때
+- 학생 MCP 는 학과 yaml 에 `corpora.student` + `drive.studentFolderIds` 가 둘 다 있을 때만 의미가 있다
+- 서비스 이름은 규칙으로 만든다: `rag-mcp-{학과}-{staff|student}` (저장하지 않음)
 
 ```
-$env:MCP_AUDIENCE = "student"
-.\scripts\deploy_mcp.ps1
+.\scripts\deploy_mcp.ps1 -Dept cs -Audience student
+.\scripts\deploy_mcp.ps1 -All
 ```
 
-- `MCP_SERVICE_NAME`(이번 실행 타깃)은 `.env`에 고정하지 않음
 - 실측 지연 (단일 MCP, 2026. 7. 28.): 중앙값 1.14초 / 최대 1.39초
 
 #### 라. 저장소
@@ -262,7 +262,7 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 
 이미 INDEXED인 문서는 ingest가 `UNCHANGED`로 빠져 `audience`를 안 찍음. `reindex-pending`도 경로를 다시 판정하지 않음.
 
-1. `.env`에 `STUDENT_FOLDER_IDS` / `RAG_CORPUS_NAME_STUDENT` 설정 후 `rag-sync` 재배포
+1. 학과 yaml 에 `drive.studentFolderIds` / `corpora.student` 설정 후 `rag-sync` 재배포
 2. 기존 문서 `audience` 일괄 기록. 건너면 학생 코퍼스는 빈 채
 3. 학생 코퍼스 적재
 4. 학생 MCP 배포 (위 다항). 4를 먼저 하면 학생 검색만 빔

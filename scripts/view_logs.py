@@ -32,15 +32,23 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts._env import force_utf8_stdout, load_dotenv  # noqa: E402
+from scripts._env import force_utf8_stdout  # noqa: E402
+from scripts.dept_config import list_departments, load_config_env  # noqa: E402
 
 SEVERITY_ORDER = ("DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY")
 
 
-def _mcp_service_names() -> tuple[str, str]:
-    staff = os.environ.get("MCP_SERVICE_NAME_STAFF") or "rag-mcp"
-    student = os.environ.get("MCP_SERVICE_NAME_STUDENT") or "rag-mcp-student"
-    return staff, student
+def _mcp_service_names() -> list[str]:
+    """전 학과 MCP 서비스 이름. 이름은 규칙으로 만든다(저장하지 않는다).
+
+    학과가 늘면 로그 대상도 같이 는다 — 목록을 손으로 적어 두면 새 학과 로그가
+    조용히 빠진다. config/departments 가 곧 목록이다.
+    """
+    return [
+        f"rag-mcp-{code}-{audience}"
+        for code in list_departments()
+        for audience in ("staff", "student")
+    ]
 
 
 def _run_service_names(target: str) -> list[str] | None:
@@ -49,24 +57,16 @@ def _run_service_names(target: str) -> list[str] | None:
     if target == "parser":
         return ["rag-parser"]
     if target == "mcp":
-        staff, student = _mcp_service_names()
-        names = [staff]
-        if student and student != staff:
-            names.append(student)
-        return names
+        return _mcp_service_names()
     if target == "all":
-        staff, student = _mcp_service_names()
-        names = ["rag-sync", "rag-parser", staff]
-        if student and student not in names:
-            names.append(student)
-        return names
+        return ["rag-sync", "rag-parser", *_mcp_service_names()]
     return None
 
 
 def _project() -> str:
     pid = os.environ.get("GCP_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT")
     if not pid:
-        raise SystemExit("GCP_PROJECT_ID 가 필요합니다 (.env 또는 환경변수).")
+        raise SystemExit("GCP_PROJECT_ID 가 필요합니다 (config/common.yaml 또는 환경변수).")
     return pid
 
 
@@ -145,7 +145,6 @@ def run_gcloud_read(
 
 def main() -> int:
     force_utf8_stdout()
-    load_dotenv()
 
     parser = argparse.ArgumentParser(
         description="Cloud Run / Workflows 로그를 조회하거나 Log Explorer를 연다."
@@ -188,6 +187,9 @@ def main() -> int:
         help="Log Explorer URL만 출력",
     )
     args = parser.parse_args()
+
+    # parse_args 뒤에 부른다 — 앞에 두면 `--help` 조차 학과 yaml 을 요구한다.
+    load_config_env()
 
     project = _project()
     log_filter = build_filter(args.target, query=args.query, severity=args.severity)

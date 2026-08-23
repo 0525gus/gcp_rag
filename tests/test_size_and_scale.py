@@ -221,7 +221,10 @@ def test_backfill_reuses_one_drive_client_per_worker(
     monkeypatch.setattr(sync_main, "DriveClient", _Drive)
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s=None: object())
     monkeypatch.setattr(
-        sync_main, "RagEngineClient", lambda: type("R", (), {"delete_files_by_ids": lambda _s, _i: 0})()
+        # 백필이 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
+        sync_main,
+        "RagEngineClient",
+        lambda *_a, **_kw: type("R", (), {"delete_files_by_ids": lambda _s, _i: 0})(),
     )
     monkeypatch.setattr(sync_main, "_import_and_mark", lambda _s, uris, _i, **_k: ImportOutcome(
         uris=list(uris), imported=len(uris), failed=0, skipped=0))
@@ -281,7 +284,8 @@ def test_backfill_scans_the_corpus_only_once(monkeypatch: pytest.MonkeyPatch) ->
     class _Rag:
         """실제 RagEngineClient 처럼 첫 삭제에서만 코퍼스를 순회한다."""
 
-        def __init__(self) -> None:
+        # 백필이 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
             self._scanned = False
 
         def delete_files_by_ids(self, file_ids: list[str]) -> int:

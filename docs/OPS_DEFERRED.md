@@ -13,7 +13,7 @@ PoC 동안 넘긴 항목. **실제 운영 전에** 한 번씩 훑을 것.
 - 버킷 역할명: `hwp-original`(HWP 원본) / `source`(RAG import 산출물). 옛 env `GCS_RAW_BUCKET`·`GCS_NORMALIZED_BUCKET` 은 fallback
 - 객체 키: `{fileId}{ext}` (prefix `raw/`·`normalized/` 제거)
 - 품질 게이트: 구 G2(셀 실패)·G3(이미지 면적) 삭제. G2 = 표 손실률 (`QG_TABLE_LOSS_RATIO`)
-- 무효 env `QG_TABLE_FAIL_RATIO` / `QG_IMAGE_RATIO` 제거. `.env.example` 은 `QG_TABLE_LOSS_RATIO=0.3`
+- 무효 env `QG_TABLE_FAIL_RATIO` / `QG_IMAGE_RATIO` 제거. 기본값은 `QG_TABLE_LOSS_RATIO=0.3`
 - ingest 병렬: `INGEST_CONCURRENCY` (옛 `RAW_UPLOAD_CONCURRENCY`)
 - 검색: TTL 캐시, `search_max_total_chunks=15`, 파일당 최대 3청크
 - 의존성: `requirements-mcp.txt` 메이저 상한 (`mcp<2`, `starlette<0.47` 등)
@@ -250,7 +250,7 @@ bundle 당 파일 중앙값            2
 
 `--set-env-vars` 는 치환. 스크립트에 없는 값은 배포 한 번에 사라짐.
 
-07-30 운영 vs **현재** 스크립트 기본 (`deploy.ps1` / `.env.example`):
+07-30 운영 vs **현재** 스크립트 기본 (`deploy.ps1` / `config/common.yaml`):
 
 | 대상 | 07-30 운영 | 현재 스크립트 | 판단 |
 |---|---|---|---|
@@ -262,7 +262,7 @@ bundle 당 파일 중앙값            2
 - `SEARCH_FETCH_MULTIPLIER=6` 은 불변식 위반. [`config.py`](../shared/config.py): `search_fetch_max >= search_top_k_max * multiplier`. 운영이면 `60 < 20×6`. `top_k<=10` 까지 무해, 그 이상 여유분 조용히 절단. `SEARCH_FETCH_MAX=100`(Vertex 상한) vs `SEARCH_TOP_K_MAX` 하향은 실측자가 정할 것
 - parser conc 160: HWP 통째 메모리 + 네이티브, 컨테이너 2Gi. 지금은 `INGEST_CONCURRENCY=8` + 워크플로 순차가 실효 동시성을 묶음
 - 운영 반영: `gcloud run services update rag-parser --region=asia-northeast3 --concurrency=4`
-- DELETE 4 / 0.6 은 300rpm 가정. 쿼터 없으면 429. `.env.example` 주석과 동일
+- DELETE 4 / 0.6 은 300rpm 가정. 쿼터 없으면 429. `config/common.yaml` 주석과 동일
 - 배포·알림은 PowerShell (`deploy.ps1` / `deploy_mcp.ps1` / `setup_alerts.ps1`)
 
 ---

@@ -1,0 +1,42 @@
+# 템플릿. cp 후 <학과>.yaml 로 저장.
+# 파일명 = 학과 코드. 서비스: rag-mcp-{학과}-{staff|student}
+# 배포: .\scripts\deploy_mcp.ps1 -Dept <학과>
+
+name: 학과 이름
+
+# staff ≠ student. 같으면 배포 거부.
+corpora:
+  staff: projects/PROJECT/locations/asia-northeast3/ragCorpora/CHANGE_ME
+  student: projects/PROJECT/locations/asia-northeast3/ragCorpora/CHANGE_ME
+
+# 평문 키 입력
+# Fact Chat 커넥터 붙힐 시  "Bearer {keys}"
+keys:
+  staff: CHANGE_ME
+  student: CHANGE_ME
+
+#   gcloud storage buckets create gs://NAME --location=asia-northeast3
+# 짝으로 적을 것(한쪽만이면 거부). 생략하면 common.yaml 공용 버킷 상속.
+# 나중에 나누면 코퍼스 재import 가 붙으니 처음부터 따로 둘 것.
+buckets:
+  hwpOriginal: rag-DEPT-hwp-PROJECT
+  source: rag-DEPT-source-PROJECT
+
+
+# Google 공유 드라이브
+# drive Ids: 공유 드라이브 최상위 디렉터리 주소 
+# syncFolderIds: staff 대상 디렉터리
+# studentFolderIds: student 대상 디렉터리
+drive:
+  driveIds:
+    - SHARED_DRIVE_ID
+  syncFolderIds:
+    - FOLDER_ID1,FOLDER_ID2,...
+  studentFolderIds:
+    - FOLDER_ID1,...
+
+# 최소 인스턴스 갯수
+# 0 = cold start . 1 = 상주.
+minInstances:
+  staff: 0
+  student: 0

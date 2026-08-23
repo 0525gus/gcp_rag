@@ -190,6 +190,13 @@ def test_reindex_pending_moves_past_no_uri_first_page(monkeypatch) -> None:
             imported.extend(uris)
             return uris
 
+        # 복구·색인 경로가 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
+
+        def __init__(self, *_a: object, **_kw: object) -> None:
+
+            pass
+
+
         def delete_files_by_ids(self, _file_ids: list[str]) -> int:
             # 재색인 전 기존 청크 일괄 제거 (스테일 방지). 여기서는 검증 대상 아님.
             return 0

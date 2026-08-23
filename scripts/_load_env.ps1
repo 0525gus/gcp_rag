@@ -1,34 +1,115 @@
-# .env 로더 + 배포 필수값 검사.
-# deploy.ps1 / deploy_mcp.ps1 / preflight.ps1 / share_drive.ps1 이 dot-source 한다.
-# 셸에 **값이 든** 변수는 건드리지 않는다 (일회성 오버라이드 허용).
-# 빈 문자열은 .env 가 덮어쓴다 — 존재만 보면 한 번 비었던 값이 그 창에서 영원히
-# .env 를 가려서, 고쳐도 같은 에러가 반복됐다.
+# config/ 로더 + 배포 필수값 검사.
+# deploy.ps1 / deploy_mcp.ps1 / preflight.ps1 / share_drive.ps1 / backfill.ps1 /
+# setup_alerts.ps1 이 dot-source 한다.
+#
+# 설정 원본은 config/common.yaml + config/departments/<학과>.yaml **하나뿐이다**
+# (.env 는 없앴다 — docs/ENV_MIGRATION.md). PS 에는 YAML 파서가 없으므로 파싱은
+# scripts/dept_config.py 가 하고, 여기서는 그 KEY=VALUE 출력을 프로세스 환경변수로
+# 옮기기만 한다. 그래서 preflight 처럼 $env: 를 읽는 코드는 손대지 않아도 된다.
+#
 # 규칙 변경 시 tests/test_deploy_env_ps1.py 도 맞출 것.
 
-function Load-Dotenv {
-  param([string]$Path = ".env")
-  if (-not (Test-Path -LiteralPath $Path)) { return }
-  Get-Content -LiteralPath $Path -Encoding utf8 | ForEach-Object {
-    $line = $_ -replace "`r$", ""
-    if ($line -match '^\s*(#|$)' -or $line -notmatch "=") { return }
-    $key, $val = $line.Split("=", 2)
-    $key = $key.Trim()
-    if ($key.StartsWith("export ")) { $key = $key.Substring(7).Trim() }
-    if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { return }
-    # 셸에 **실제 값**이 있을 때만 양보한다. Test-Path 는 빈 문자열 변수도 True 라,
-    # 존재만 보면 한 번 비어 있던 값이 그 창에서 영원히 .env 를 가린다 —
-    # .env 를 고쳐도 같은 에러가 반복된다(빈 키가 많아 누구나 밟는다).
-    $cur = [Environment]::GetEnvironmentVariable($key)
-    if (-not [string]::IsNullOrWhiteSpace($cur)) { return }
-    $val = $val.Trim()
-    if ($val.Length -ge 2) {
-      $q = $val[0]
-      if (($q -eq '"' -or $q -eq "'") -and $val[-1] -eq $q) {
-        $val = $val.Substring(1, $val.Length - 2)
-      }
-    }
-    Set-Item -LiteralPath "Env:$key" -Value $val
+function Get-PythonExe {
+  $venv = Join-Path (Split-Path -Parent $PSScriptRoot) ".venv\Scripts\python.exe"
+  if (Test-Path -LiteralPath $venv) { return $venv }
+  return "python"
+}
+
+# 학과 yaml + common.yaml 이 채우는 키.
+# **반복 배포에서 앞 학과 값이 남지 않게 매번 비운다** — 안 비우면 -All 로 여러
+# 학과를 돌 때 앞 학과 코퍼스·키가 남아 조용히 섞인다. 이 목록에서 빠진 키는
+# 학과 사이로 새어 나가므로, dept_config.py 가 내보내는 이름을 전부 적을 것.
+$ConfigKeys = @(
+  "GCP_PROJECT_ID", "GCP_REGION", "ARTIFACT_REPO",
+  "GCS_HWP_ORIGINAL_BUCKET", "GCS_SOURCE_BUCKET",
+  "FIRESTORE_DATABASE", "DOC_STATE_COLLECTION",
+  "QG_MODE", "DOCAI_PROCESSOR_ID",
+  "INGEST_CONCURRENCY", "RAG_DELETE_CONCURRENCY", "RAG_DELETE_PACING_SECONDS",
+  "PARSER_TIMEOUT", "PARSER_CONCURRENCY", "PARSER_MAX_INSTANCES", "SYNC_CONCURRENCY",
+  "TOP_K_DEFAULT", "SEARCH_FETCH_MULTIPLIER", "SEARCH_FETCH_MAX",
+  "MCP_CONCURRENCY", "ALLOW_UNAUTH",
+  "RAG_CORPUS_NAME", "RAG_CORPUS_NAME_STUDENT",
+  "DRIVE_IDS", "SYNC_FOLDER_IDS", "STUDENT_FOLDER_IDS",
+  "MCP_MIN_INSTANCES", "MCP_SERVICE_NAME",
+  "MCP_AUDIENCE", "DEPT_CODE", "DEPT_NAME",
+  "MCP_API_KEY", "MCP_API_KEY_STAFF", "MCP_API_KEY_STUDENT"
+)
+
+function Invoke-DeptConfig {
+  # stdout 은 KEY=VALUE 전용이고 경고는 stderr 로 나온다(dept_config.py).
+  # 여기서 2>&1 로 합치면 경고가 값으로 파싱된다 — 합치지 말 것.
+  $py = Get-PythonExe
+  $out = & $py (Join-Path $PSScriptRoot "dept_config.py") @args
+  if ($LASTEXITCODE -ne 0) { throw "dept_config.py $($args -join ' ') 실패" }
+  return $out
+}
+
+# 학과 yaml -> 환경변수. 코퍼스도 키도 여기서만 온다.
+function Set-DeptConfig {
+  param([string]$DeptCode, [string]$AudienceName)
+
+  foreach ($k in $ConfigKeys) { Set-Item -LiteralPath "Env:$k" -Value "" }
+
+  foreach ($line in (Invoke-DeptConfig --dept $DeptCode --audience $AudienceName)) {
+    if (-not $line -or $line -notmatch "=") { continue }
+    $k, $v = $line.Split("=", 2)
+    Set-Item -LiteralPath "Env:$k" -Value $v
   }
+
+  if ([string]::IsNullOrWhiteSpace($env:MCP_API_KEY)) {
+    throw "$DeptCode/$AudienceName : keys 를 못 읽었다"
+  }
+  # MCP_API_KEY_STAFF 는 dept_config 가 같이 내보낸다
+  # (Require-McpDeployEnv 의 '학생이 교직원 키를 재사용했나' 검사가 쓴다).
+}
+
+function Get-DepartmentCodes {
+  $codes = @(Invoke-DeptConfig --list | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  if (-not $codes) { throw "config/departments 에 학과 yaml 이 없다" }
+  return $codes
+}
+
+# rag-sync 가 읽는 학과 맵(한 줄 JSON). 시크릿은 안 들어간다.
+function Get-DepartmentsJson {
+  $json = (Invoke-DeptConfig --departments-json) -join ""
+  if ([string]::IsNullOrWhiteSpace($json)) { throw "DEPARTMENTS_JSON 생성 실패" }
+  return $json.Trim()
+}
+
+function Get-DepartmentMap {
+  return (Get-DepartmentsJson | ConvertFrom-Json)
+}
+
+function Get-AllDriveIds {
+  param($Map = $null)
+  if ($null -eq $Map) { $Map = Get-DepartmentMap }
+  $ids = [System.Collections.Generic.List[string]]::new()
+  foreach ($p in $Map.PSObject.Properties) {
+    foreach ($d in $p.Value.driveIds) {
+      if (-not $ids.Contains($d)) { $ids.Add($d) }
+    }
+  }
+  return $ids
+}
+
+# 학과 단위가 아닌 스크립트(deploy·backfill·share_drive·setup_alerts)의 출발점.
+#
+#   - 값 대부분은 **첫 학과**(코드 알파벳 순) 것을 깐다. parser·sync 는 학과마다
+#     뜨지 않으므로 기본값이 필요한데, 여기에 전 학과 union 을 깔면 학과 맵이
+#     깨졌을 때(`DEPARTMENTS_JSON` 파싱 실패 → 단일 학과 폴백) 그 한 벌이 **남의
+#     폴더까지 훑는다.** 한 학과로 좁혀 두면 그때 다른 학과가 멈출 뿐 섞이지는
+#     않는다 — 섞인 코퍼스는 파일을 골라 지워야 하므로 그쪽이 훨씬 비싼 실패다.
+#   - DRIVE_IDS 만 전 학과 union 이다. 서비스 코드가 읽지 않는 값이고(실측),
+#     Scheduler·backfill·share_drive 가 "대상 드라이브 전체" 라는 뜻으로 쓴다.
+#
+# @() 를 빼지 말 것: `return` 은 배열을 풀어서 내보내므로 **학과가 하나면 결과가
+# 문자열**이 된다. 그러면 $codes[0] 이 학과 코드가 아니라 첫 글자다("cs" -> "c").
+# 받는 쪽도 @(Set-BaseDeployConfig) 로 감싸야 같은 이유로 안전하다.
+function Set-BaseDeployConfig {
+  $codes = @(Get-DepartmentCodes)
+  Set-DeptConfig -DeptCode $codes[0] -AudienceName "staff"
+  $env:DRIVE_IDS = (Get-AllDriveIds) -join ","
+  return $codes
 }
 
 function Get-EnvOr {
@@ -46,7 +127,7 @@ function Get-McpStudentServiceName {
   return Get-EnvOr MCP_SERVICE_NAME_STUDENT "rag-mcp-cs-student"
 }
 
-# 이번 실행 타깃. MCP_SERVICE_NAME 은 세션 오버라이드(.env 에 두지 말 것).
+# 이번 실행 타깃. 학과 모드에서는 dept_config 가 MCP_SERVICE_NAME 을 직접 준다.
 function Get-McpDeployServiceName {
   if (-not [string]::IsNullOrWhiteSpace($env:MCP_SERVICE_NAME)) {
     return $env:MCP_SERVICE_NAME
@@ -70,12 +151,14 @@ function Test-PlaceholderValue {
   param([string]$Value)
   if ([string]::IsNullOrWhiteSpace($Value)) { return $true }
   if ($Value.Contains("{")) { return $true }
+  # dept.yaml.example 을 복사만 하고 안 채운 경우. dept_config.py 도 같은 것을
+  # 막지만(PLACEHOLDER_KEYS), 셸에서 직접 넣은 값은 그쪽을 거치지 않는다.
   $examples = @(
     "your-project-id",
+    "CHANGE_ME",
     "change-me-to-a-long-random-secret",
-    "shared-drive-id-1",
-    "shared-drive-id-2",
-    "shared-drive-id-1,shared-drive-id-2"
+    "SHARED_DRIVE_ID",
+    "FOLDER_ID"
   )
   return $examples -contains $Value
 }
@@ -98,9 +181,9 @@ function Add-RequiredEnv {
 function Assert-EnvErrors {
   param([System.Collections.Generic.List[string]]$Errs)
   if ($Errs.Count -eq 0) { return }
-  Write-Host "== .env check failed =="
+  Write-Host "== config check failed =="
   foreach ($e in $Errs) { Write-Host "- $e" }
-  throw "fix .env and retry"
+  throw "fix config/ and retry"
 }
 
 # parser/sync/mcp + Scheduler. 버킷·Drive 가 비면 색인이 빈 채로 돈다.
@@ -112,7 +195,7 @@ function Require-FullDeployEnv {
   Add-RequiredEnv $errs RAG_CORPUS_NAME "Vertex RAG corpus path"
   Add-RequiredEnv $errs DRIVE_IDS "shared drive id"
   Add-RequiredEnv $errs SYNC_FOLDER_IDS "folder id from Drive URL folders/"
-  Add-RequiredEnv $errs MCP_API_KEY "set MCP_API_KEY_STAFF"
+  Add-RequiredEnv $errs MCP_API_KEY "config/departments/<dept>.yaml keys.staff"
 
   $studentCorpus = $env:RAG_CORPUS_NAME_STUDENT
   $studentFolders = $env:STUDENT_FOLDER_IDS
@@ -126,13 +209,12 @@ function Require-FullDeployEnv {
   if ($hasCorpus -and (Test-PlaceholderValue $studentCorpus)) {
     $errs.Add("RAG_CORPUS_NAME_STUDENT: example value ($studentCorpus)")
   }
-  # 분리가 켜지면 deploy.ps1 이 학생 MCP 까지 올린다 — 키가 없으면 거기서 멈추므로
-  # .env 검사 단계에서 먼저 잡는다.
+  # 분리가 켜지면 학생 MCP 도 올라간다 — 키가 없으면 거기서 멈추므로 먼저 잡는다.
   if ($hasCorpus -and $hasFolders -and [string]::IsNullOrWhiteSpace($env:MCP_API_KEY_STUDENT)) {
-    $errs.Add("MCP_API_KEY_STUDENT: empty (student split is on — set a key different from MCP_API_KEY_STAFF)")
+    $errs.Add("MCP_API_KEY_STUDENT: empty (student split is on — set a key different from keys.staff)")
   }
   if ($env:MCP_API_KEY_STUDENT -and $env:MCP_API_KEY -and $env:MCP_API_KEY_STUDENT -eq $env:MCP_API_KEY) {
-    $errs.Add("MCP_API_KEY_STUDENT: must differ from MCP_API_KEY_STAFF")
+    $errs.Add("MCP_API_KEY_STUDENT: must differ from keys.staff")
   }
   Assert-EnvErrors $errs
 }
@@ -142,15 +224,15 @@ function Require-McpDeployEnv {
   $errs = [System.Collections.Generic.List[string]]::new()
   Add-RequiredEnv $errs GCP_PROJECT_ID
   Add-RequiredEnv $errs RAG_CORPUS_NAME "Vertex RAG corpus path"
-  Add-RequiredEnv $errs MCP_API_KEY "set MCP_API_KEY_STAFF (or MCP_API_KEY for student)"
+  Add-RequiredEnv $errs MCP_API_KEY "config/departments/<dept>.yaml keys.<audience>"
 
   $service = Get-McpDeployServiceName
   if (Test-McpStudentTarget $service) {
     if ($env:MCP_API_KEY_STAFF -and $env:MCP_API_KEY -eq $env:MCP_API_KEY_STAFF) {
       $errs.Add("MCP_API_KEY: student service must not reuse MCP_API_KEY_STAFF")
     }
-    # 학생 배포에는 학생 코퍼스가 무조건 있어야 한다. 비어 있으면 deploy_mcp.ps1 의
-    # 코퍼스 교체가 통째로 건너뛰어져 RAG_CORPUS_NAME 이 교직원 값 그대로 남는다
+    # 학생 배포에는 학생 코퍼스가 무조건 있어야 한다. 비어 있으면 코퍼스 교체가
+    # 통째로 건너뛰어져 RAG_CORPUS_NAME 이 교직원 값 그대로 남는다
     # — 학생 서비스가 교직원 전량을 검색하게 되므로 조용히 통과시키면 안 된다.
     Add-RequiredEnv $errs RAG_CORPUS_NAME_STUDENT "student deploy needs its own corpus"
     if ($env:RAG_CORPUS_NAME -ne $env:RAG_CORPUS_NAME_STUDENT) {

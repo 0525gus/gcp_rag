@@ -1,0 +1,87 @@
+{
+  "rag-mcp-cs-staff": {
+    "env": {
+      "DOC_STATE_COLLECTION": "doc_state",
+      "FIRESTORE_DATABASE": "rag-sync-state",
+      "GCP_PROJECT_ID": "constant-cubist-506002-h7",
+      "GCP_REGION": "asia-northeast3",
+      "GCS_HWP_ORIGINAL_BUCKET": "test-rag-hwp-bkt",
+      "GCS_SOURCE_BUCKET": "test-rag-source-bkt",
+      "MCP_API_KEY": "<len:10>",
+      "RAG_CORPUS_NAME": "projects/constant-cubist-506002-h7/locations/asia-northeast3/ragCorpora/6838716034162098176",
+      "SEARCH_FETCH_MAX": "60",
+      "SEARCH_FETCH_MULTIPLIER": "3",
+      "TOP_K_DEFAULT": "5"
+    },
+    "resources": {
+      "cpu": "1",
+      "memory": "1Gi"
+    },
+    "serviceAccount": "111102669469-compute@developer.gserviceaccount.com"
+  },
+  "rag-mcp-cs-student": {
+    "env": {
+      "DOC_STATE_COLLECTION": "doc_state",
+      "FIRESTORE_DATABASE": "rag-sync-state",
+      "GCP_PROJECT_ID": "constant-cubist-506002-h7",
+      "GCP_REGION": "asia-northeast3",
+      "GCS_HWP_ORIGINAL_BUCKET": "test-rag-hwp-bkt",
+      "GCS_SOURCE_BUCKET": "test-rag-source-bkt",
+      "MCP_API_KEY": "<len:12>",
+      "RAG_CORPUS_NAME": "projects/constant-cubist-506002-h7/locations/asia-northeast3/ragCorpora/3379951520341557248",
+      "SEARCH_FETCH_MAX": "60",
+      "SEARCH_FETCH_MULTIPLIER": "3",
+      "TOP_K_DEFAULT": "5"
+    },
+    "resources": {
+      "cpu": "1",
+      "memory": "1Gi"
+    },
+    "serviceAccount": "111102669469-compute@developer.gserviceaccount.com"
+  },
+  "rag-parser": {
+    "env": {
+      "DOCAI_PROCESSOR_ID": {
+        "from": "secret"
+      },
+      "DOC_STATE_COLLECTION": "doc_state",
+      "FIRESTORE_DATABASE": "rag-sync-state",
+      "GCP_PROJECT_ID": "constant-cubist-506002-h7",
+      "GCP_REGION": "asia-northeast3",
+      "GCS_HWP_ORIGINAL_BUCKET": "test-rag-hwp-bkt",
+      "GCS_SOURCE_BUCKET": "test-rag-source-bkt",
+      "QG_MODE": "log",
+      "RAG_CORPUS_NAME": "projects/constant-cubist-506002-h7/locations/asia-northeast3/ragCorpora/6838716034162098176"
+    },
+    "resources": {
+      "cpu": "2",
+      "memory": "2Gi"
+    },
+    "serviceAccount": "111102669469-compute@developer.gserviceaccount.com"
+  },
+  "rag-sync": {
+    "env": {
+      "DEPARTMENTS_JSON": "{\"cs\":{\"driveIds\":[\"0AP6Mv9od5B3yUk9PVA\"],\"hwpBucket\":\"test-rag-hwp-bkt\",\"sourceBucket\":\"test-rag-source-bkt\",\"staffCorpus\":\"projects/constant-cubist-506002-h7/locations/asia-northeast3/ragCorpora/6838716034162098176\",\"studentCorpus\":\"projects/constant-cubist-506002-h7/locations/asia-northeast3/ragCorpora/3379951520341557248\",\"studentFolderIds\":[\"1ZpC1Xnmkuk5S-1OGkHzrSqbtgBE4Fvas\"],\"syncFolderIds\":[\"1ZpC1Xnmkuk5S-1OGkHzrSqbtgBE4Fvas\",\"162LbSmsoKKtagl_otv83PW6TAz5AAYxS\"]}}",
+      "DOC_STATE_COLLECTION": "doc_state",
+      "DRIVE_IDS": "0AP6Mv9od5B3yUk9PVA",
+      "FIRESTORE_DATABASE": "rag-sync-state",
+      "GCP_PROJECT_ID": "constant-cubist-506002-h7",
+      "GCP_REGION": "asia-northeast3",
+      "GCS_HWP_ORIGINAL_BUCKET": "test-rag-hwp-bkt",
+      "GCS_SOURCE_BUCKET": "test-rag-source-bkt",
+      "INGEST_CONCURRENCY": "8",
+      "QG_MODE": "log",
+      "RAG_CORPUS_NAME": "projects/constant-cubist-506002-h7/locations/asia-northeast3/ragCorpora/6838716034162098176",
+      "RAG_CORPUS_NAME_STUDENT": "projects/constant-cubist-506002-h7/locations/asia-northeast3/ragCorpora/3379951520341557248",
+      "RAG_DELETE_CONCURRENCY": "1",
+      "RAG_DELETE_PACING_SECONDS": "1.1",
+      "STUDENT_FOLDER_IDS": "1ZpC1Xnmkuk5S-1OGkHzrSqbtgBE4Fvas",
+      "SYNC_FOLDER_IDS": "1ZpC1Xnmkuk5S-1OGkHzrSqbtgBE4Fvas,162LbSmsoKKtagl_otv83PW6TAz5AAYxS"
+    },
+    "resources": {
+      "cpu": "2",
+      "memory": "2Gi"
+    },
+    "serviceAccount": "111102669469-compute@developer.gserviceaccount.com"
+  }
+}

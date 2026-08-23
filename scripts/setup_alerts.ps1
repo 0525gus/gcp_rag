@@ -16,7 +16,8 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
 
 Set-Location (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot "_load_env.ps1")
-Load-Dotenv
+# GCP_PROJECT_ID 만 쓴다 — 학과 무관이라 어느 학과로 깔든 같은 값이다(common.yaml).
+Set-BaseDeployConfig | Out-Null
 
 function Assert-LastExit {
   if ($LASTEXITCODE -ne 0) { throw "gcloud exit $LASTEXITCODE" }

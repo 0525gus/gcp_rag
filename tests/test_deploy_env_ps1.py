@@ -72,62 +72,6 @@ def _run(
     )
 
 
-def _run_dotenv(tmp_path, dotenv: str, preset: dict[str, str], key: str):
-    """임시 .env 를 만들고 Load-Dotenv 를 돌린 뒤 key 의 최종 값을 돌려준다."""
-    (tmp_path / ".env").write_text(dotenv, encoding="utf-8")
-    assigns = "; ".join(f"$env:{k} = '{v}'" for k, v in preset.items())
-    script = (
-        "$ErrorActionPreference = 'Stop'; "
-        f"{assigns}; "
-        f". '{LOADER}'; "
-        "Load-Dotenv; "
-        f"Write-Output $env:{key}"
-    )
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "SYSTEMROOT": os.environ.get("SYSTEMROOT", ""),
-        "WINDIR": os.environ.get("WINDIR", ""),
-        "PSModulePath": os.environ.get("PSModulePath", ""),
-    }
-    return subprocess.run(
-        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        cwd=str(tmp_path),
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-
-def test_dotenv_overrides_an_empty_shell_var(tmp_path) -> None:
-    """셸에 빈 값이 남아 있으면 .env 가 이겨야 한다.
-
-    Test-Path 는 빈 문자열 변수도 True 라, 존재만 보고 건너뛰면 한 번 비어 있던
-    값이 그 창에서 영원히 .env 를 가린다 — .env 를 고쳐도 같은 에러가 반복됐다.
-    .env 에 빈 키가 여럿 있어(STUDENT_FOLDER_IDS= 등) 누구나 밟는 함정이었다.
-    """
-    p = _run_dotenv(
-        tmp_path,
-        "RAG_CORPUS_NAME_STUDENT=projects/p/locations/l/ragCorpora/stu\n",
-        {"RAG_CORPUS_NAME_STUDENT": ""},
-        "RAG_CORPUS_NAME_STUDENT",
-    )
-    assert p.returncode == 0, p.stderr
-    assert p.stdout.strip() == "projects/p/locations/l/ragCorpora/stu"
-
-
-def test_dotenv_yields_to_a_real_shell_var(tmp_path) -> None:
-    """실제 값이 있는 셸 변수는 여전히 이긴다 (일회성 오버라이드)."""
-    p = _run_dotenv(
-        tmp_path,
-        "RAG_CORPUS_NAME_STUDENT=from-dotenv\n",
-        {"RAG_CORPUS_NAME_STUDENT": "from-shell"},
-        "RAG_CORPUS_NAME_STUDENT",
-    )
-    assert p.returncode == 0, p.stderr
-    assert p.stdout.strip() == "from-shell"
-
-
 def test_preflight_autofix_is_off_when_not_interactive() -> None:
     """CI·비대화형에서는 자동 조치를 하지 않는다.
 
@@ -338,23 +282,25 @@ def test_preflight_fallback_requires_processor() -> None:
     [("true", "--allow-unauthenticated"), ("false", "--no-allow-unauthenticated")],
 )
 def test_mcp_auth_arg_splats_as_one_whole_flag(allow_unauth: str, flag: str) -> None:
-    """deploy.ps1 의 인증 스위치가 통짜 플래그 하나로 넘어가야 한다.
+    """MCP 인증 스위치가 통짜 플래그 하나로 넘어가야 한다.
 
-    if 결과를 그냥 담으면 1개짜리 배열이 문자열로 풀리고, @mcpAuthArgs 스플랫이
+    if 결과를 그냥 담으면 1개짜리 배열이 문자열로 풀리고, @authArgs 스플랫이
     그 문자열을 글자 단위로 넘긴다 — gcloud 가
     "unrecognized arguments: - a l o w ..." 로 죽었다(실측, rag-sync 배포 직후).
+    MCP 배포는 deploy_mcp.ps1 한 곳뿐이다(deploy.ps1 이 위임한다).
     """
-    line = next(
-        ln
-        for ln in (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8").splitlines()
-        if ln.startswith("$mcpAuthArgs")
-    )
+    lines = [
+        ln.strip()
+        for ln in (ROOT / "scripts" / "deploy_mcp.ps1").read_text(encoding="utf-8").splitlines()
+        if ln.strip().startswith("$authArgs") or ln.strip().startswith("if ($ALLOW_UNAUTH")
+    ]
+    assert lines, "deploy_mcp.ps1 에서 $authArgs 를 못 찾았다"
     script = (
         "$ErrorActionPreference = 'Stop'; "
         f"$ALLOW_UNAUTH = '{allow_unauth}'; "
-        f"{line}; "
-        "function Show-Args { $args -join '|' }; "
-        "Write-Output (Show-Args --region=x @mcpAuthArgs --memory=1Gi)"
+        + "; ".join(lines)
+        + "; function Show-Args { $args -join '|' }; "
+        "Write-Output (Show-Args --region=x @authArgs --memory=1Gi)"
     )
     p = subprocess.run(
         [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
@@ -365,3 +311,97 @@ def test_mcp_auth_arg_splats_as_one_whole_flag(allow_unauth: str, flag: str) -> 
     )
     assert p.returncode == 0, p.stderr or p.stdout
     assert p.stdout.strip() == f"--region=x|{flag}|--memory=1Gi"
+
+
+def test_no_script_reads_dotenv() -> None:
+    """설정 원본은 config/ 하나다.
+
+    로더가 남아 있으면 누군가 .env 를 되살려 두 원본이 생긴다 — 그때 어느 쪽이
+    이겼는지는 스크립트마다 달라서, 배포된 값과 파일이 조용히 어긋난다.
+    """
+    for path in sorted((ROOT / "scripts").glob("*.ps1")):
+        text = path.read_text(encoding="utf-8")
+        assert "Load-Dotenv" not in text, path.name
+    for path in sorted((ROOT / "scripts").glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        assert "load_dotenv" not in text, path.name
+    assert not (ROOT / ".env.example").exists(), ".env.example 이 남아 있다"
+
+
+def test_base_config_returns_a_real_department_code() -> None:
+    """학과가 하나뿐일 때 코드가 첫 글자로 잘리지 않아야 한다.
+
+    PowerShell 의 `return` 은 배열을 풀어서 내보낸다. 학과가 하나면 결과가
+    문자열이 되고, `$codes[0]` 은 "cs" 가 아니라 "c" 다 — 그대로 배포하면
+    `config/departments/c.yaml` 을 찾다 죽는다. @() 로 감싸는 것이 유일한 방어라
+    누가 지우기 쉽다. `@(...)` 표기를 검사하지 않고 **실제 동작**으로 잡는다.
+    """
+    # 스텁은 dot-source **뒤에** 덮어써야 한다 (로더가 같은 이름을 정의한다).
+    # 그 위에서 로더의 진짜 Set-BaseDeployConfig 를 돌린다 — python·config 불필요.
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f". '{LOADER}'; "
+        "function Get-DepartmentCodes { $c = @('cs'); return $c }; "
+        "function Set-DeptConfig { param($DeptCode, $AudienceName) "
+        "  if ($DeptCode -ne 'cs') { throw \"학과 코드가 잘렸다: $DeptCode\" } }; "
+        "function Get-AllDriveIds { return @('D1') }; "
+        "$codes = @(Set-BaseDeployConfig); "
+        "Write-Output \"$($codes[0])|$($env:DRIVE_IDS)\""
+    )
+    p = subprocess.run(
+        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    assert p.stdout.strip().endswith("D1")
+    assert p.stdout.strip().startswith("cs"), p.stdout
+
+
+def test_deploy_passes_switches_to_deploy_mcp_by_name() -> None:
+    """deploy.ps1 → deploy_mcp.ps1 인자가 **이름으로** 바인딩돼야 한다.
+
+    배열 splat 은 요소를 위치 인자로 넘긴다. `@("-All","-SkipBuild")` 는
+    $Dept="-All" / $Audience="-SkipBuild" 가 되어 ValidateSet 에서 죽는다 —
+    실배포 중간(parser·sync 배포 후 MCP 직전)에 실제로 터졌다. 스위치를
+    넘기려면 해시테이블 splat 이어야 한다.
+
+    표기를 검사하지 않고 **바인딩 결과**로 잡는다. deploy_mcp.ps1 의 param 을
+    그대로 흉내낸 함수에 splat 해서 무엇이 어디에 들어갔는지 본다.
+    """
+    text = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+    # 조립에 관여하는 줄 전부. `if ($ShowKeys) { $mcpArgs[...] }` 처럼 $mcpArgs 로
+    # 시작하지 않는 줄이 있어서 startswith 로 거르면 조용히 빠진다.
+    lines = [
+        ln.strip()
+        for ln in text.splitlines()
+        if "$mcpArgs" in ln and not ln.strip().startswith("&")
+    ]
+    assert lines, "deploy.ps1 에서 $mcpArgs 를 못 찾았다"
+
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$ShowKeys = $true; "
+        + "; ".join(lines)
+        + "; "
+        # deploy_mcp.ps1 의 param 블록과 같은 모양.
+        "function Fake-DeployMcp { param("
+        "  [string]$Dept,"
+        "  [ValidateSet('staff','student')][string]$Audience = 'staff',"
+        "  [switch]$All, [switch]$SkipBuild, [switch]$ShowKeys"
+        ") Write-Output \"dept=[$Dept] aud=[$Audience] all=$All skip=$SkipBuild show=$ShowKeys\" }; "
+        "Fake-DeployMcp @mcpArgs"
+    )
+    p = subprocess.run(
+        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    out = p.stdout.strip()
+    # $Dept 가 비어 있어야 한다 — 여기 "-All" 이 들어가면 그게 그 버그다.
+    assert out == "dept=[] aud=[staff] all=True skip=True show=True", out
