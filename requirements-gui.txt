@@ -1,0 +1,4 @@
+# 로컬 학과 관리 GUI
+fastapi>=0.115.0
+uvicorn>=0.30.0
+PyYAML>=6.0
