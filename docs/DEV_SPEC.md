@@ -173,6 +173,20 @@ gs://{source 버킷}/{fileId}{.pdf|…}
   항목만 다시 시도한다. 상태 확인만으로는 리소스를 생성하지 않는다
 - `hwpOriginal`과 `source`, 교직원과 학생 코퍼스는 각각 서로 달라야 한다
 - 버킷 선택 시 기존 사용 학과를 표시한다. 공유드라이브 ID는 다른 학과와 중복 불가
+- Drive 범위의 `버킷에서 자동 찾기`는 선택한 버킷 객체명에서 `fileId`를 복원하고
+  `doc_state.driveId`를 우선 사용한다. 상태가 없으면 Compute SA로 Drive API를 조회하며,
+  다른 학과에 이미 연결된 Drive는 결과에 표시하되 입력란에는 자동 추가하지 않는다
+- `폴더 정보 확인`은 입력한 `syncFolderIds`를 Compute SA로 Drive API에서 조회한다.
+  설정에 저장되는 ID는 유지하고, 확인된 실제 폴더명을 태그와 학생 폴더 선택 목록에 표시한다.
+  폴더가 아닌 항목·휴지통 항목·접근 불가 ID는 개별 실패로 안내한다
+- `동기화 관리` 탭은 학과별 변경분 동기화 또는 전체 backfill을 수동 실행한다.
+  선택 학과의 Drive만 Workflow 인자로 넘기며, 같은 Drive에 ACTIVE 실행이 있으면 중복 실행을
+  거부한다. backfill은 확인 창을 거친 뒤 실행한다
+- GUI가 만든 수동 실행은 `runId`를 Workflow와 `rag-sync`에 전달한다. backfill 중간 상태는
+  Firestore `sync_tokens/__run__{runId}`에 단계·처리 건수·누적 totals로 기록하며 GUI가
+  Workflow 실행 상태와 함께 2초 간격으로 조회한다. 진행 기록 실패는 실제 동기화를 중단하지 않는다
+- 학과 YAML을 새로 생성하면 `동기화 관리`로 이동해 해당 학과가 선택된다. 생성만으로
+  backfill을 자동 시작하지 않으며 비용이 드는 전체 적재는 항상 사용자가 명시적으로 실행한다
 - 학과 목록 행을 누르면 실제 Cloud Run 교직원·학생 MCP URL과 준비 상태를 표시한다.
   상세 패널에서 각 URL을 개별 복사할 수 있다
 - `코퍼스 대화` 탭은 학과와 교직원·학생 범위를 선택해 Vertex RAG의 실제 상위

@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -303,6 +304,10 @@ class BackfillRunBody(BaseModel):
     drive_id: str = Field(..., alias="driveId")
     parser_url: str = Field(default="", alias="parserUrl")
     index_batch_size: int = Field(default=10, alias="indexBatchSize", ge=1, le=50)
+    run_id: str = Field(default="", alias="runId", max_length=32)
+    department_code: str = Field(default="", alias="departmentCode", max_length=20)
+    drive_index: int = Field(default=1, alias="driveIndex", ge=1)
+    drive_count: int = Field(default=1, alias="driveCount", ge=1)
 
     model_config = {"populate_by_name": True}
 
@@ -310,6 +315,27 @@ class BackfillRunBody(BaseModel):
 # Cloud Run 요청 타임아웃(1800s)보다 넉넉히 잡되, 프로세스가 죽었을 때 다음 실행이
 # 하루 안에는 반드시 들어올 수 있어야 한다.
 _BACKFILL_LOCK_TTL_SECONDS = 3600
+
+
+def _publish_backfill_progress(
+    store: DocStateStore,
+    body: BackfillRunBody,
+    fields: dict[str, Any],
+) -> None:
+    if not body.run_id:
+        return
+    payload = {
+        "departmentCode": body.department_code,
+        "mode": "backfill",
+        "driveId": body.drive_id,
+        "driveIndex": body.drive_index,
+        "driveCount": body.drive_count,
+        **fields,
+    }
+    try:
+        store.update_sync_run(body.run_id, payload)
+    except Exception:  # noqa: BLE001 - 관측 실패가 실제 동기화를 중단하면 안 된다.
+        logger.exception("failed to publish backfill progress run=%s", body.run_id)
 
 
 @app.post("/sync/backfill-run")
@@ -325,6 +351,13 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
         )
     try:
         return _backfill_run_locked(body, store)
+    except Exception as exc:
+        _publish_backfill_progress(
+            store,
+            body,
+            {"status": "FAILED", "phase": "FAILED", "error": str(exc)[:500]},
+        )
+        raise
     finally:
         store.release_lock(lock_name)
 
@@ -344,6 +377,11 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     parser_url = body.parser_url or os.environ.get("PARSER_URL", "")
     workers = settings.ingest_concurrency
 
+    _publish_backfill_progress(
+        store,
+        body,
+        {"status": "RUNNING", "phase": "LISTING", "processed": 0},
+    )
     snapshot = _build_backfill_changes(
         body.drive_id, store=store, drive=drive, settings=settings
     )
@@ -374,6 +412,8 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     }
     pending_uris: list[str] = []
     pending_ids: list[str] = []
+    processed_count = 0
+    last_progress_at = 0.0
     # lock: totals·pending 접근용(짧게). index_lock: import 직렬화용(길게).
     # 하나로 합치면 import 가 도는 수십 초 동안 워커 8개가 집계조차 못 하고 멈춘다
     # — 동시성이 사실상 1로 붕괴하고, 그 지연이 Cloud Run 타임아웃까지 이어진다.
@@ -385,6 +425,25 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     # totals 는 unchanged 로 세고 ok=true 로 보고했다. 삭제는 import 하는 배치에서만
     # 한다(_import_and_mark). 클라이언트를 공유해 코퍼스 순회는 1회로 유지한다.
     rag = RagEngineClient(settings)
+
+    def publish_progress(phase: str, *, force: bool = False) -> None:
+        nonlocal last_progress_at
+        now = time.monotonic()
+        if not force and processed_count % 10 != 0 and now - last_progress_at < 2:
+            return
+        _publish_backfill_progress(
+            store,
+            body,
+            {
+                "status": "RUNNING",
+                "phase": phase,
+                "processed": processed_count,
+                "totals": dict(totals),
+            },
+        )
+        last_progress_at = now
+
+    publish_progress("INGESTING", force=True)
 
     def _take_batch(min_size: int) -> tuple[list[str], list[str]] | None:
         """조건을 만족하면 대기열을 통째로 떼어 온다. 반드시 lock 밖에서 import 할 것."""
@@ -404,6 +463,7 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
         uris, ids = batch
         try:
             # import 는 직렬화하되(Vertex RPM), 집계 lock 은 쥐지 않는다.
+            publish_progress("INDEXING", force=True)
             with index_lock:
                 indexed = _import_and_mark(store, uris, ids, rag=rag).imported
                 # 학생 코퍼스도 같은 배치에서 맞춘다. 델타 경로는 /sync/index-gcs
@@ -419,6 +479,7 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
             # 배치가 통째로 죽는 것(위 except)과 달리, 일부 URI 만 색인이 안 된
             # 경우는 예외가 없다. 여기서 세지 않으면 커밋 게이트가 통과해 버린다.
             totals["indexFailed"] += max(0, len(uris) - indexed)
+        publish_progress("INGESTING", force=True)
         return 0
 
     # googleapiclient 의 service 객체는 스레드 안전하지 않다(httplib2.Http 공유).
@@ -461,6 +522,7 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_ingest_one, ch) for ch in changes]
         for fut in as_completed(futures):
+            processed_count += 1
             try:
                 ch, result = fut.result()
             except Exception:  # noqa: BLE001
@@ -468,6 +530,7 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
                 with lock:
                     totals["failed"] += 1
                     totals["dlq"] += 1
+                publish_progress("INGESTING")
                 continue
 
             status = result.get("status")
@@ -506,6 +569,7 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
             if index_failed:
                 with lock:
                     totals["indexFailed"] += index_failed
+            publish_progress("INGESTING")
 
     index_failed = flush_index()
     if index_failed:
@@ -522,6 +586,16 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
         store.set_start_page_token(body.drive_id, pending_page_token)
 
     logger.info("backfill-run done drive=%s totals=%s", body.drive_id, totals)
+    _publish_backfill_progress(
+        store,
+        body,
+        {
+            "status": "SUCCEEDED" if ok else "FAILED",
+            "phase": "COMPLETE" if ok else "FAILED",
+            "processed": processed_count,
+            "totals": dict(totals),
+        },
+    )
     return {
         "driveId": body.drive_id,
         "mode": "backfill-run",

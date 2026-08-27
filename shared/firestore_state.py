@@ -167,6 +167,19 @@ class DocStateStore:
             merge=True,
         )
 
+    def update_sync_run(self, run_id: str, fields: dict[str, Any]) -> None:
+        """GUI 진행률용 실행 문서를 갱신한다.
+
+        잠금·토큰과 같은 운영 메타데이터이므로 별도 컬렉션을 늘리지 않고
+        ``sync_tokens/__run__{runId}``에 저장한다.
+        """
+        if not run_id or "/" in run_id or len(run_id) > 80:
+            raise ValueError("invalid sync run id")
+        payload = dict(fields)
+        payload["runId"] = run_id
+        payload["updatedAt"] = datetime.now(timezone.utc)
+        self._tokens.document(f"__run__{run_id}").set(payload, merge=True)
+
     def all_statuses(self) -> dict[str, str]:
         """fileId → status 전량. 정리·감사 스크립트가 대조 기준으로 쓴다."""
         return {

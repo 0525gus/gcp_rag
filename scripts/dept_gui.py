@@ -31,7 +31,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlencode, urlparse
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
@@ -43,6 +43,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import dept_config
+from shared.search_postprocess import extract_file_id
 
 CONFIG_DIR = ROOT / "config"
 DEPT_DIR = CONFIG_DIR / "departments"
@@ -53,6 +54,7 @@ CORPUS_RE = re.compile(
     r"^projects/([^/]+)/locations/([^/]+)/ragCorpora/([^/]+)$"
 )
 BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$")
+DRIVE_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,}$")
 PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 REGION_RE = re.compile(r"^[a-z]+-[a-z]+[0-9]$")
 SECRET_FIELDS = {"keys", "MCP_API_KEY", "MCP_API_KEY_STAFF", "MCP_API_KEY_STUDENT"}
@@ -92,6 +94,9 @@ _PROVISION_RUNS: dict[str, dict[str, Any]] = {}
 _PROVISION_LOCK = threading.Lock()
 _PROVISION_TTL_SECONDS = 30 * 60
 _AUTH_PROCESS: subprocess.Popen[Any] | None = None
+_SYNC_AUTH_LOCK = threading.Lock()
+_SYNC_AUTH_TOKEN = ""
+_SYNC_AUTH_TOKEN_EXPIRES = 0.0
 
 PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, str]] = {
     "bucketHwp": {"kind": "bucket", "label": "HWP 원본 버킷"},
@@ -100,6 +105,14 @@ PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, str]] = {
     "corpusStudent": {"kind": "corpus", "label": "학생 코퍼스"},
 }
 RAG_EMBEDDING_MODEL = "text-multilingual-embedding-002"
+BUCKET_DISCOVERY_OBJECT_LIMIT = 20_000
+BUCKET_DISCOVERY_STATE_LIMIT = 50_000
+BUCKET_DISCOVERY_DRIVE_LOOKUP_LIMIT = 5_000
+DRIVE_FOLDER_LOOKUP_LIMIT = 200
+DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
+SYNC_WORKFLOW_NAME = "rag-daily-sync"
+SYNC_RUN_HISTORY_LIMIT = 30
+SYNC_TOKEN_COLLECTION = "sync_tokens"
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -599,6 +612,23 @@ def _gcloud_executable() -> str | None:
     if os.name == "nt":
         return shutil.which("gcloud.cmd") or shutil.which("gcloud.CMD")
     return shutil.which("gcloud")
+
+
+def _sync_access_token() -> str:
+    """진행률 폴링이 매번 gcloud 프로세스를 띄우지 않도록 짧게 캐시한다."""
+    global _SYNC_AUTH_TOKEN, _SYNC_AUTH_TOKEN_EXPIRES
+    with _SYNC_AUTH_LOCK:
+        if _SYNC_AUTH_TOKEN and time.time() < _SYNC_AUTH_TOKEN_EXPIRES:
+            return _SYNC_AUTH_TOKEN
+        gcloud = _gcloud_executable()
+        if not gcloud:
+            raise RuntimeError("gcloud를 찾을 수 없습니다.")
+        ok, token = _run_command([gcloud, "auth", "print-access-token", "--quiet"])
+        if not ok or not token:
+            raise RuntimeError("gcloud 로그인이 필요합니다.")
+        _SYNC_AUTH_TOKEN = token
+        _SYNC_AUTH_TOKEN_EXPIRES = time.time() + 5 * 60
+        return token
 
 
 def _gcloud_json(args: list[str], timeout: int = 12) -> tuple[bool, Any]:
@@ -1369,6 +1399,381 @@ def _merge_live_resource_validation(candidate: dict[str, Any], result: dict[str,
     result["valid"] = not result["fieldErrors"]
 
 
+def _service_account_access_token(
+    project: str,
+    caller_token: str,
+    scopes: list[str],
+    *,
+    gcloud_json: Any = _gcloud_json,
+) -> tuple[str, str, int, str]:
+    """Compute SA 가장 토큰. 반환값은 (token, service_account, latency_ms, error)."""
+    project_ok, project_info = gcloud_json(["projects", "describe", project])
+    project_number = str(project_info.get("projectNumber") or "") if project_ok else ""
+    if not project_number:
+        return "", "", 0, "프로젝트 번호를 확인하지 못했습니다."
+
+    service_account = f"{project_number}-compute@developer.gserviceaccount.com"
+    token_url = (
+        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+        f"{service_account}:generateAccessToken"
+    )
+    status, body, latency = _http_post_json(
+        token_url,
+        {"scope": scopes, "lifetime": "900s"},
+        caller_token,
+    )
+    token = str(body.get("accessToken") or "") if isinstance(body, dict) else ""
+    if status != 200 or not token:
+        return token, service_account, latency, f"서비스 계정 가장 토큰 HTTP {status or 'timeout'}"
+    return token, service_account, latency, ""
+
+
+def _bucket_object_file_id(name: str) -> str:
+    """버킷 객체 키에서 Drive fileId를 복원한다.
+
+    정상 산출물은 ``{fileId}.확장자``이고 Drive fileId에는 점이 없다. 알려진
+    확장자는 공용 후처리기로 먼저 제거하고, 미래 확장자는 첫 점 앞을 사용한다.
+    """
+    base = str(name or "").rsplit("/", 1)[-1].strip()
+    if not base:
+        return ""
+    candidate = extract_file_id(base)
+    if DRIVE_FILE_ID_RE.fullmatch(candidate):
+        return candidate
+    candidate = base.split(".", 1)[0]
+    return candidate if DRIVE_FILE_ID_RE.fullmatch(candidate) else ""
+
+
+def _list_bucket_object_names(
+    bucket: str,
+    token: str,
+    *,
+    limit: int = BUCKET_DISCOVERY_OBJECT_LIMIT,
+) -> tuple[list[str], bool]:
+    names: list[str] = []
+    page_token = ""
+    while len(names) < limit:
+        params = {
+            "fields": "items(name),nextPageToken",
+            "maxResults": str(min(1000, limit - len(names))),
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        url = (
+            f"https://storage.googleapis.com/storage/v1/b/{quote(bucket, safe='')}/o?"
+            + urlencode(params)
+        )
+        status, body, _ = _http_json(url, token, timeout=30)
+        if status != 200 or not isinstance(body, dict):
+            raise RuntimeError(f"버킷 객체 조회 실패: {bucket} (HTTP {status or 'timeout'})")
+        names.extend(
+            str(item.get("name") or "")
+            for item in (body.get("items") or [])
+            if isinstance(item, dict) and item.get("name")
+        )
+        page_token = str(body.get("nextPageToken") or "")
+        if not page_token:
+            return names, False
+    return names[:limit], bool(page_token)
+
+
+def _firestore_drive_index(
+    project: str,
+    database: str,
+    collection: str,
+    token: str,
+    *,
+    limit: int = BUCKET_DISCOVERY_STATE_LIMIT,
+) -> tuple[dict[str, str], bool]:
+    """doc_state 전체에서 fileId → driveId만 얇게 읽는다."""
+    index: dict[str, str] = {}
+    scanned = 0
+    page_token = ""
+    while scanned < limit:
+        params = {
+            "pageSize": str(min(1000, limit - scanned)),
+            "mask.fieldPaths": "driveId",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        url = (
+            "https://firestore.googleapis.com/v1/projects/"
+            f"{quote(project, safe='')}/databases/{quote(database, safe='')}/documents/"
+            f"{quote(collection, safe='')}?{urlencode(params)}"
+        )
+        status, body, _ = _http_json(url, token, timeout=30)
+        if status != 200 or not isinstance(body, dict):
+            raise RuntimeError(f"Firestore 상태 조회 실패 (HTTP {status or 'timeout'})")
+        documents = body.get("documents") or []
+        scanned += len(documents)
+        for document in documents:
+            if not isinstance(document, dict):
+                continue
+            file_id = str(document.get("name") or "").rsplit("/", 1)[-1]
+            drive_field = ((document.get("fields") or {}).get("driveId") or {})
+            drive_id = str(drive_field.get("stringValue") or "")
+            if file_id and drive_id:
+                index[file_id] = drive_id
+        page_token = str(body.get("nextPageToken") or "")
+        if not page_token:
+            return index, False
+    return index, bool(page_token)
+
+
+def _drive_file_owner(file_id: str, token: str) -> tuple[str, str, str]:
+    params = urlencode(
+        {"supportsAllDrives": "true", "fields": "id,name,driveId,trashed"}
+    )
+    url = f"https://www.googleapis.com/drive/v3/files/{quote(file_id, safe='')}?{params}"
+    status, body, _ = _http_json(url, token, timeout=15)
+    if status != 200 or not isinstance(body, dict):
+        return "", "", f"Drive HTTP {status or 'timeout'}"
+    if body.get("trashed"):
+        return "", str(body.get("name") or ""), "Drive 휴지통 파일"
+    drive_id = str(body.get("driveId") or "")
+    if not drive_id:
+        return "", str(body.get("name") or ""), "공유드라이브 소속 아님"
+    return drive_id, str(body.get("name") or ""), ""
+
+
+def _drive_folder_info(folder_id: str, token: str) -> dict[str, Any]:
+    """Compute SA가 보는 Drive 폴더의 표시 이름과 소속을 반환한다."""
+    params = urlencode(
+        {
+            "supportsAllDrives": "true",
+            "fields": "id,name,driveId,mimeType,parents,trashed",
+        }
+    )
+    url = f"https://www.googleapis.com/drive/v3/files/{quote(folder_id, safe='')}?{params}"
+    status, body, latency = _http_json(url, token, timeout=15)
+    result: dict[str, Any] = {
+        "folderId": folder_id,
+        "status": "FAIL",
+        "name": "",
+        "driveId": "",
+        "parentIds": [],
+        "latencyMs": latency,
+    }
+    if status != 200 or not isinstance(body, dict):
+        result["reason"] = f"Drive HTTP {status or 'timeout'}"
+        return result
+
+    result["name"] = str(body.get("name") or "")
+    result["driveId"] = str(body.get("driveId") or "")
+    result["parentIds"] = _normalise_ids(body.get("parents"))
+    if body.get("trashed"):
+        result["reason"] = "휴지통에 있는 폴더입니다."
+    elif str(body.get("mimeType") or "") != DRIVE_FOLDER_MIME_TYPE:
+        result["reason"] = "폴더가 아닌 Drive 항목입니다."
+    else:
+        result["status"] = "OK"
+        result["reason"] = ""
+    return result
+
+
+def _lookup_drive_folders(folder_ids: list[str], token: str) -> dict[str, Any]:
+    """입력 순서를 유지하면서 Drive 폴더 ID를 실제 이름으로 해석한다."""
+    started = time.perf_counter()
+    with ThreadPoolExecutor(max_workers=min(12, max(1, len(folder_ids)))) as executor:
+        folders = list(executor.map(lambda item: _drive_folder_info(item, token), folder_ids))
+    resolved = sum(item["status"] == "OK" for item in folders)
+    return {
+        "status": "COMPLETE" if resolved == len(folders) else "PARTIAL",
+        "folders": folders,
+        "stats": {
+            "requested": len(folder_ids),
+            "resolved": resolved,
+            "failed": len(folder_ids) - resolved,
+        },
+        "latencyMs": round((time.perf_counter() - started) * 1000),
+    }
+
+
+def _drive_names(drive_ids: list[str], token: str) -> dict[str, str]:
+    def lookup(drive_id: str) -> tuple[str, str]:
+        url = (
+            f"https://www.googleapis.com/drive/v3/drives/{quote(drive_id, safe='')}"
+            "?fields=id,name"
+        )
+        status, body, _ = _http_json(url, token, timeout=15)
+        name = str(body.get("name") or "") if status == 200 and isinstance(body, dict) else ""
+        return drive_id, name
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(drive_ids)))) as executor:
+        return dict(executor.map(lookup, drive_ids))
+
+
+def _department_drive_usage() -> dict[str, list[str]]:
+    usage: dict[str, list[str]] = {}
+    for code in dept_config.list_departments():
+        try:
+            config = _read_yaml(DEPT_DIR / f"{code}.yaml")
+        except (OSError, TypeError, UnicodeError, yaml.YAMLError):
+            continue
+        for drive_id in _normalise_ids((config.get("drive") or {}).get("driveIds")):
+            usage.setdefault(drive_id, []).append(code)
+    return usage
+
+
+def _discover_bucket_drives(
+    buckets: list[str],
+    project: str,
+    database: str,
+    collection: str,
+    caller_token: str,
+    *,
+    current_code: str = "",
+) -> dict[str, Any]:
+    """선택 버킷의 fileId를 Firestore 우선, Drive API 보조로 driveId에 연결한다."""
+    started = time.perf_counter()
+    token, service_account, _token_latency, token_error = _service_account_access_token(
+        project,
+        caller_token,
+        [
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/drive.readonly",
+        ],
+    )
+    if not token:
+        suffix = f" ({service_account})" if service_account else ""
+        raise RuntimeError(f"{token_error}{suffix}")
+
+    objects_by_file: dict[str, set[str]] = {}
+    object_count = 0
+    ignored_objects = 0
+    truncated_buckets: list[str] = []
+    bucket_errors: list[str] = []
+    for bucket in buckets:
+        try:
+            names, truncated = _list_bucket_object_names(bucket, token)
+        except RuntimeError as exc:
+            bucket_errors.append(str(exc))
+            continue
+        if truncated:
+            truncated_buckets.append(bucket)
+        object_count += len(names)
+        for name in names:
+            file_id = _bucket_object_file_id(name)
+            if not file_id:
+                ignored_objects += 1
+                continue
+            objects_by_file.setdefault(file_id, set()).add(f"{bucket}/{name}")
+
+    if bucket_errors and len(bucket_errors) == len(buckets):
+        raise RuntimeError(" · ".join(bucket_errors))
+
+    warnings = list(bucket_errors)
+    try:
+        state_index, state_truncated = _firestore_drive_index(
+            project, database, collection, token
+        )
+        if state_truncated:
+            warnings.append("Firestore 상태 조회 상한에 도달했습니다.")
+    except RuntimeError as exc:
+        state_index = {}
+        warnings.append(f"{exc}; Drive API로 직접 확인합니다.")
+
+    resolved: dict[str, tuple[str, str, str]] = {}
+    missing: list[str] = []
+    for file_id in objects_by_file:
+        drive_id = state_index.get(file_id, "")
+        if drive_id:
+            resolved[file_id] = (drive_id, "", "firestore")
+        else:
+            missing.append(file_id)
+
+    lookup_ids = missing[:BUCKET_DISCOVERY_DRIVE_LOOKUP_LIMIT]
+    if len(missing) > len(lookup_ids):
+        warnings.append(
+            f"Drive 직접 조회 상한({BUCKET_DISCOVERY_DRIVE_LOOKUP_LIMIT:,}건)을 넘어 일부를 보류했습니다."
+        )
+
+    def lookup(file_id: str) -> tuple[str, str, str, str]:
+        drive_id, file_name, error = _drive_file_owner(file_id, token)
+        return file_id, drive_id, file_name, error
+
+    unresolved: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=min(12, max(1, len(lookup_ids)))) as executor:
+        for file_id, drive_id, file_name, error in executor.map(lookup, lookup_ids):
+            if drive_id:
+                resolved[file_id] = (drive_id, file_name, "drive-api")
+            else:
+                unresolved.append(
+                    {
+                        "fileId": file_id,
+                        "name": file_name,
+                        "reason": error,
+                        "buckets": sorted({item.split("/", 1)[0] for item in objects_by_file[file_id]}),
+                    }
+                )
+    for file_id in missing[len(lookup_ids) :]:
+        unresolved.append(
+            {
+                "fileId": file_id,
+                "name": "",
+                "reason": "조회 상한 초과",
+                "buckets": sorted({item.split("/", 1)[0] for item in objects_by_file[file_id]}),
+            }
+        )
+
+    groups: dict[str, dict[str, Any]] = {}
+    for file_id, (drive_id, file_name, source) in resolved.items():
+        group = groups.setdefault(
+            drive_id,
+            {
+                "driveId": drive_id,
+                "name": "",
+                "fileCount": 0,
+                "objectCount": 0,
+                "fromFirestore": 0,
+                "fromDriveApi": 0,
+                "examples": [],
+            },
+        )
+        group["fileCount"] += 1
+        group["objectCount"] += len(objects_by_file[file_id])
+        group["fromFirestore" if source == "firestore" else "fromDriveApi"] += 1
+        if len(group["examples"]) < 3:
+            group["examples"].append({"fileId": file_id, "name": file_name})
+
+    names = _drive_names(sorted(groups), token) if groups else {}
+    usage = _department_drive_usage()
+    current_code = current_code.strip().lower()
+    for drive_id, group in groups.items():
+        group["name"] = names.get(drive_id, "")
+        owners = sorted(usage.get(drive_id, []))
+        conflicts = [code for code in owners if code != current_code]
+        group["usedBy"] = owners
+        group["conflicts"] = conflicts
+        group["canApply"] = not conflicts
+
+    drives = sorted(
+        groups.values(),
+        key=lambda item: (not item["canApply"], -item["fileCount"], item["driveId"]),
+    )
+    applicable = [item["driveId"] for item in drives if item["canApply"]]
+    if truncated_buckets:
+        warnings.append("객체 조회 상한에 도달한 버킷: " + ", ".join(truncated_buckets))
+    return {
+        "status": "PARTIAL" if warnings or unresolved else "COMPLETE",
+        "serviceAccount": service_account,
+        "buckets": buckets,
+        "drives": drives,
+        "applicableDriveIds": applicable,
+        "unresolved": unresolved[:50],
+        "warnings": warnings,
+        "stats": {
+            "objects": object_count,
+            "ignoredObjects": ignored_objects,
+            "uniqueFiles": len(objects_by_file),
+            "resolvedFiles": len(resolved),
+            "unresolvedFiles": len(unresolved),
+            "drives": len(drives),
+        },
+        "latencyMs": round((time.perf_counter() - started) * 1000),
+    }
+
+
 def _drive_service_account_status(
     cfg: dict[str, Any],
     project: str,
@@ -1380,33 +1785,22 @@ def _drive_service_account_status(
         return _check("RESOURCE", "drive-service-account", "FAIL", "공유드라이브 ID가 없습니다.")
 
     gcloud_json = cache.gcloud_json if cache else _gcloud_json
-    project_ok, project_info = gcloud_json(["projects", "describe", project])
-    project_number = str(project_info.get("projectNumber") or "") if project_ok else ""
-    if not project_number:
+    impersonated_token, service_account, token_latency, token_error = _service_account_access_token(
+        project,
+        caller_token,
+        ["https://www.googleapis.com/auth/drive.readonly"],
+        gcloud_json=gcloud_json,
+    )
+    if not service_account:
         return _check(
             "RESOURCE", "drive-service-account", "WARN", "프로젝트 번호를 확인하지 못했습니다."
         )
-
-    service_account = f"{project_number}-compute@developer.gserviceaccount.com"
-    token_url = (
-        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
-        f"{service_account}:generateAccessToken"
-    )
-    token_status, token_body, token_latency = _http_post_json(
-        token_url,
-        {
-            "scope": ["https://www.googleapis.com/auth/drive.readonly"],
-            "lifetime": "300s",
-        },
-        caller_token,
-    )
-    impersonated_token = str(token_body.get("accessToken") or "")
-    if token_status != 200 or not impersonated_token:
+    if not impersonated_token:
         return _check(
             "RESOURCE",
             "drive-service-account",
             "WARN",
-            f"SA 자동 확인 불가 · 가장 토큰 HTTP {token_status or 'timeout'}",
+            f"SA 자동 확인 불가 · {token_error}",
             action=(
                 "현재 계정에 roles/iam.serviceAccountTokenCreator 필요: "
                 f"{service_account}"
@@ -1710,6 +2104,281 @@ def _sync_status(
         except ValueError:
             detail = "SUCCEEDED"
     return [_check("SYNC", "latest-workflow", status, detail)]
+
+
+def _json_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _firestore_value(value: Any) -> Any:
+    """Firestore REST typed value를 GUI 응답용 일반 값으로 바꾼다."""
+    if not isinstance(value, dict):
+        return None
+    for key in ("stringValue", "timestampValue", "referenceValue", "bytesValue"):
+        if key in value:
+            return value[key]
+    if "integerValue" in value:
+        try:
+            return int(value["integerValue"])
+        except (TypeError, ValueError):
+            return 0
+    if "doubleValue" in value:
+        try:
+            return float(value["doubleValue"])
+        except (TypeError, ValueError):
+            return 0.0
+    if "booleanValue" in value:
+        return bool(value["booleanValue"])
+    if "nullValue" in value:
+        return None
+    if "arrayValue" in value:
+        values = (value.get("arrayValue") or {}).get("values") or []
+        return [_firestore_value(item) for item in values]
+    if "mapValue" in value:
+        fields = (value.get("mapValue") or {}).get("fields") or {}
+        return {key: _firestore_value(item) for key, item in fields.items()}
+    return None
+
+
+def _firestore_sync_progress(
+    project: str,
+    database: str,
+    token: str,
+    run_id: str,
+) -> dict[str, Any]:
+    if not re.fullmatch(r"[0-9a-f]{32}", run_id):
+        return {}
+    collection = SYNC_TOKEN_COLLECTION
+    url = (
+        "https://firestore.googleapis.com/v1/projects/"
+        f"{quote(project, safe='')}/databases/{quote(database, safe='')}/documents/"
+        f"{quote(collection, safe='')}/{quote(f'__run__{run_id}', safe='')}"
+    )
+    status, body, _ = _http_json(url, token, timeout=10)
+    if status != 200 or not isinstance(body, dict):
+        return {}
+    fields = body.get("fields") or {}
+    return {key: _firestore_value(value) for key, value in fields.items()}
+
+
+def _execution_id(name: str) -> str:
+    return str(name or "").rstrip("/").rsplit("/", 1)[-1]
+
+
+def _execution_arguments(row: dict[str, Any]) -> dict[str, Any]:
+    return _json_mapping(row.get("argument"))
+
+
+def _execution_run_id(row: dict[str, Any]) -> str:
+    labels = row.get("labels") if isinstance(row.get("labels"), dict) else {}
+    return str(labels.get("run_id") or _execution_arguments(row).get("runId") or "")
+
+
+def _sync_department_targets() -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    departments: dict[str, dict[str, Any]] = {}
+    drive_owners: dict[str, str] = {}
+    for code in dept_config.list_departments():
+        try:
+            config = _read_yaml(DEPT_DIR / f"{code}.yaml")
+        except (OSError, TypeError, UnicodeError, yaml.YAMLError):
+            continue
+        drive = config.get("drive") or {}
+        target = {
+            "code": code,
+            "name": str(config.get("name") or code),
+            "driveIds": _normalise_ids(drive.get("driveIds")),
+            "syncFolderIds": _normalise_ids(drive.get("syncFolderIds")),
+            "studentFolderIds": _normalise_ids(drive.get("studentFolderIds")),
+            "corpora": config.get("corpora") or {},
+        }
+        departments[code] = target
+        for drive_id in target["driveIds"]:
+            drive_owners[drive_id] = code
+    return departments, drive_owners
+
+
+def _sync_execution_record(
+    row: dict[str, Any],
+    departments: dict[str, dict[str, Any]],
+    drive_owners: dict[str, str],
+    progress: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    arguments = _execution_arguments(row)
+    labels = row.get("labels") if isinstance(row.get("labels"), dict) else {}
+    drive_ids = _normalise_ids(arguments.get("driveIds"))
+    code = str(labels.get("department") or arguments.get("departmentCode") or "")
+    if not code:
+        owners = {drive_owners[item] for item in drive_ids if item in drive_owners}
+        if len(owners) == 1:
+            code = owners.pop()
+    mode = str(labels.get("mode") or "")
+    if mode not in {"backfill", "delta"}:
+        mode = "backfill" if bool(arguments.get("backfill")) else "delta"
+    run_id = str(labels.get("run_id") or arguments.get("runId") or "")
+    result = _json_mapping(row.get("result"))
+    error = row.get("error") if isinstance(row.get("error"), dict) else {}
+    state = str(row.get("state") or "UNKNOWN")
+    progress_data = progress or {}
+    effective_mode = str(progress_data.get("mode") or mode)
+    return {
+        "runId": run_id,
+        "executionId": _execution_id(str(row.get("name") or "")),
+        "state": state,
+        "mode": mode,
+        "effectiveMode": effective_mode,
+        "departmentCode": code,
+        "departmentName": str((departments.get(code) or {}).get("name") or code),
+        "driveIds": drive_ids,
+        "startTime": str(row.get("startTime") or ""),
+        "endTime": str(row.get("endTime") or ""),
+        "progress": progress_data,
+        "totals": result.get("totals") if isinstance(result.get("totals"), dict) else {},
+        "ok": result.get("ok") if "ok" in result else None,
+        "error": str(error.get("context") or error.get("message") or ""),
+        "manual": bool(run_id),
+    }
+
+
+def _cloud_run_sync_urls(project: str, region: str) -> tuple[str, str]:
+    urls: dict[str, str] = {}
+    for service in ("rag-sync", "rag-parser"):
+        ok, body = _gcloud_json(
+            [
+                "run",
+                "services",
+                "describe",
+                service,
+                f"--region={region}",
+                f"--project={project}",
+            ],
+            timeout=20,
+        )
+        url = str((body.get("status") or {}).get("url") or "") if ok else ""
+        if not url:
+            raise RuntimeError(f"{service} 배포 URL을 확인하지 못했습니다.")
+        urls[service] = url
+    return urls["rag-sync"], urls["rag-parser"]
+
+
+def _list_sync_execution_rows(
+    project: str, region: str, *, limit: int = SYNC_RUN_HISTORY_LIMIT
+) -> list[dict[str, Any]]:
+    ok, rows = _gcloud_json(
+        [
+            "workflows",
+            "executions",
+            "list",
+            SYNC_WORKFLOW_NAME,
+            f"--location={region}",
+            f"--project={project}",
+            f"--limit={limit}",
+            "--sort-by=~startTime",
+        ],
+        timeout=20,
+    )
+    if not ok or not isinstance(rows, list):
+        raise RuntimeError(str(rows)[:300] or "동기화 실행 이력을 조회하지 못했습니다.")
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _sync_execution_records(
+    common: dict[str, Any], rows: list[dict[str, Any]], token: str = ""
+) -> list[dict[str, Any]]:
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    database = str(common.get("FIRESTORE_DATABASE") or "rag-sync-state")
+    departments, drive_owners = _sync_department_targets()
+    run_ids = {_execution_run_id(row) for row in rows}
+    run_ids = {item for item in run_ids if re.fullmatch(r"[0-9a-f]{32}", item)}
+    progress_by_run: dict[str, dict[str, Any]] = {}
+    if token and run_ids:
+        def load_progress(run_id: str) -> tuple[str, dict[str, Any]]:
+            return run_id, _firestore_sync_progress(project, database, token, run_id)
+
+        with ThreadPoolExecutor(max_workers=min(8, len(run_ids))) as executor:
+            progress_by_run = dict(executor.map(load_progress, sorted(run_ids)))
+    return [
+        _sync_execution_record(
+            row,
+            departments,
+            drive_owners,
+            progress_by_run.get(_execution_run_id(row)),
+        )
+        for row in rows
+    ]
+
+
+def _start_manual_sync(code: str, mode: str) -> dict[str, Any]:
+    departments, _drive_owners = _sync_department_targets()
+    target = departments.get(code)
+    if not target:
+        raise FileNotFoundError(code)
+    if mode not in {"delta", "backfill"}:
+        raise ValueError("동기화 방식은 delta 또는 backfill이어야 합니다.")
+    drive_ids = target["driveIds"]
+    if not drive_ids:
+        raise ValueError("선택한 학과에 공유드라이브 ID가 없습니다.")
+
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    rows = _list_sync_execution_rows(project, region, limit=20)
+    requested = set(drive_ids)
+    for row in rows:
+        if str(row.get("state") or "") != "ACTIVE":
+            continue
+        labels = row.get("labels") if isinstance(row.get("labels"), dict) else {}
+        if str(labels.get("department") or "") == code:
+            raise FileExistsError("선택한 학과의 Drive에서 이미 동기화가 실행 중입니다.")
+        active_ids = set(_normalise_ids(_execution_arguments(row).get("driveIds")))
+        if requested & active_ids:
+            raise FileExistsError("선택한 학과의 Drive에서 이미 동기화가 실행 중입니다.")
+
+    token = _sync_access_token()
+    drive_check = _drive_service_account_status(
+        {"drive": {"driveIds": drive_ids}}, project, token
+    )
+    if drive_check.get("status") == "FAIL":
+        detail = str(drive_check.get("detail") or "Drive 서비스 계정 연결 실패")
+        action = str(drive_check.get("action") or "")
+        raise RuntimeError(f"{detail} · {action}" if action else detail)
+    sync_url, parser_url = _cloud_run_sync_urls(project, region)
+    run_id = uuid.uuid4().hex
+    arguments = {
+        "syncUrl": sync_url,
+        "parserUrl": parser_url,
+        "driveIds": drive_ids,
+        "backfill": mode == "backfill",
+        "runId": run_id,
+        "departmentCode": code,
+    }
+    execution_url = (
+        "https://workflowexecutions.googleapis.com/v1/projects/"
+        f"{quote(project, safe='')}/locations/{quote(region, safe='')}/workflows/"
+        f"{quote(SYNC_WORKFLOW_NAME, safe='')}/executions"
+    )
+    status, body, _ = _http_post_json(
+        execution_url,
+        {
+            "argument": json.dumps(arguments, ensure_ascii=False, separators=(",", ":")),
+            "labels": {"department": code, "mode": mode, "run_id": run_id},
+        },
+        token,
+        timeout=20,
+    )
+    if status not in {200, 201} or not isinstance(body, dict):
+        raise RuntimeError(f"Workflow 실행 요청 실패 (HTTP {status or 'timeout'})")
+    created = dict(body)
+    created.setdefault("argument", json.dumps(arguments, ensure_ascii=False))
+    created.setdefault("labels", {"department": code, "mode": mode, "run_id": run_id})
+    return _sync_execution_record(created, departments, {item: code for item in drive_ids})
 
 
 def _warm_status_cache(cache: _StatusRunCache, common: dict[str, Any]) -> None:
@@ -2250,6 +2919,139 @@ async def drive_preflight(request: Request) -> JSONResponse:
     )
 
 
+@app.post("/api/v1/departments/bucket-drive-discovery")
+async def bucket_drive_discovery(request: Request) -> JSONResponse:
+    """선택한 버킷의 객체 키를 조사해 연결된 공유드라이브 후보를 돌려준다."""
+    _require_local_session(request)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        payload = {}
+    buckets = [item.removeprefix("gs://") for item in _normalise_ids(payload.get("buckets"))]
+    if not buckets or len(buckets) > 4 or any(not BUCKET_RE.fullmatch(item) for item in buckets):
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "BUCKET_REQUIRED",
+                    "message": "조사할 GCS 버킷을 선택해 주세요.",
+                }
+            },
+            status_code=422,
+        )
+    current_code = str(payload.get("code") or "").strip().lower()
+    if current_code and not DEPT_CODE_RE.fullmatch(current_code):
+        return JSONResponse(
+            {"error": {"code": "INVALID_DEPARTMENT_CODE", "message": "학과 코드를 확인해 주세요."}},
+            status_code=422,
+        )
+    try:
+        common = _common()
+    except (FileNotFoundError, OSError, TypeError, UnicodeError, yaml.YAMLError):
+        return JSONResponse(
+            {"error": {"code": "COMMON_REQUIRED", "message": "공통 설정이 먼저 필요합니다."}},
+            status_code=428,
+        )
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        return JSONResponse(
+            {"error": {"code": "GCLOUD_REQUIRED", "message": "gcloud를 찾을 수 없습니다."}},
+            status_code=503,
+        )
+    token_ok, caller_token = _run_command([gcloud, "auth", "print-access-token", "--quiet"])
+    if not token_ok:
+        return JSONResponse(
+            {"error": {"code": "GCLOUD_AUTH_REQUIRED", "message": "gcloud 로그인이 필요합니다."}},
+            status_code=401,
+        )
+    try:
+        result = _discover_bucket_drives(
+            buckets,
+            str(common.get("GCP_PROJECT_ID") or ""),
+            str(common.get("FIRESTORE_DATABASE") or "rag-sync-state"),
+            str(common.get("DOC_STATE_COLLECTION") or "doc_state"),
+            caller_token,
+            current_code=current_code,
+        )
+    except RuntimeError as exc:
+        return JSONResponse(
+            {"error": {"code": "BUCKET_DRIVE_DISCOVERY_FAILED", "message": str(exc)[:500]}},
+            status_code=503,
+        )
+    return JSONResponse(result)
+
+
+@app.post("/api/v1/departments/folder-lookup")
+async def drive_folder_lookup(request: Request) -> JSONResponse:
+    """동기화 폴더 ID를 Compute SA가 보는 실제 Drive 폴더명으로 해석한다."""
+    _require_local_session(request)
+    payload = await request.json()
+    folder_ids = _normalise_ids(
+        payload.get("folderIds") if isinstance(payload, dict) else None
+    )
+    if not folder_ids:
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "FOLDER_ID_REQUIRED",
+                    "message": "확인할 동기화 폴더 ID를 입력해 주세요.",
+                }
+            },
+            status_code=422,
+        )
+    if len(folder_ids) > DRIVE_FOLDER_LOOKUP_LIMIT or any(
+        not DRIVE_FILE_ID_RE.fullmatch(folder_id) for folder_id in folder_ids
+    ):
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "INVALID_FOLDER_IDS",
+                    "message": (
+                        f"Drive 폴더 ID 형식을 확인해 주세요. "
+                        f"한 번에 최대 {DRIVE_FOLDER_LOOKUP_LIMIT}개까지 확인할 수 있습니다."
+                    ),
+                }
+            },
+            status_code=422,
+        )
+    try:
+        common = _common()
+    except (FileNotFoundError, OSError, TypeError, UnicodeError, yaml.YAMLError):
+        return JSONResponse(
+            {"error": {"code": "COMMON_REQUIRED", "message": "공통 설정이 먼저 필요합니다."}},
+            status_code=428,
+        )
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        return JSONResponse(
+            {"error": {"code": "GCLOUD_REQUIRED", "message": "gcloud를 찾을 수 없습니다."}},
+            status_code=503,
+        )
+    token_ok, caller_token = _run_command([gcloud, "auth", "print-access-token", "--quiet"])
+    if not token_ok:
+        return JSONResponse(
+            {"error": {"code": "GCLOUD_AUTH_REQUIRED", "message": "gcloud 로그인이 필요합니다."}},
+            status_code=401,
+        )
+    token, service_account, _latency, error = _service_account_access_token(
+        str(common.get("GCP_PROJECT_ID") or ""),
+        caller_token,
+        ["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    if not token:
+        suffix = f" ({service_account})" if service_account else ""
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "DRIVE_FOLDER_LOOKUP_FAILED",
+                    "message": f"{error}{suffix}",
+                }
+            },
+            status_code=503,
+        )
+    result = _lookup_drive_folders(folder_ids, token)
+    result["serviceAccount"] = service_account
+    return JSONResponse(result)
+
+
 @app.post("/api/v1/departments/preview")
 async def preview(request: Request) -> JSONResponse:
     _require_local_session(request)
@@ -2414,6 +3216,70 @@ async def update(code: str, request: Request) -> JSONResponse:
             "configRevision": _config_revision(target),
         }
     )
+
+
+@app.get("/api/v1/sync-runs")
+def sync_runs(limit: int = 20) -> JSONResponse:
+    try:
+        common = _common()
+        project = str(common.get("GCP_PROJECT_ID") or "")
+        region = str(common.get("GCP_REGION") or "asia-northeast3")
+        rows = _list_sync_execution_rows(
+            project, region, limit=max(1, min(limit, SYNC_RUN_HISTORY_LIMIT))
+        )
+        token = _sync_access_token()
+        records = _sync_execution_records(common, rows, token)
+        departments, _drive_owners = _sync_department_targets()
+    except (FileNotFoundError, OSError, RuntimeError, TypeError, UnicodeError, yaml.YAMLError) as exc:
+        return JSONResponse(
+            {"error": {"code": "SYNC_RUN_LOOKUP_FAILED", "message": str(exc)[:400]}},
+            status_code=503,
+        )
+    return JSONResponse(
+        {
+            "runs": records,
+            "departments": list(departments.values()),
+            "workflow": SYNC_WORKFLOW_NAME,
+        }
+    )
+
+
+@app.post("/api/v1/sync-runs")
+async def start_sync_run(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        payload = {}
+    code = str(payload.get("departmentCode") or "").strip().lower()
+    mode = str(payload.get("mode") or "delta").strip().lower()
+    if not DEPT_CODE_RE.fullmatch(code):
+        return JSONResponse(
+            {"error": {"code": "DEPARTMENT_REQUIRED", "message": "동기화할 학과를 선택해 주세요."}},
+            status_code=422,
+        )
+    try:
+        run = _start_manual_sync(code, mode)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": {"code": "DEPARTMENT_NOT_FOUND", "message": "학과 설정을 찾을 수 없습니다."}},
+            status_code=404,
+        )
+    except FileExistsError as exc:
+        return JSONResponse(
+            {"error": {"code": "SYNC_ALREADY_RUNNING", "message": str(exc)}},
+            status_code=409,
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": {"code": "INVALID_SYNC_REQUEST", "message": str(exc)}},
+            status_code=422,
+        )
+    except (OSError, RuntimeError, TypeError, UnicodeError, yaml.YAMLError) as exc:
+        return JSONResponse(
+            {"error": {"code": "SYNC_START_FAILED", "message": str(exc)[:400]}},
+            status_code=503,
+        )
+    return JSONResponse(run, status_code=202)
 
 
 @app.post("/api/v1/status-runs")

@@ -77,19 +77,23 @@
 
         <nav class="nav-list">
           <button class="nav-item active" data-view="dashboard">
-            <span class="nav-icon grid-icon" aria-hidden="true"></span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
             <span>상태 대시보드</span>
           </button>
           <button class="nav-item" data-view="create">
-            <span class="nav-icon plus-icon" aria-hidden="true"></span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg></span>
             <span>학과 추가</span>
           </button>
+          <button class="nav-item" data-view="sync">
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></span>
+            <span>동기화 관리</span>
+          </button>
           <button class="nav-item" data-view="corpus">
-            <span class="nav-icon chat-icon" aria-hidden="true"></span>
-            <span>코퍼스 대화</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span>
+            <span>코퍼스 확인</span>
           </button>
           <button class="nav-item" data-view="environment">
-            <span class="nav-icon terminal-icon" aria-hidden="true"></span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
             <span>실행 환경</span>
           </button>
         </nav>
@@ -320,23 +324,37 @@
                 <div class="field tag-field drive-id-field">
                   <div class="field-action-heading">
                     <label for="driveIds">공유드라이브 ID <em>필수</em></label>
-                    <button type="button" class="inline-check-button" id="checkDriveIds" disabled>
-                      <span class="inline-check-dot" aria-hidden="true"></span>
-                      연결 확인
-                    </button>
+                    <div class="field-action-buttons">
+                      <button type="button" class="inline-check-button" id="discoverDriveIds" disabled>
+                        <span class="inline-check-dot" aria-hidden="true"></span>
+                        버킷에서 자동 찾기
+                      </button>
+                      <button type="button" class="inline-check-button" id="checkDriveIds" disabled>
+                        <span class="inline-check-dot" aria-hidden="true"></span>
+                        연결 확인
+                      </button>
+                    </div>
                   </div>
                   <textarea id="driveIds" name="driveIds" rows="2" placeholder="0A_SHARED_DRIVE_ID"></textarea>
                   <span class="tag-preview" data-tags="driveIds"></span>
                   <span class="preflight-result" id="drivePreflightStatus" aria-live="polite"></span>
+                  <section class="bucket-discovery-result hidden" id="bucketDiscoveryResult" aria-live="polite"></section>
                   <span class="field-error" data-error="drive.driveIds"></span>
                 </div>
                 <div class="form-grid two-columns scope-grid">
-                  <label class="field tag-field">
-                    <span>동기화 폴더 ID <em>필수</em></span>
-                    <textarea name="syncFolderIds" rows="5" placeholder="FOLDER_ID_1&#10;FOLDER_ID_2"></textarea>
+                  <div class="field tag-field sync-folder-field">
+                    <div class="field-action-heading">
+                      <label for="syncFolderIds">동기화 폴더 ID <em>필수</em></label>
+                      <button type="button" class="inline-check-button" id="lookupFolderNames" disabled>
+                        <span class="inline-check-dot" aria-hidden="true"></span>
+                        폴더 정보 확인
+                      </button>
+                    </div>
+                    <textarea id="syncFolderIds" name="syncFolderIds" rows="5" placeholder="FOLDER_ID_1&#10;FOLDER_ID_2"></textarea>
                     <span class="tag-preview" data-tags="syncFolderIds"></span>
+                    <span class="preflight-result" id="folderLookupStatus" aria-live="polite"></span>
                     <span class="field-error" data-error="drive.syncFolderIds"></span>
-                  </label>
+                  </div>
                   <div class="field tag-field">
                     <span class="picker-heading" id="studentFolderLabel">
                       <span>학생 폴더 ID <em>필수</em></span>
@@ -379,6 +397,57 @@
               </div>
             </form>
           </div>
+        </section>
+
+        <section class="view" id="syncView" aria-labelledby="syncTitle">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">SYNC OPERATIONS</span>
+              <h1 id="syncTitle">동기화 관리</h1>
+              <p>학과별 변경분 동기화와 전체 다시 적재를 수동으로 실행하고 진행 상태를 확인하세요.</p>
+            </div>
+            <button type="button" class="button secondary" id="refreshSyncRuns">실행 이력 새로고침</button>
+          </div>
+
+          <div class="sync-control-grid">
+            <section class="panel sync-launch-panel">
+              <header><span class="sync-panel-mark">01</span><div><h2>수동 동기화 실행</h2><p>대상 학과와 실행 방식을 선택합니다.</p></div></header>
+              <div class="sync-launch-body">
+                <label class="field">
+                  <span>학과</span>
+                  <select id="syncDepartment"><option value="">학과 선택</option></select>
+                </label>
+                <div class="field">
+                  <span>실행 방식</span>
+                  <div class="sync-mode-toggle" role="group" aria-label="동기화 실행 방식">
+                    <button type="button" class="active" data-sync-mode="delta"><b>변경분 동기화</b><small>새 변경사항만 처리</small></button>
+                    <button type="button" data-sync-mode="backfill"><b>전체 다시 적재</b><small>Drive 범위 전체 처리</small></button>
+                  </div>
+                </div>
+                <div class="sync-target-summary" id="syncTargetSummary"><p>학과를 선택하면 대상 범위를 표시합니다.</p></div>
+                <button type="button" class="button primary sync-start-button" id="startManualSync" disabled>변경분 동기화 실행</button>
+                <p class="sync-launch-note"><span>i</span>전체 다시 적재는 기존 문서를 재확인하므로 수 분에서 수십 분이 걸릴 수 있습니다.</p>
+              </div>
+            </section>
+
+            <section class="panel sync-active-panel" id="syncActivePanel" aria-live="polite">
+              <header><span class="sync-panel-mark live">02</span><div><h2>현재 실행</h2><p>Workflow와 backfill 처리 상태를 자동으로 갱신합니다.</p></div></header>
+              <div class="sync-active-empty" id="syncActiveEmpty"><span>✓</span><h3>진행 중인 동기화가 없습니다</h3><p>새 실행을 시작하거나 아래에서 최근 결과를 확인하세요.</p></div>
+              <div class="sync-active-content hidden" id="syncActiveContent"></div>
+            </section>
+          </div>
+
+          <section class="panel sync-history-panel">
+            <div class="panel-toolbar">
+              <div><h2>최근 실행 이력</h2><span id="syncHistoryMeta">조회 전</span></div>
+            </div>
+            <div class="table-wrap">
+              <table class="status-table sync-history-table">
+                <thead><tr><th>학과</th><th>방식</th><th>상태</th><th>처리</th><th>색인</th><th>실패</th><th>시작 시각</th><th>소요 시간</th></tr></thead>
+                <tbody id="syncHistoryRows"><tr><td colspan="8" class="sync-history-empty">동기화 이력을 불러오지 않았습니다.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
         </section>
 
         <section class="view" id="corpusView" aria-labelledby="corpusTitle">
@@ -479,6 +548,25 @@
         <footer>
           <button type="button" class="button ghost" data-close-resource-modal id="closeResourceProvision">취소</button>
           <button type="button" class="button primary" id="confirmResourceProvision">리소스 만들기</button>
+        </footer>
+      </div>
+    </aside>
+
+    <aside class="resource-modal" id="syncConfirmModal" aria-hidden="true" aria-labelledby="syncConfirmTitle">
+      <div class="resource-modal-backdrop" data-close-sync-modal></div>
+      <div class="resource-modal-panel sync-confirm-panel" role="dialog" aria-modal="true">
+        <header>
+          <div><span class="eyebrow">MANUAL SYNC</span><h2 id="syncConfirmTitle">전체 다시 적재 실행</h2><p id="syncConfirmDescription">선택한 Drive 범위 전체를 다시 확인합니다.</p></div>
+          <button type="button" class="icon-button" data-close-sync-modal aria-label="동기화 확인 창 닫기">×</button>
+        </header>
+        <div class="resource-modal-body">
+          <div class="sync-confirm-target" id="syncConfirmTarget"></div>
+          <div class="sync-confirm-warning"><span>!</span><p><b>실행 중에는 같은 Drive의 중복 동기화가 차단됩니다.</b>파일 수에 따라 오래 걸릴 수 있으며 창을 닫아도 Workflow는 계속 실행됩니다.</p></div>
+          <div class="validation-banner hidden" id="syncStartError"></div>
+        </div>
+        <footer>
+          <button type="button" class="button ghost" data-close-sync-modal>취소</button>
+          <button type="button" class="button primary" id="confirmManualSync">전체 다시 적재 시작</button>
         </footer>
       </div>
     </aside>

@@ -272,6 +272,18 @@ def test_changes_request_sends_max_changes() -> None:
     assert fetch_changes["try"]["args"]["body"]["maxChanges"] == "${max_changes}"
 
 
+def test_backfill_request_forwards_manual_run_progress_context() -> None:
+    steps = _drive_steps()
+    branches = _named(steps, "fetch_source")["switch"]
+    run_backfill = _named(branches[0]["steps"], "run_backfill")
+    body = run_backfill["try"]["args"]["body"]
+
+    assert body["runId"] == "${run_id}"
+    assert body["departmentCode"] == "${department_code}"
+    assert body["driveIndex"] == "${drive_index}"
+    assert body["driveCount"] == "${drive_count}"
+
+
 def test_backfill_required_reroutes_to_backfill_run() -> None:
     steps = _drive_steps()
     branch = _named(steps, "check_backfill_required")["switch"][0]

@@ -61,6 +61,8 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dept_gui._RUNS.clear()
     dept_gui._RESOURCE_PLANS.clear()
     dept_gui._PROVISION_RUNS.clear()
+    dept_gui._SYNC_AUTH_TOKEN = ""
+    dept_gui._SYNC_AUTH_TOKEN_EXPIRES = 0.0
     return dept_dir
 
 
@@ -792,3 +794,400 @@ def test_drive_service_account_status_reports_missing_share(monkeypatch) -> None
 
     assert result["status"] == "FAIL"
     assert "123456789-compute@developer.gserviceaccount.com" in result["action"]
+
+
+def test_drive_folder_info_resolves_actual_folder_name(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_http(url: str, token: str = "", timeout: int = 10):
+        captured.update(url=url, token=token)
+        return (
+            200,
+            {
+                "id": "FOLDER_123456",
+                "name": "2026 학생 자료",
+                "driveId": "DRIVE_123456",
+                "mimeType": dept_gui.DRIVE_FOLDER_MIME_TYPE,
+                "parents": ["PARENT_123456"],
+            },
+            7,
+        )
+
+    monkeypatch.setattr(dept_gui, "_http_json", fake_http)
+
+    result = dept_gui._drive_folder_info("FOLDER_123456", "sa-token")
+
+    assert result == {
+        "folderId": "FOLDER_123456",
+        "status": "OK",
+        "name": "2026 학생 자료",
+        "driveId": "DRIVE_123456",
+        "parentIds": ["PARENT_123456"],
+        "latencyMs": 7,
+        "reason": "",
+    }
+    assert "/files/FOLDER_123456?" in captured["url"]
+    assert captured["token"] == "sa-token"
+
+
+def test_drive_folder_info_rejects_non_folder(monkeypatch) -> None:
+    monkeypatch.setattr(
+        dept_gui,
+        "_http_json",
+        lambda *args, **kwargs: (
+            200,
+            {
+                "id": "FILE_12345678",
+                "name": "일반 문서",
+                "mimeType": "application/pdf",
+            },
+            3,
+        ),
+    )
+
+    result = dept_gui._drive_folder_info("FILE_12345678", "sa-token")
+
+    assert result["status"] == "FAIL"
+    assert result["reason"] == "폴더가 아닌 Drive 항목입니다."
+
+
+def test_drive_folder_lookup_endpoint_uses_compute_service_account(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
+    monkeypatch.setattr(dept_gui, "_run_command", lambda args: (True, "caller-token"))
+    monkeypatch.setattr(
+        dept_gui,
+        "_service_account_access_token",
+        lambda *args, **kwargs: ("sa-token", "compute@example.com", 5, ""),
+    )
+    captured: dict[str, object] = {}
+
+    def fake_lookup(folder_ids: list[str], token: str) -> dict[str, object]:
+        captured.update(folder_ids=folder_ids, token=token)
+        return {
+            "status": "COMPLETE",
+            "folders": [
+                {
+                    "folderId": folder_ids[0],
+                    "status": "OK",
+                    "name": "교직원 문서",
+                }
+            ],
+            "stats": {"requested": 1, "resolved": 1, "failed": 0},
+        }
+
+    monkeypatch.setattr(dept_gui, "_lookup_drive_folders", fake_lookup)
+    response = client.post(
+        "/api/v1/departments/folder-lookup",
+        headers=headers,
+        json={"folderIds": ["FOLDER_123456"]},
+    )
+
+    assert response.status_code == 200
+    assert captured == {"folder_ids": ["FOLDER_123456"], "token": "sa-token"}
+    assert response.json()["folders"][0]["name"] == "교직원 문서"
+    assert response.json()["serviceAccount"] == "compute@example.com"
+
+
+def test_drive_folder_lookup_requires_valid_ids(isolated_config: Path) -> None:
+    client, headers = _client()
+
+    response = client.post(
+        "/api/v1/departments/folder-lookup",
+        headers=headers,
+        json={"folderIds": ["short"]},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_FOLDER_IDS"
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("FILE_1234567890.md", "FILE_1234567890"),
+        ("FILE_1234567890.meta.md", "FILE_1234567890"),
+        ("nested/FILE_1234567890.part2.pdf", "FILE_1234567890"),
+        ("FILE_1234567890.future-format", "FILE_1234567890"),
+        ("readme.md", ""),
+    ],
+)
+def test_bucket_object_file_id_handles_current_and_future_suffixes(
+    name: str, expected: str
+) -> None:
+    assert dept_gui._bucket_object_file_id(name) == expected
+
+
+def test_bucket_discovery_groups_drives_and_excludes_other_department(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (isolated_config / "cs.yaml").write_text(
+        yaml.safe_dump({"drive": {"driveIds": ["DRIVE_CONFLICT_123"]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_service_account_access_token",
+        lambda *args, **kwargs: ("sa-token", "compute@example.com", 5, ""),
+    )
+
+    bucket_objects = {
+        "hwp-bucket": ["FILE_STATE_12345.hwp", "FILE_API_123456.hwp"],
+        "source-bucket": [
+            "FILE_STATE_12345.md",
+            "FILE_API_123456.meta.md",
+            "FILE_CONFLICT_1.pdf",
+            "README.md",
+        ],
+    }
+    monkeypatch.setattr(
+        dept_gui,
+        "_list_bucket_object_names",
+        lambda bucket, token: (bucket_objects[bucket], False),
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_firestore_drive_index",
+        lambda *args, **kwargs: ({"FILE_STATE_12345": "DRIVE_NEW_123456"}, False),
+    )
+
+    def fake_owner(file_id: str, token: str) -> tuple[str, str, str]:
+        if file_id == "FILE_API_123456":
+            return "DRIVE_NEW_123456", "API 문서", ""
+        if file_id == "FILE_CONFLICT_1":
+            return "DRIVE_CONFLICT_123", "타 학과 문서", ""
+        raise AssertionError(file_id)
+
+    monkeypatch.setattr(dept_gui, "_drive_file_owner", fake_owner)
+    monkeypatch.setattr(
+        dept_gui,
+        "_drive_names",
+        lambda ids, token: {
+            "DRIVE_NEW_123456": "신규 공유드라이브",
+            "DRIVE_CONFLICT_123": "컴공 공유드라이브",
+        },
+    )
+
+    result = dept_gui._discover_bucket_drives(
+        ["hwp-bucket", "source-bucket"],
+        "project-test",
+        "rag-sync-state",
+        "doc_state",
+        "caller-token",
+        current_code="ee",
+    )
+
+    assert result["stats"] == {
+        "objects": 6,
+        "ignoredObjects": 1,
+        "uniqueFiles": 3,
+        "resolvedFiles": 3,
+        "unresolvedFiles": 0,
+        "drives": 2,
+    }
+    assert result["applicableDriveIds"] == ["DRIVE_NEW_123456"]
+    by_id = {item["driveId"]: item for item in result["drives"]}
+    assert by_id["DRIVE_NEW_123456"]["fileCount"] == 2
+    assert by_id["DRIVE_NEW_123456"]["fromFirestore"] == 1
+    assert by_id["DRIVE_NEW_123456"]["fromDriveApi"] == 1
+    assert by_id["DRIVE_CONFLICT_123"]["conflicts"] == ["cs"]
+    assert by_id["DRIVE_CONFLICT_123"]["canApply"] is False
+
+
+def test_bucket_drive_discovery_endpoint_uses_selected_buckets(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
+    monkeypatch.setattr(dept_gui, "_run_command", lambda args: (True, "caller-token"))
+    captured: dict[str, object] = {}
+
+    def fake_discovery(buckets, project, database, collection, token, *, current_code=""):
+        captured.update(
+            buckets=buckets,
+            project=project,
+            database=database,
+            collection=collection,
+            token=token,
+            current_code=current_code,
+        )
+        return {
+            "status": "COMPLETE",
+            "drives": [],
+            "applicableDriveIds": [],
+            "unresolved": [],
+            "warnings": [],
+            "stats": {"objects": 0},
+        }
+
+    monkeypatch.setattr(dept_gui, "_discover_bucket_drives", fake_discovery)
+    response = client.post(
+        "/api/v1/departments/bucket-drive-discovery",
+        headers=headers,
+        json={"buckets": ["hwp-bucket", "source-bucket"], "code": "ee"},
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "buckets": ["hwp-bucket", "source-bucket"],
+        "project": "project-test",
+        "database": "rag-sync-state",
+        "collection": "doc_state",
+        "token": "caller-token",
+        "current_code": "ee",
+    }
+
+
+def test_bucket_drive_discovery_requires_bucket(isolated_config: Path) -> None:
+    client, headers = _client()
+    response = client.post(
+        "/api/v1/departments/bucket-drive-discovery",
+        headers=headers,
+        json={"buckets": []},
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "BUCKET_REQUIRED"
+
+
+def test_sync_execution_record_parses_manual_backfill() -> None:
+    row = {
+        "name": "projects/p/locations/r/workflows/rag-daily-sync/executions/ex-123",
+        "state": "SUCCEEDED",
+        "argument": '{"driveIds":["DRIVE_123456"],"backfill":true,"runId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","departmentCode":"ee"}',
+        "result": '{"ok":true,"totals":{"listed":12,"indexed":10}}',
+        "startTime": "2026-08-27T01:00:00+00:00",
+        "endTime": "2026-08-27T01:03:00+00:00",
+    }
+
+    result = dept_gui._sync_execution_record(
+        row,
+        {"ee": {"name": "전자공학과"}},
+        {"DRIVE_123456": "ee"},
+        {"phase": "COMPLETE", "processed": 12},
+    )
+
+    assert result["executionId"] == "ex-123"
+    assert result["departmentName"] == "전자공학과"
+    assert result["mode"] == "backfill"
+    assert result["totals"] == {"listed": 12, "indexed": 10}
+    assert result["progress"]["processed"] == 12
+
+
+def test_firestore_sync_progress_decodes_nested_totals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dept_gui,
+        "_http_json",
+        lambda *args, **kwargs: (
+            200,
+            {
+                "fields": {
+                    "phase": {"stringValue": "INGESTING"},
+                    "processed": {"integerValue": "7"},
+                    "totals": {
+                        "mapValue": {
+                            "fields": {
+                                "listed": {"integerValue": "20"},
+                                "indexed": {"integerValue": "5"},
+                            }
+                        }
+                    },
+                }
+            },
+            3,
+        ),
+    )
+
+    result = dept_gui._firestore_sync_progress(
+        "project-test",
+        "rag-sync-state",
+        "caller-token",
+        "a" * 32,
+    )
+
+    assert result == {
+        "phase": "INGESTING",
+        "processed": 7,
+        "totals": {"listed": 20, "indexed": 5},
+    }
+
+
+def test_start_manual_sync_scopes_workflow_to_selected_department(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for code, drive_id in (("ee", "DRIVE_EE_123456"), ("cs", "DRIVE_CS_123456")):
+        (isolated_config / f"{code}.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "name": code.upper(),
+                    "drive": {
+                        "driveIds": [drive_id],
+                        "syncFolderIds": [f"FOLDER_{code.upper()}_123456"],
+                        "studentFolderIds": [f"FOLDER_{code.upper()}_123456"],
+                    },
+                    "corpora": {"staff": "staff", "student": "student"},
+                }
+            ),
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(dept_gui, "_list_sync_execution_rows", lambda *a, **k: [])
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
+    monkeypatch.setattr(dept_gui, "_run_command", lambda args: (True, "caller-token"))
+    monkeypatch.setattr(
+        dept_gui,
+        "_drive_service_account_status",
+        lambda cfg, project, token: {"status": "OK", "detail": "연결됨"},
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_cloud_run_sync_urls",
+        lambda project, region: ("https://sync.example", "https://parser.example"),
+    )
+    monkeypatch.setattr(dept_gui.uuid, "uuid4", lambda: type("U", (), {"hex": "b" * 32})())
+    captured: dict[str, object] = {}
+
+    def fake_post(url, payload, token, timeout=10):
+        captured.update(url=url, payload=payload, token=token)
+        return (
+            200,
+            {
+                "name": "projects/p/locations/r/workflows/w/executions/ex-new",
+                "state": "ACTIVE",
+            },
+            5,
+        )
+
+    monkeypatch.setattr(dept_gui, "_http_post_json", fake_post)
+
+    result = dept_gui._start_manual_sync("ee", "backfill")
+
+    argument = dept_gui._json_mapping(captured["payload"]["argument"])
+    assert argument["driveIds"] == ["DRIVE_EE_123456"]
+    assert argument["backfill"] is True
+    assert argument["departmentCode"] == "ee"
+    assert argument["runId"] == "b" * 32
+    assert result["state"] == "ACTIVE"
+    assert result["departmentCode"] == "ee"
+
+
+def test_start_sync_run_endpoint_returns_conflict(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    monkeypatch.setattr(
+        dept_gui,
+        "_start_manual_sync",
+        lambda code, mode: (_ for _ in ()).throw(FileExistsError("이미 실행 중")),
+    )
+
+    response = client.post(
+        "/api/v1/sync-runs",
+        headers=headers,
+        json={"departmentCode": "ee", "mode": "backfill"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "SYNC_ALREADY_RUNNING"

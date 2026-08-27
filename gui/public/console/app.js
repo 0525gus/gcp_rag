@@ -19,6 +19,11 @@
     departmentResourceRequest: 0,
     departmentBuckets: [],
     drivePreflightSignature: "",
+    bucketDiscoverySignature: "",
+    bucketDiscoveryPending: false,
+    folderLookupSignature: "",
+    folderLookupPending: false,
+    folderLookupById: new Map(),
     codeAvailable: null,
     codeAvailabilityRequest: 0,
     codeAvailabilityTimer: null,
@@ -30,6 +35,13 @@
     corpusAudience: "staff",
     corpusMessages: [],
     corpusQueryPending: false,
+    syncRuns: [],
+    syncTargets: [],
+    syncMode: "delta",
+    syncStartPending: false,
+    syncPollTimer: null,
+    syncRequest: 0,
+    syncPreferredDepartment: "",
   };
 
   const statusLabels = {
@@ -98,6 +110,7 @@
     $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
     document.body.classList.remove("menu-open");
     if (view === "environment") loadEnvironment();
+    if (view === "sync") loadSyncRuns();
     if (view === "corpus") {
       renderCorpusDepartmentOptions();
       window.setTimeout(() => $("#corpusChatInput").focus(), 120);
@@ -361,6 +374,232 @@
     } catch (error) {
       toast("학과 목록을 불러오지 못했습니다", error.message, "fail");
     }
+  }
+
+  function syncNumber(value) {
+    const number = Number(value || 0);
+    return Number.isFinite(number) ? number : 0;
+  }
+
+  function syncDuration(startTime, endTime = "") {
+    const started = new Date(startTime).getTime();
+    const finished = endTime ? new Date(endTime).getTime() : Date.now();
+    if (!Number.isFinite(started) || !Number.isFinite(finished)) return "—";
+    const seconds = Math.max(0, Math.round((finished - started) / 1000));
+    if (seconds < 60) return `${seconds}초`;
+    const minutes = Math.floor(seconds / 60);
+    const remain = seconds % 60;
+    if (minutes < 60) return `${minutes}분 ${remain}초`;
+    return `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`;
+  }
+
+  function syncStartedAt(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return "—";
+    return date.toLocaleString("ko-KR", {
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    });
+  }
+
+  function selectedSyncTarget() {
+    const code = $("#syncDepartment")?.value || "";
+    return state.syncTargets.find((item) => item.code === code) || null;
+  }
+
+  function syncTargetRows(target) {
+    if (!target) return '<p>학과를 선택하면 대상 범위를 표시합니다.</p>';
+    const corpora = target.corpora || {};
+    return `<div class="sync-target-row"><span>공유드라이브</span><b>${syncNumber(target.driveIds?.length)}개</b></div>
+      <div class="sync-target-row"><span>동기화 폴더</span><b>${syncNumber(target.syncFolderIds?.length)}개</b></div>
+      <div class="sync-target-row"><span>코퍼스</span><b>${corpora.staff && corpora.student ? "교직원 · 학생" : "설정 확인 필요"}</b></div>`;
+  }
+
+  function renderSyncControls() {
+    const select = $("#syncDepartment");
+    const current = state.syncPreferredDepartment || select.value;
+    select.innerHTML = '<option value="">학과 선택</option>' + state.syncTargets.map((target) =>
+      `<option value="${escapeHtml(target.code)}">${escapeHtml(target.name)} · ${escapeHtml(target.code)}</option>`
+    ).join("");
+    if (state.syncTargets.some((item) => item.code === current)) select.value = current;
+    else if (state.syncTargets.length === 1) select.value = state.syncTargets[0].code;
+    state.syncPreferredDepartment = "";
+    select.disabled = state.syncTargets.length === 0 || state.syncStartPending;
+    const target = selectedSyncTarget();
+    $("#syncTargetSummary").innerHTML = syncTargetRows(target);
+    $$('[data-sync-mode]').forEach((button) => {
+      button.classList.toggle("active", button.dataset.syncMode === state.syncMode);
+      button.disabled = state.syncStartPending;
+    });
+    const start = $("#startManualSync");
+    start.disabled = !target || state.syncStartPending;
+    start.textContent = state.syncStartPending
+      ? "Workflow 시작 중…"
+      : state.syncMode === "backfill" ? "전체 다시 적재" : "변경분 동기화 실행";
+  }
+
+  function syncPhaseLabel(run) {
+    const phase = String(run.progress?.phase || "");
+    if (run.state === "ACTIVE" && phase === "COMPLETE") return "최종 정합성 확인";
+    return ({
+      LISTING: "Drive 파일 조사 중",
+      INGESTING: "파일 변환·업로드 중",
+      INDEXING: "RAG 코퍼스 색인 중",
+      COMPLETE: "Drive 처리 완료",
+      FAILED: "처리 실패",
+    })[phase] || (run.effectiveMode === "backfill" ? "Workflow 준비 중" : "변경분 동기화 중");
+  }
+
+  function renderSyncActiveRun() {
+    const run = state.syncRuns.find((item) => item.state === "ACTIVE");
+    $("#syncActiveEmpty").classList.toggle("hidden", Boolean(run));
+    const content = $("#syncActiveContent");
+    content.classList.toggle("hidden", !run);
+    if (!run) {
+      content.innerHTML = "";
+      return;
+    }
+    const progress = run.progress || {};
+    const totals = Object.keys(progress.totals || {}).length ? progress.totals : (run.totals || {});
+    const listed = syncNumber(totals.listed);
+    const processed = syncNumber(progress.processed);
+    const indexed = syncNumber(totals.indexed);
+    const uploaded = syncNumber(totals.gcsUploaded);
+    const failures = syncNumber(totals.failed) + syncNumber(totals.indexFailed);
+    const percent = listed > 0 ? Math.min(99, Math.round((processed / listed) * 100)) : 0;
+    const hasMeasuredProgress = run.effectiveMode === "backfill" && listed > 0;
+    const modeLabel = run.mode === "delta" && run.effectiveMode === "backfill"
+      ? "초기 전체 적재로 자동 전환"
+      : run.effectiveMode === "backfill" ? "전체 다시 적재" : "변경분 동기화";
+    const drivePosition = progress.driveCount
+      ? `Drive ${syncNumber(progress.driveIndex)} / ${syncNumber(progress.driveCount)}`
+      : `${syncNumber(run.driveIds?.length)}개 Drive`;
+    content.innerHTML = `<div class="sync-run-heading">
+      <div><b>${escapeHtml(run.departmentName || run.departmentCode || "전체 동기화")}</b><small>${escapeHtml(modeLabel)} · ${escapeHtml(drivePosition)}</small></div>
+      <span class="sync-run-state">실행 중</span>
+    </div>
+    <div class="sync-progress-copy"><div><b>${escapeHtml(syncPhaseLabel(run))}</b><span>${hasMeasuredProgress ? `${processed.toLocaleString()} / ${listed.toLocaleString()}개 처리` : "진행 상태를 확인하고 있습니다."}</span></div><strong>${hasMeasuredProgress ? `${percent}%` : "LIVE"}</strong></div>
+    <div class="sync-progress-track${hasMeasuredProgress ? "" : " indeterminate"}"><span style="width:${hasMeasuredProgress ? percent : 34}%"></span></div>
+    <div class="sync-metric-grid">
+      <div class="sync-metric"><span>처리</span><b>${processed.toLocaleString()}</b></div>
+      <div class="sync-metric"><span>GCS 업로드</span><b>${uploaded.toLocaleString()}</b></div>
+      <div class="sync-metric"><span>색인</span><b>${indexed.toLocaleString()}</b></div>
+      <div class="sync-metric fail"><span>실패</span><b>${failures.toLocaleString()}</b></div>
+    </div>
+    <div class="sync-run-foot"><code>${escapeHtml(run.executionId || run.runId)}</code><span>경과 ${escapeHtml(syncDuration(run.startTime))}</span></div>`;
+  }
+
+  function renderSyncHistory() {
+    const rows = state.syncRuns;
+    $("#syncHistoryMeta").textContent = `${rows.length}개 실행 · ${rows.filter((item) => item.state === "ACTIVE").length}개 진행 중`;
+    $("#syncHistoryRows").innerHTML = rows.length ? rows.map((run) => {
+      const totals = Object.keys(run.totals || {}).length ? run.totals : (run.progress?.totals || {});
+      const processed = syncNumber(run.progress?.processed) || syncNumber(totals.listed);
+      const failed = syncNumber(totals.failed) + syncNumber(totals.indexFailed);
+      const stateLabel = ({ ACTIVE: "진행 중", SUCCEEDED: "완료", FAILED: "실패", CANCELLED: "취소" })[run.state] || run.state;
+      return `<tr>
+        <td><div class="department-cell"><span class="department-avatar">${escapeHtml((run.departmentCode || "WF").slice(0, 2).toUpperCase())}</span><span><b>${escapeHtml(run.departmentName || run.departmentCode || "자동 실행")}</b><small>${escapeHtml(run.executionId)}</small></span></div></td>
+        <td>${run.mode === "delta" && run.effectiveMode === "backfill" ? "변경분 → 전체" : run.effectiveMode === "backfill" ? "전체 적재" : "변경분"}</td>
+        <td><span class="sync-history-state ${escapeHtml(run.state.toLowerCase())}">${escapeHtml(stateLabel)}</span></td>
+        <td>${processed.toLocaleString()}</td><td>${syncNumber(totals.indexed).toLocaleString()}</td><td>${failed.toLocaleString()}</td>
+        <td>${escapeHtml(syncStartedAt(run.startTime))}</td><td>${escapeHtml(syncDuration(run.startTime, run.endTime))}</td>
+      </tr>`;
+    }).join("") : '<tr><td colspan="8" class="sync-history-empty">아직 동기화 실행 이력이 없습니다.</td></tr>';
+  }
+
+  function renderSyncManagement() {
+    renderSyncControls();
+    renderSyncActiveRun();
+    renderSyncHistory();
+  }
+
+  async function loadSyncRuns(quiet = false) {
+    window.clearTimeout(state.syncPollTimer);
+    const requestId = ++state.syncRequest;
+    const refresh = $("#refreshSyncRuns");
+    if (!quiet) {
+      refresh.disabled = true;
+      refresh.textContent = "조회 중…";
+    }
+    try {
+      const data = await api("/api/v1/sync-runs?limit=20");
+      if (requestId !== state.syncRequest) return;
+      state.syncRuns = data.runs || [];
+      state.syncTargets = data.departments || [];
+      renderSyncManagement();
+      if (state.syncRuns.some((item) => item.state === "ACTIVE")) {
+        state.syncPollTimer = window.setTimeout(() => loadSyncRuns(true), 2000);
+      }
+    } catch (error) {
+      if (requestId !== state.syncRequest) return;
+      $("#syncHistoryMeta").textContent = "조회 실패";
+      $("#syncHistoryRows").innerHTML = `<tr><td colspan="8" class="sync-history-empty">${escapeHtml(error.message)}</td></tr>`;
+      if (!quiet) toast("동기화 이력을 불러오지 못했습니다", error.message, "fail");
+    } finally {
+      if (!quiet && requestId === state.syncRequest) {
+        refresh.disabled = false;
+        refresh.textContent = "실행 이력 새로고침";
+      }
+    }
+  }
+
+  function closeSyncConfirmModal() {
+    $("#syncConfirmModal").classList.remove("open");
+    $("#syncConfirmModal").setAttribute("aria-hidden", "true");
+    $("#syncStartError").classList.add("hidden");
+  }
+
+  function requestManualSync() {
+    const target = selectedSyncTarget();
+    if (!target || state.syncStartPending) return;
+    if (state.syncMode === "delta") {
+      submitManualSync();
+      return;
+    }
+    $("#syncConfirmTarget").innerHTML = `<div class="sync-target-row"><span>학과</span><b>${escapeHtml(target.name)} · ${escapeHtml(target.code)}</b></div>${syncTargetRows(target)}`;
+    $("#syncConfirmModal").classList.add("open");
+    $("#syncConfirmModal").setAttribute("aria-hidden", "false");
+    $("#confirmManualSync").focus();
+  }
+
+  async function submitManualSync() {
+    const target = selectedSyncTarget();
+    if (!target || state.syncStartPending) return;
+    state.syncStartPending = true;
+    renderSyncControls();
+    const confirm = $("#confirmManualSync");
+    confirm.disabled = true;
+    confirm.textContent = "Workflow 시작 중…";
+    try {
+      const run = await api("/api/v1/sync-runs", {
+        method: "POST",
+        body: { departmentCode: target.code, mode: state.syncMode },
+      });
+      closeSyncConfirmModal();
+      toast(
+        state.syncMode === "backfill" ? "전체 다시 적재를 시작했습니다" : "변경분 동기화를 시작했습니다",
+        `${target.name} · ${run.executionId || "Workflow 실행"}`,
+        "ok",
+      );
+      await loadSyncRuns(true);
+    } catch (error) {
+      const banner = $("#syncStartError");
+      if ($("#syncConfirmModal").classList.contains("open")) {
+        banner.textContent = error.message;
+        banner.classList.remove("hidden");
+      } else {
+        toast("동기화를 시작하지 못했습니다", error.message, "fail");
+      }
+    } finally {
+      state.syncStartPending = false;
+      confirm.disabled = false;
+      confirm.textContent = "전체 다시 적재 시작";
+      renderSyncControls();
+    }
+  }
+
+  function openSyncManagement(code = "") {
+    state.syncPreferredDepartment = code;
+    switchView("sync");
   }
 
   function renderEnvironment(env) {
@@ -1001,6 +1240,103 @@
     }
   }
 
+  function selectedBucketNames() {
+    const form = $("#departmentForm");
+    return [...new Set([form.elements.hwpBucket.value, form.elements.sourceBucket.value].filter(Boolean))].sort();
+  }
+
+  function resetBucketDiscovery() {
+    state.bucketDiscoverySignature = "";
+    state.bucketDiscoveryPending = false;
+    const output = $("#bucketDiscoveryResult");
+    output.classList.add("hidden");
+    output.innerHTML = "";
+    const button = $("#discoverDriveIds");
+    button.classList.remove("is-checking");
+    button.innerHTML = '<span class="inline-check-dot" aria-hidden="true"></span>버킷에서 자동 찾기';
+  }
+
+  function updateBucketDiscoveryAvailability() {
+    const buckets = selectedBucketNames();
+    const signature = buckets.join("\n");
+    if (state.bucketDiscoverySignature && state.bucketDiscoverySignature !== signature) resetBucketDiscovery();
+    $("#discoverDriveIds").disabled = !buckets.length || state.bucketDiscoveryPending;
+  }
+
+  function renderBucketDiscovery(result) {
+    const output = $("#bucketDiscoveryResult");
+    const stats = result.stats || {};
+    const drives = result.drives || [];
+    const rows = drives.length ? drives.map((drive) => {
+      const conflict = (drive.conflicts || []).length > 0;
+      const label = drive.name || "이름을 확인하지 못한 공유드라이브";
+      const stateLabel = conflict
+        ? `${drive.conflicts.join(", ")} 학과에 이미 연결됨`
+        : `${drive.fileCount || 0}개 파일 · 자동 입력 대상`;
+      return `<div class="bucket-discovery-drive${conflict ? " is-conflict" : ""}">
+        <b title="${escapeHtml(label)}">${escapeHtml(label)}</b>
+        <code title="${escapeHtml(drive.driveId)}">${escapeHtml(drive.driveId)}</code>
+        <span>${escapeHtml(stateLabel)}</span>
+      </div>`;
+    }).join("") : '<p class="bucket-discovery-note">공유드라이브를 판정할 수 있는 객체가 없습니다.</p>';
+    const notes = [];
+    if (stats.unresolvedFiles) notes.push(`${stats.unresolvedFiles}개 파일은 삭제·권한·소속 문제로 판정하지 못했습니다.`);
+    (result.warnings || []).forEach((warning) => notes.push(warning));
+    output.innerHTML = `<header>
+      <b>버킷 연결 조사 결과</b>
+      <span>${stats.objects || 0}개 객체 · ${stats.uniqueFiles || 0}개 파일 · ${result.latencyMs || 0}ms</span>
+    </header>
+    <div class="bucket-discovery-list">${rows}</div>
+    ${notes.map((note) => `<p class="bucket-discovery-note warn">${escapeHtml(note)}</p>`).join("")}`;
+    output.classList.remove("hidden");
+  }
+
+  async function discoverDriveIds() {
+    const buckets = selectedBucketNames();
+    if (!buckets.length || state.bucketDiscoveryPending) return;
+    const form = $("#departmentForm");
+    const button = $("#discoverDriveIds");
+    const signature = buckets.join("\n");
+    state.bucketDiscoveryPending = true;
+    button.classList.add("is-checking");
+    button.disabled = true;
+    button.innerHTML = '<span class="inline-check-dot" aria-hidden="true"></span>버킷 조사 중…';
+    const output = $("#bucketDiscoveryResult");
+    output.innerHTML = '<p class="bucket-discovery-note">객체 키와 Firestore 상태를 확인하고 있습니다. 상태가 없으면 Drive API로 직접 조회합니다.</p>';
+    output.classList.remove("hidden");
+    try {
+      const result = await api("/api/v1/departments/bucket-drive-discovery", {
+        method: "POST",
+        body: { buckets, code: form.elements.code.value.trim().toLowerCase() },
+      });
+      if (selectedBucketNames().join("\n") !== signature) return;
+      state.bucketDiscoverySignature = signature;
+      renderBucketDiscovery(result);
+      const current = splitIds(form.elements.driveIds.value);
+      const additions = (result.applicableDriveIds || []).filter((driveId) => !current.includes(driveId));
+      if (additions.length) {
+        form.elements.driveIds.value = [...current, ...additions].join("\n");
+        form.elements.driveIds.dispatchEvent(new Event("input", { bubbles: true }));
+        toast("공유드라이브 ID를 채웠습니다", `${additions.length}개 ID를 입력란에 추가했습니다.`, "ok");
+      } else if ((result.drives || []).length) {
+        toast("새로 추가할 Drive가 없습니다", "이미 입력되었거나 다른 학과에 연결된 Drive입니다.");
+      } else {
+        toast("Drive를 찾지 못했습니다", "판정하지 못한 파일과 권한 상태를 확인해 주세요.", "fail");
+      }
+    } catch (error) {
+      if (selectedBucketNames().join("\n") !== signature) return;
+      state.bucketDiscoverySignature = "";
+      output.innerHTML = `<p class="bucket-discovery-note warn">${escapeHtml(error.message)}</p>`;
+      output.classList.remove("hidden");
+      toast("버킷 조사를 완료하지 못했습니다", error.message, "fail");
+    } finally {
+      state.bucketDiscoveryPending = false;
+      button.classList.remove("is-checking");
+      button.innerHTML = '<span class="inline-check-dot" aria-hidden="true"></span>버킷에서 자동 찾기';
+      updateBucketDiscoveryAvailability();
+    }
+  }
+
   async function checkDriveIds() {
     const form = $("#departmentForm");
     const driveIds = splitIds(form.elements.driveIds.value);
@@ -1031,6 +1367,85 @@
     } finally {
       button.classList.remove("is-checking");
       updateDrivePreflightAvailability();
+    }
+  }
+
+  function resetFolderLookup() {
+    state.folderLookupSignature = "";
+    state.folderLookupPending = false;
+    state.folderLookupById.clear();
+    const status = $("#folderLookupStatus");
+    status.dataset.status = "";
+    status.textContent = "";
+    const button = $("#lookupFolderNames");
+    button.classList.remove("is-checking");
+    button.innerHTML = '<span class="inline-check-dot" aria-hidden="true"></span>폴더 정보 확인';
+  }
+
+  function updateFolderLookupAvailability() {
+    const textarea = $("#departmentForm").elements.syncFolderIds;
+    const folderIds = splitIds(textarea.value);
+    const signature = folderIds.join("\n");
+    if (state.folderLookupSignature && state.folderLookupSignature !== signature) {
+      state.folderLookupSignature = "";
+      state.folderLookupById.clear();
+      const status = $("#folderLookupStatus");
+      status.dataset.status = "changed";
+      status.textContent = "입력값이 변경되었습니다. 폴더 정보를 다시 확인해 주세요.";
+      updateTagPreview(textarea);
+      renderStudentFolderPicker();
+    }
+    $("#lookupFolderNames").disabled = !folderIds.length || state.folderLookupPending;
+  }
+
+  async function lookupFolderNames() {
+    const form = $("#departmentForm");
+    const textarea = form.elements.syncFolderIds;
+    const folderIds = splitIds(textarea.value);
+    if (!folderIds.length || state.folderLookupPending) return;
+    const signature = folderIds.join("\n");
+    const button = $("#lookupFolderNames");
+    const status = $("#folderLookupStatus");
+    state.folderLookupPending = true;
+    button.classList.add("is-checking");
+    button.disabled = true;
+    button.innerHTML = '<span class="inline-check-dot" aria-hidden="true"></span>폴더 확인 중…';
+    status.dataset.status = "checking";
+    status.textContent = "서비스 계정으로 실제 Drive 폴더 이름을 확인하고 있습니다.";
+    try {
+      const result = await api("/api/v1/departments/folder-lookup", {
+        method: "POST",
+        body: { folderIds },
+      });
+      if (splitIds(textarea.value).join("\n") !== signature) return;
+      state.folderLookupSignature = signature;
+      state.folderLookupById = new Map((result.folders || []).map((item) => [item.folderId, item]));
+      updateTagPreview(textarea);
+      renderStudentFolderPicker();
+      const stats = result.stats || {};
+      const failures = (result.folders || []).filter((item) => item.status !== "OK");
+      status.dataset.status = failures.length ? "warn" : "ok";
+      status.textContent = failures.length
+        ? `${stats.resolved || 0}개 확인 · ${stats.failed || 0}개 실패 — ${failures.slice(0, 3).map((item) => `${item.folderId}: ${item.reason}`).join(" · ")}`
+        : `${stats.resolved || 0}개 폴더의 실제 이름을 확인했습니다.`;
+      toast(
+        failures.length ? "일부 폴더를 확인하지 못했습니다" : "폴더 정보를 확인했습니다",
+        failures.length ? "실패한 ID와 서비스 계정 권한을 확인해 주세요." : "표시 이름을 Drive 폴더명으로 바꿨습니다.",
+        failures.length ? "fail" : "ok",
+      );
+    } catch (error) {
+      if (splitIds(textarea.value).join("\n") !== signature) return;
+      state.folderLookupSignature = "";
+      state.folderLookupById.clear();
+      updateTagPreview(textarea);
+      renderStudentFolderPicker();
+      status.dataset.status = "fail";
+      status.textContent = error.message;
+    } finally {
+      state.folderLookupPending = false;
+      button.classList.remove("is-checking");
+      button.innerHTML = '<span class="inline-check-dot" aria-hidden="true"></span>폴더 정보 확인';
+      updateFolderLookupAvailability();
     }
   }
 
@@ -1072,6 +1487,7 @@
       output.classList.toggle("is-visible", usedBy.length > 0);
     }
     updateResourceProvisionAvailability();
+    updateBucketDiscoveryAvailability();
   }
 
   async function loadDepartmentResources(selected = {}, created = { corpora: [], buckets: [] }) {
@@ -1257,6 +1673,8 @@
     state.editingCode = null;
     state.editingRevision = null;
     state.drivePreflightSignature = "";
+    state.bucketDiscoverySignature = "";
+    state.bucketDiscoveryPending = false;
     state.codeAvailable = null;
     state.codeAvailabilityRequest += 1;
     state.resourcePlan = null;
@@ -1267,7 +1685,10 @@
     $$(".tag-preview").forEach((item) => { item.innerHTML = ""; });
     $("#drivePreflightStatus").textContent = "";
     $("#drivePreflightStatus").dataset.status = "";
+    resetBucketDiscovery();
+    resetFolderLookup();
     updateDrivePreflightAvailability();
+    updateFolderLookupAvailability();
     updateBucketSelectionState();
     renderStudentFolderPicker();
     $("#confirmCreate").checked = false;
@@ -1309,6 +1730,7 @@
       form.elements.studentMin.value = config.minInstances?.student ?? 0;
       $$("textarea").forEach(updateTagPreview);
       updateDrivePreflightAvailability();
+      updateFolderLookupAvailability();
       renderStudentFolderPicker();
       closeDrawer();
       switchView("create");
@@ -1330,6 +1752,7 @@
     button.disabled = true;
     button.textContent = state.editingCode ? "저장 중…" : "생성 중…";
     try {
+      const wasEditing = Boolean(state.editingCode);
       const payload = formPayload();
       if (state.editingCode) payload.configRevision = state.editingRevision;
       const result = await api(
@@ -1339,7 +1762,8 @@
       toast(state.editingCode ? "설정을 저장했습니다" : "YAML을 생성했습니다", result.path, "ok");
       resetWizard();
       await loadDepartments();
-      switchView("dashboard");
+      if (wasEditing) switchView("dashboard");
+      else openSyncManagement(result.code);
       startStatus([result.code]);
     } catch (error) {
       const fieldErrors = error.data?.error?.fieldErrors;
@@ -1357,7 +1781,16 @@
   function updateTagPreview(textarea) {
     const target = $(`[data-tags="${textarea.name}"]`);
     if (!target) return;
-    target.innerHTML = splitIds(textarea.value).map((value) => `<span class="tag-chip" title="${escapeHtml(value)}">${escapeHtml(value)}</span>`).join("");
+    target.innerHTML = splitIds(textarea.value).map((value) => {
+      const folder = textarea.name === "syncFolderIds" ? state.folderLookupById.get(value) : null;
+      if (folder?.status === "OK") {
+        return `<span class="tag-chip named-folder-chip" title="${escapeHtml(value)}"><b>${escapeHtml(folder.name || "이름 없는 폴더")}</b><code>${escapeHtml(value)}</code></span>`;
+      }
+      if (folder) {
+        return `<span class="tag-chip named-folder-chip is-failed" title="${escapeHtml(folder.reason || value)}"><b>${escapeHtml(value)}</b><small>확인 실패</small></span>`;
+      }
+      return `<span class="tag-chip" title="${escapeHtml(value)}">${escapeHtml(value)}</span>`;
+    }).join("");
   }
 
   function renderStudentFolderPicker() {
@@ -1375,12 +1808,19 @@
       picker.innerHTML = "<p>먼저 동기화 폴더 ID를 입력해 주세요.</p>";
       return;
     }
-    picker.innerHTML = syncIds.map((id) => `
+    picker.innerHTML = syncIds.map((id) => {
+      const folder = state.folderLookupById.get(id);
+      const name = folder?.status === "OK" ? folder.name : "";
+      return `
       <label class="folder-option" title="${escapeHtml(id)}">
         <input type="checkbox" value="${escapeHtml(id)}" ${selected.has(id) ? "checked" : ""} />
-        <code>${escapeHtml(id)}</code>
+        <span class="folder-option-copy">
+          ${name ? `<b>${escapeHtml(name)}</b>` : ""}
+          <code>${escapeHtml(id)}</code>
+        </span>
       </label>
-    `).join("");
+    `;
+    }).join("");
   }
 
   function syncStudentFolderSelection() {
@@ -1437,12 +1877,24 @@
     $("#confirmResourceProvision").addEventListener("click", startResourceProvision);
     $$('[data-close-resource-modal]').forEach((item) => item.addEventListener("click", closeResourceModal));
     $("#departmentForm").elements.driveIds.addEventListener("input", updateDrivePreflightAvailability);
+    $("#discoverDriveIds").addEventListener("click", discoverDriveIds);
     $("#checkDriveIds").addEventListener("click", checkDriveIds);
+    $("#lookupFolderNames").addEventListener("click", lookupFolderNames);
+    $("#refreshSyncRuns").addEventListener("click", () => loadSyncRuns());
+    $("#syncDepartment").addEventListener("change", renderSyncControls);
+    $$('[data-sync-mode]').forEach((button) => button.addEventListener("click", () => {
+      state.syncMode = button.dataset.syncMode;
+      renderSyncControls();
+    }));
+    $("#startManualSync").addEventListener("click", requestManualSync);
+    $("#confirmManualSync").addEventListener("click", submitManualSync);
+    $$('[data-close-sync-modal]').forEach((item) => item.addEventListener("click", closeSyncConfirmModal));
     $("#environmentGrid").addEventListener("click", copyEnvironmentValue);
     $("#drawerMcpServers").addEventListener("click", copySingleMcpServer);
     $("#confirmCreate").addEventListener("change", (event) => { $("#createDepartment").disabled = !event.target.checked; });
     $$("textarea").forEach((item) => item.addEventListener("input", () => updateTagPreview(item)));
     $("#departmentForm").elements.syncFolderIds.addEventListener("input", renderStudentFolderPicker);
+    $("#departmentForm").elements.syncFolderIds.addEventListener("input", updateFolderLookupAvailability);
     $("#studentFolderPicker").addEventListener("change", syncStudentFolderSelection);
     $("#toggleStudentFolders").addEventListener("click", () => {
       const options = $$("#studentFolderPicker input");
@@ -1464,7 +1916,8 @@
     });
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
-      if ($("#resourceProvisionModal").classList.contains("open")) closeResourceModal();
+      if ($("#syncConfirmModal").classList.contains("open")) closeSyncConfirmModal();
+      else if ($("#resourceProvisionModal").classList.contains("open")) closeResourceModal();
       else if ($("#detailDrawer").classList.contains("open")) closeDrawer();
     });
   }

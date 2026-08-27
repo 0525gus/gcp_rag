@@ -42,12 +42,16 @@ class _LockableStore:
 class _BackfillStore(_LockableStore):
     def __init__(self) -> None:
         self.committed: list[tuple[str, str]] = []
+        self.progress: list[tuple[str, dict[str, object]]] = []
 
     def get_start_page_token(self, _drive_id: str) -> None:
         return None
 
     def set_start_page_token(self, drive_id: str, token: str) -> None:
         self.committed.append((drive_id, token))
+
+    def update_sync_run(self, run_id: str, fields: dict[str, object]) -> None:
+        self.progress.append((run_id, fields))
 
 
 class _BackfillDrive:
@@ -183,6 +187,38 @@ def test_backfill_commits_candidate_only_after_complete_index(
 
     assert result["ok"] is True
     assert store.committed == [("drive", "candidate-token")]
+
+
+def test_backfill_publishes_real_progress_for_manual_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _wire_backfill(monkeypatch)
+    _indexes_everything(monkeypatch)
+
+    result = sync_main.backfill_run(
+        sync_main.BackfillRunBody(
+            driveId="drive",
+            indexBatchSize=3,
+            runId="a" * 32,
+            departmentCode="ee",
+            driveIndex=1,
+            driveCount=2,
+        )
+    )
+
+    assert result["ok"] is True
+    phases = [fields["phase"] for _run_id, fields in store.progress]
+    assert phases[0] == "LISTING"
+    assert "INGESTING" in phases
+    assert "INDEXING" in phases
+    assert phases[-1] == "COMPLETE"
+    run_id, final = store.progress[-1]
+    assert run_id == "a" * 32
+    assert final["departmentCode"] == "ee"
+    assert final["driveIndex"] == 1
+    assert final["driveCount"] == 2
+    assert final["processed"] == 3
+    assert final["totals"]["indexed"] == 3
 
 
 class _SplitSettings(_Settings):

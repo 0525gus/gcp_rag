@@ -29,6 +29,10 @@ main:
           - drive_ids: ${default(map.get(args, "driveIds"), [])}
           - index_batch_size: ${default(map.get(args, "indexBatchSize"), 10)}
           - do_backfill: ${default(map.get(args, "backfill"), false)}
+          - run_id: ${default(map.get(args, "runId"), "")}
+          - department_code: ${default(map.get(args, "departmentCode"), "")}
+          - drive_count: ${len(drive_ids)}
+          - drive_index: 0
           - recover_limit: ${default(map.get(args, "recoverLimit"), 200)}
           - retry_max_attempts: ${default(map.get(args, "retryMaxAttempts"), 3)}
           # 델타 1페이지당 변경 건수. Workflows 변수 한도 512KB 대비 안전 마진
@@ -60,6 +64,7 @@ main:
             # Drive 진입 시 1회. 페이지 루프는 sync_page 부터 반복한다.
             - reset_drive_state:
                 assign:
+                  - drive_index: ${drive_index + 1}
                   - drive_page: 0
                   - drive_has_more: true
                   - drive_backfill: ${do_backfill}
@@ -104,6 +109,10 @@ main:
                                 driveId: ${drive_id}
                                 parserUrl: ${parser_url}
                                 indexBatchSize: ${index_batch_size}
+                                runId: ${run_id}
+                                departmentCode: ${department_code}
+                                driveIndex: ${drive_index}
+                                driveCount: ${drive_count}
                               timeout: 1800
                             result: backfill_resp
                           retry:

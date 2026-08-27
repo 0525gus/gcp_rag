@@ -34,6 +34,13 @@ test("ships the finished Korean console without starter artifacts", async () => 
   assert.match(html, /새 학과 연결/);
   assert.match(html, /<div class="field tag-field drive-id-field">/);
   assert.match(html, /<label for="driveIds">공유드라이브 ID/);
+  assert.match(html, /버킷에서 자동 찾기/);
+  assert.match(js, /\/api\/v1\/departments\/bucket-drive-discovery/);
+  assert.match(html, /폴더 정보 확인/);
+  assert.match(js, /\/api\/v1\/departments\/folder-lookup/);
+  assert.match(html, /<span>동기화 관리<\/span>/);
+  assert.match(html, /id="syncActivePanel"/);
+  assert.match(js, /\/api\/v1\/sync-runs/);
   assert.match(css, /prefers-reduced-motion/);
   assert.match(js, /\/api\/v1\/status-runs/);
   assert.match(page, /redirect\("\/console\/index\.html"\)/);
