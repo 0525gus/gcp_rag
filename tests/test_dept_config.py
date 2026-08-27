@@ -98,7 +98,12 @@ def test_common_values_are_present():
 # --- 잘못된 설정 거부 -----------------------------------------------------
 
 def _write_dept(tmp_path: Path, monkeypatch, body: dict) -> None:
-    body.setdefault("keys", {"staff": "S" * 30, "student": "T" * 30})
+    split_enabled = bool((body.get("corpora") or {}).get("student"))
+    default_keys = {"staff": "S" * 30}
+    if split_enabled:
+        default_keys["student"] = "T" * 30
+        body.setdefault("drive", {}).setdefault("studentFolderIds", ["F_STUDENT"])
+    body.setdefault("keys", default_keys)
     dept_dir = tmp_path / "departments"
     dept_dir.mkdir()
     (dept_dir / "x.yaml").write_text(
@@ -117,7 +122,7 @@ def test_identical_corpora_rejected(tmp_path, monkeypatch):
 
 
 def test_missing_corpus_rejected(tmp_path, monkeypatch):
-    _write_dept(tmp_path, monkeypatch, {"corpora": {"staff": "c/1"}})
+    _write_dept(tmp_path, monkeypatch, {"corpora": {"student": "c/2"}})
     with pytest.raises(SystemExit, match="corpora"):
         build_env("x", "staff")
 
@@ -134,7 +139,7 @@ def test_unknown_audience_rejected():
 def test_every_department_builds():
     """학과 yaml 이 깨졌으면 배포 때가 아니라 여기서 걸린다."""
     for code in list_departments():
-        for audience in ("staff", "student"):
+        for audience in dept_config.configured_audiences(code):
             env = build_env(code, audience)
             assert env["MCP_SERVICE_NAME"] == f"rag-mcp-{code}-{audience}"
 
@@ -143,7 +148,7 @@ def test_all_departments_use_distinct_corpora():
     """학과끼리 코퍼스를 공유하면 한 학과가 남의 자료를 검색해준다."""
     seen: dict[str, str] = {}
     for code in list_departments():
-        for audience in ("staff", "student"):
+        for audience in dept_config.configured_audiences(code):
             corpus = build_env(code, audience)["RAG_CORPUS_NAME"]
             owner = f"{code}/{audience}"
             assert corpus not in seen, f"코퍼스 중복: {owner} 와 {seen[corpus]}"
@@ -262,7 +267,7 @@ def test_all_departments_use_distinct_keys():
     """학과끼리 키가 겹치면 한 키로 남의 코퍼스가 열린다."""
     seen: dict[str, str] = {}
     for code in list_departments():
-        for audience in ("staff", "student"):
+        for audience in dept_config.configured_audiences(code):
             key = build_env(code, audience)["MCP_API_KEY"]
             owner = f"{code}/{audience}"
             assert key not in seen, f"키 중복: {owner} 와 {seen[key]}"
@@ -276,7 +281,7 @@ def test_all_departments_use_distinct_keys():
 # 남의 학과 코퍼스로 문서가 들어간다.** 그래서 값을 확인하는 것으로 끝내지
 # 않고 sync 가 실제로 쓰는 파서로 되읽어 대조한다.
 
-from shared.config import Settings, _departments_from_json  # noqa: E402
+from shared.config import Settings, _departments_from_json
 
 
 def _write_depts(tmp_path: Path, monkeypatch, depts: dict[str, dict]) -> None:

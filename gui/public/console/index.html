@@ -266,14 +266,22 @@
                       <div class="resource-card-title"><span class="resource-card-icon corpus">R</span><div><h3 id="corpusCardTitle">RAG 코퍼스</h3><small id="corpusResourceMeta">기존 코퍼스 선택 또는 새로 생성</small></div></div>
                       <button type="button" class="button secondary compact resource-create-button" id="provisionCorpora">코퍼스 2개 만들기</button>
                     </header>
+                    <div class="corpus-mode-setting">
+                      <div class="corpus-mode-toggle" role="group" aria-label="코퍼스 구성">
+                        <button type="button" data-corpus-mode="single"><b>단일 코퍼스</b><small>내부 조직·단일 공개 범위</small></button>
+                        <button type="button" class="active" data-corpus-mode="split"><b>학생 분리</b><small>교직원·학생 검색 범위 분리</small></button>
+                      </div>
+                      <p id="corpusModeHelp">교직원 전체와 학생 공개 문서를 서로 다른 코퍼스로 운영합니다.</p>
+                      <span class="field-error" data-error="corpusMode"></span>
+                    </div>
                     <div class="resource-card-fields">
                       <label class="field">
-                        <span>교직원 코퍼스 <em>필수</em></span>
+                        <span><span id="staffCorpusLabel">교직원 코퍼스</span> <em>필수</em></span>
                         <select name="staffCorpus" disabled><option value="">RAG 코퍼스 불러오는 중…</option></select>
-                        <small>학과 전체 문서 검색용</small>
+                        <small id="staffCorpusHelp">학과 전체 문서 검색용</small>
                         <span class="field-error" data-error="corpora.staff"></span>
                       </label>
-                      <label class="field">
+                      <label class="field" id="studentCorpusField">
                         <span>학생 코퍼스 <em>필수</em></span>
                         <select name="studentCorpus" disabled><option value="">RAG 코퍼스 불러오는 중…</option></select>
                         <small>학생 공개 문서만 분리</small>
@@ -307,7 +315,7 @@
                   <summary>고급 설정 <span>최소 인스턴스</span></summary>
                   <div class="form-grid two-columns">
                     <label class="field"><span>교직원 최소 인스턴스</span><input name="staffMin" type="number" min="0" value="0" /></label>
-                    <label class="field"><span>학생 최소 인스턴스</span><input name="studentMin" type="number" min="0" value="0" /></label>
+                    <label class="field" id="studentMinField"><span>학생 최소 인스턴스</span><input name="studentMin" type="number" min="0" value="0" /></label>
                   </div>
                 </details>
               </div>
@@ -325,10 +333,6 @@
                   <div class="field-action-heading">
                     <label for="driveIds">공유드라이브 ID <em>필수</em></label>
                     <div class="field-action-buttons">
-                      <button type="button" class="inline-check-button" id="discoverDriveIds" disabled>
-                        <span class="inline-check-dot" aria-hidden="true"></span>
-                        버킷에서 자동 찾기
-                      </button>
                       <button type="button" class="inline-check-button" id="checkDriveIds" disabled>
                         <span class="inline-check-dot" aria-hidden="true"></span>
                         연결 확인
@@ -338,13 +342,13 @@
                   <textarea id="driveIds" name="driveIds" rows="2" placeholder="0A_SHARED_DRIVE_ID"></textarea>
                   <span class="tag-preview" data-tags="driveIds"></span>
                   <span class="preflight-result" id="drivePreflightStatus" aria-live="polite"></span>
-                  <section class="bucket-discovery-result hidden" id="bucketDiscoveryResult" aria-live="polite"></section>
+                  <span class="preflight-result" id="driveConflictStatus" aria-live="polite"></span>
                   <span class="field-error" data-error="drive.driveIds"></span>
                 </div>
                 <div class="form-grid two-columns scope-grid">
                   <div class="field tag-field sync-folder-field">
                     <div class="field-action-heading">
-                      <label for="syncFolderIds">동기화 폴더 ID <em>필수</em></label>
+                      <label for="syncFolderIds">동기화 폴더 ID <em>필수</em><span class="field-help-tooltip" tabindex="0" aria-label="동기화 시킬 폴더를 모두 입력해 주세요. 동기화 대상 폴더는 교직원 대상 폴더와 같습니다. " data-tooltip="동기화 시킬 폴더를 모두 입력해 주세요. 동기화 대상 폴더는 교직원 대상 범위와 같습니다. ">?</span></label>
                       <button type="button" class="inline-check-button" id="lookupFolderNames" disabled>
                         <span class="inline-check-dot" aria-hidden="true"></span>
                         폴더 정보 확인
@@ -355,9 +359,9 @@
                     <span class="preflight-result" id="folderLookupStatus" aria-live="polite"></span>
                     <span class="field-error" data-error="drive.syncFolderIds"></span>
                   </div>
-                  <div class="field tag-field">
+                  <div class="field tag-field" id="studentFolderField">
                     <span class="picker-heading" id="studentFolderLabel">
-                      <span>학생 폴더 ID <em>필수</em></span>
+                      <span>학생 폴더 ID <em>필수</em><span class="field-help-tooltip" tabindex="0" aria-label="동기화 폴더 ID 중 학생 코퍼스에 포함할 폴더를 선택해 주세요." data-tooltip="동기화 폴더 ID 중 학생 코퍼스에 포함할 폴더를 선택해 주세요.">?</span></span>
                       <button type="button" class="picker-toggle" id="toggleStudentFolders" disabled>전체 선택</button>
                     </span>
                     <input type="hidden" name="studentFolderIds" />
@@ -473,6 +477,14 @@
                   <button type="button" data-corpus-audience="student">학생</button>
                 </div>
               </div>
+              <label class="corpus-generate-toggle">
+                <input type="checkbox" id="corpusGenerateToggle" />
+                <span></span>
+                <div>
+                  <b>Gemini 답변</b>
+                  <small>검색된 원문을 근거로 답합니다. 체크하지 않을시 질의에 대해 RAG 코퍼스 검색 결과만 보여줍니다.</small>
+                </div>
+              </label>
               <div class="corpus-security-note"><span>✓</span><p>MCP 키와 gcloud 토큰은 브라우저에 전달하지 않습니다.</p></div>
             </aside>
             <section class="panel corpus-chat-panel">
@@ -484,7 +496,7 @@
                 <div class="corpus-chat-empty"><span class="chat-empty-mark">R</span><h2>코퍼스에 질문해 보세요</h2><p>답변을 생성하지 않고 검색된 원문과 출처를 그대로 보여줍니다.</p></div>
               </div>
               <form class="corpus-chat-composer" id="corpusChatForm">
-                <textarea id="corpusChatInput" rows="2" maxlength="1000" placeholder="예: 수강신청 일정은 언제인가요?" aria-label="코퍼스 질문"></textarea>
+                <textarea id="corpusChatInput" rows="2" maxlength="1000" placeholder="예: 수강신청 관련 자료가 있나요?" aria-label="코퍼스 질문"></textarea>
                 <button type="submit" class="button primary" id="sendCorpusQuery">질문 보내기</button>
               </form>
             </section>
@@ -548,6 +560,50 @@
         <footer>
           <button type="button" class="button ghost" data-close-resource-modal id="closeResourceProvision">취소</button>
           <button type="button" class="button primary" id="confirmResourceProvision">리소스 만들기</button>
+        </footer>
+      </div>
+    </aside>
+
+    <aside class="resource-modal" id="mcpDeploymentModal" aria-hidden="true" aria-labelledby="mcpDeploymentTitle">
+      <div class="resource-modal-backdrop" data-close-mcp-deployment></div>
+      <div class="resource-modal-panel deployment-modal-panel" role="dialog" aria-modal="true">
+        <header>
+          <div><span class="eyebrow">MCP DEPLOYMENT</span><h2 id="mcpDeploymentTitle">MCP 배포</h2><p id="mcpDeploymentDescription">학과 설정을 Cloud Run 서비스로 배포합니다.</p></div>
+          <button type="button" class="icon-button" data-close-mcp-deployment aria-label="MCP 배포 창 닫기">×</button>
+        </header>
+        <div class="resource-modal-body">
+          <div class="resource-plan-context">
+            <div><span>DEPARTMENT</span><b id="mcpDeploymentDepartment">—</b></div>
+            <div><span>SERVICES</span><b id="mcpDeploymentServices">—</b></div>
+          </div>
+          <div class="deployment-step-list" id="mcpDeploymentSteps"></div>
+          <div class="deployment-log-wrap hidden" id="mcpDeploymentLogWrap">
+            <div><span>DEPLOY LOG</span><small>키와 토큰은 표시하지 않습니다</small></div>
+            <pre id="mcpDeploymentLog"></pre>
+          </div>
+          <div class="validation-banner hidden" id="mcpDeploymentError"></div>
+        </div>
+        <footer>
+          <button type="button" class="button ghost" data-close-mcp-deployment id="closeMcpDeployment">나중에 배포</button>
+          <button type="button" class="button primary" id="startMcpDeployment">지금 MCP 배포</button>
+        </footer>
+      </div>
+    </aside>
+
+    <aside class="resource-modal" id="driveConflictModal" aria-hidden="true" aria-labelledby="driveConflictTitle">
+      <div class="resource-modal-backdrop" data-close-drive-conflict></div>
+      <div class="resource-modal-panel sync-confirm-panel" role="dialog" aria-modal="true">
+        <header>
+          <div><span class="eyebrow">SHARED DRIVE</span><h2 id="driveConflictTitle">공유드라이브가 이미 사용 중입니다</h2><p id="driveConflictDescription">같은 Drive를 여러 학과가 쓰면 문서가 먼저 등록된 학과 코퍼스로 들어갈 수 있습니다.</p></div>
+          <button type="button" class="icon-button" data-close-drive-conflict aria-label="공유드라이브 중복 확인 창 닫기">×</button>
+        </header>
+        <div class="resource-modal-body">
+          <div class="sync-confirm-target" id="driveConflictTarget"></div>
+          <div class="sync-confirm-warning"><span>!</span><p><b>저장은 가능합니다.</b>문서가 먼저 등록된 학과 코퍼스로 들어갈 수 있고, 배포 전 설정 검증은 중복을 거부할 수 있습니다.</p></div>
+        </div>
+        <footer>
+          <button type="button" class="button ghost" data-close-drive-conflict>취소</button>
+          <button type="button" class="button primary" id="confirmDriveConflict">그래도 생성</button>
         </footer>
       </div>
     </aside>

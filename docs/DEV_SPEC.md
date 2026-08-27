@@ -29,9 +29,9 @@
 - 포함
   - Drive 공유드라이브 수집·변환·색인
   - HWP/HWPX → 마크다운
-  - 학생/교직원 코퍼스 분리 (Drive 경로 기준)
+  - 단일 코퍼스 또는 학생/교직원 코퍼스 분리 (Drive 경로 기준)
   - 벡터 검색 및 후처리
-  - MCP 연동 (학과당 교직원·학생 서비스 2개)
+  - MCP 연동 (조직당 기본 1개, 학생 분리 시 2개)
   - 학과별 YAML 생성·수정과 GCP 리소스 상태 확인용 로컬 관리 콘솔
 - 제외
   - 답변 문장 생성
@@ -53,7 +53,8 @@
 ### 1. 전체 구조
 
 `rag-parser`, `rag-sync`, Firestore는 공통 실행 환경을 사용한다. Drive 수집 범위,
-GCS 버킷 2개, RAG 코퍼스 2개, MCP 서비스 2개와 API 키는 학과별로 분리한다.
+GCS 버킷 2개와 기본 RAG 코퍼스·MCP 서비스는 학과별로 분리한다. 학생 분리 모드는
+학생 코퍼스·MCP를 각각 하나씩 추가한다.
 `rag-sync`는 `DEPARTMENTS_JSON`의 Drive ID → 학과 매핑으로 요청을 해당 학과
 리소스에 라우팅한다.
 
@@ -99,7 +100,8 @@ GCS 버킷 2개, RAG 코퍼스 2개, MCP 서비스 2개와 API 키는 학과별�
 | `GET /sync/jobs/{id}` | 장시간 작업 진행률 |
 
 - IAM만 허용 (공개 아님)
-- 현행 학과 설정은 `corpora.staff`, `corpora.student`, `drive.studentFolderIds`를 모두 요구한다
+- `corpora.staff`는 항상 필요하다. 학생 분리는 `corpora.student`,
+  `drive.studentFolderIds`, `keys.student`가 모두 있을 때만 활성화한다
 
 #### 나. rag-parser
 
@@ -167,17 +169,24 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 - 리소스 생성은 `계획 미리보기 → 사용자 확인 → 백그라운드 실행 → 결과 검증` 순서다.
   버킷은 uniform access, public access prevention, Standard, soft delete 7일로 생성한다
 - 계획에 자동 생성된 버킷 이름과 코퍼스 표시 이름은 생성 전에 수정할 수 있고 서버가
-  형식과 중복을 다시 검증한다. 코퍼스 기본값은 `{code}-rag-corpus-staff`,
-  `{code}-rag-corpus-student`다
+  형식과 중복을 다시 검증한다. 단일 모드는 `{code}-rag-corpus` 하나, 학생
+  분리 모드는 `{code}-rag-corpus-student`를 추가한다
 - 생성은 누락 리소스만 대상으로 하며 부분 실패 시 성공한 리소스를 유지하고 실패
   항목만 다시 시도한다. 상태 확인만으로는 리소스를 생성하지 않는다
-- `hwpOriginal`과 `source`, 교직원과 학생 코퍼스는 각각 서로 달라야 한다
-- 버킷 선택 시 기존 사용 학과를 표시한다. 공유드라이브 ID는 다른 학과와 중복 불가
-- Drive 범위의 `버킷에서 자동 찾기`는 선택한 버킷 객체명에서 `fileId`를 복원하고
-  `doc_state.driveId`를 우선 사용한다. 상태가 없으면 Compute SA로 Drive API를 조회하며,
-  다른 학과에 이미 연결된 Drive는 결과에 표시하되 입력란에는 자동 추가하지 않는다
+- `hwpOriginal`과 `source`는 서로 달라야 한다. 학생 분리 시 두 코퍼스도 달라야 한다
+- 생성 후 단일/학생 분리 모드 전환은 일반 설정 수정에서 막는다. 코퍼스 재색인과 기존
+  MCP 서비스 정리가 필요한 별도 마이그레이션으로 처리한다
+- 학과 생성이 끝나면 대시보드로 이동한다. MCP 배포는 이어서 뜨는 확인 창과
+  상태 상세의 `미배포` 항목에서 시작할 수 있다.
+  단일 모드는 기본 MCP 1개, 학생 분리 모드는 2개를 배포하며 설정·이미지·Cloud Run·
+  Ready·Health 단계를 백그라운드 작업으로 표시한다. 출력의 MCP 키와 토큰은 제거한다
+- 버킷 선택 시 기존 사용 학과를 표시한다. 공유드라이브 ID가 다른 학과와 겹치면
+  생성·저장을 막지 않고 확인 창에서 진행 여부를 고른다. 확인 없이는
+  `409 DRIVE_ID_CONFLICT`다. 배포 맵 검증은 여전히 중복을 거부한다
 - `폴더 정보 확인`은 입력한 `syncFolderIds`를 Compute SA로 Drive API에서 조회한다.
   설정에 저장되는 ID는 유지하고, 확인된 실제 폴더명을 태그와 학생 폴더 선택 목록에 표시한다.
+  GUI 라벨은 `동기화 폴더 ID`, `학생 폴더 ID`를 사용하고 라벨 옆 `?` 툴팁으로
+  전자가 전체 수집 범위이며 후자가 그 부분집합임을 설명한다
   폴더가 아닌 항목·휴지통 항목·접근 불가 ID는 개별 실패로 안내한다
 - `동기화 관리` 탭은 학과별 변경분 동기화 또는 전체 backfill을 수동 실행한다.
   선택 학과의 Drive만 Workflow 인자로 넘기며, 같은 Drive에 ACTIVE 실행이 있으면 중복 실행을
@@ -188,9 +197,12 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 - 학과 YAML을 새로 생성하면 `동기화 관리`로 이동해 해당 학과가 선택된다. 생성만으로
   backfill을 자동 시작하지 않으며 비용이 드는 전체 적재는 항상 사용자가 명시적으로 실행한다
 - 학과 목록 행을 누르면 실제 Cloud Run 교직원·학생 MCP URL과 준비 상태를 표시한다.
-  상세 패널에서 각 URL을 개별 복사할 수 있다
-- `코퍼스 대화` 탭은 학과와 교직원·학생 범위를 선택해 Vertex RAG의 실제 상위
-  컨텍스트와 출처를 조회한다. 생성형 답변은 만들지 않으며 토큰은 서버 밖으로 노출하지 않는다
+  상세 패널에서 각 URL과 해당 범위의 MCP 키를 개별 복사할 수 있다. 키는 버튼을 누른
+  순간에만 로컬 세션 검증 POST 응답으로 전달하며 목록·설정 API에는 포함하지 않는다.
+  클립보드에는 FactChat 인증 헤더에 바로 쓸 수 있는 `Bearer {key}` 형식으로 기록한다
+- `코퍼스 확인` 탭은 기본이 Vertex RAG 검색 근거 조회다. `Gemini 답변`을 켜면
+  같은 gcloud 계정으로 `gemini-2.5-flash`(Vertex global endpoint) 답을 붙이며
+  별도 API 키가 필요 없다. 토큰은 서버 밖으로 노출하지 않는다
 - 공유드라이브 ID는 저장 전에 현재 프로젝트의 기본 Compute SA
   (`{projectNumber}-compute@developer.gserviceaccount.com`)로 실제 접근 및 변경 토큰을 확인
 - 기존 YAML 수정 시 MCP 키는 API로 반환하지 않고 그대로 보존한다. revision hash가
@@ -203,7 +215,7 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 | 파일 | 내용 |
 |---|---|
 | `config/common.yaml` | 프로젝트, 리전, Artifact Registry, Firestore, 성능·검색 기본값 |
-| `config/departments/{code}.yaml` | 학과명, 코퍼스 2개, 버킷 2개, Drive 범위, MCP 키, 최소 인스턴스 |
+| `config/departments/{code}.yaml` | 학과명, 코퍼스 1~2개, 버킷 2개, Drive 범위, MCP 키, 최소 인스턴스 |
 
 `dept_config.py`는 레거시 공용 버킷 키를 읽을 수 있지만, 현행 GUI와 신규 학과 운영은
 학과 YAML의 버킷 2개를 필수로 취급한다. 한쪽만 지정하거나 두 값이 같으면 거부한다.
@@ -211,14 +223,16 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 학과 설정 검증 계약:
 
 - 파일명과 `code`는 영문 소문자로 시작하는 2~20자 영숫자·하이픈
-- 두 코퍼스는 common의 프로젝트·리전과 일치하는 실제 리소스이며 서로 달라야 함
+- 기본 코퍼스는 common의 프로젝트·리전과 일치해야 한다. 학생 분리 시 학생 코퍼스도
+  같은 조건을 만족하고 기본 코퍼스와 달라야 함
 - 두 버킷은 common의 리전에 있고 uniform bucket-level access와 public access
   prevention이 적용된 실제 리소스이며 서로 달라야 함
-- `driveIds`, `syncFolderIds`, `studentFolderIds`는 중복·공백을 정규화하고,
-  `studentFolderIds`는 `syncFolderIds`의 부분집합이어야 함
-- 공유드라이브 ID는 학과 간 중복 불가
-- `minInstances.staff`, `minInstances.student`는 0 이상의 정수
-- `keys.staff`, `keys.student`는 서로 달라야 하며 신규 생성 때 서버가 자동 발급
+- `driveIds`, `syncFolderIds`, `studentFolderIds`는 중복·공백을 정규화한다. 학생
+  분리 시 `studentFolderIds`는 필수이며 `syncFolderIds`의 부분집합이어야 함
+- 공유드라이브 ID가 다른 학과와 겹치면 GUI는 확인 후 저장할 수 있다.
+  배포용 `DEPARTMENTS_JSON` 검증은 여전히 중복을 거부한다
+- 활성화된 범위의 `minInstances`는 0 이상의 정수
+- 기본 키는 항상 자동 발급하며 학생 분리 시 별도의 학생 키를 자동 발급
 
 상태 레이어:
 
@@ -226,7 +240,7 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 |---|---|
 | LOCAL | YAML 파싱·스키마·공통 설정 일치·MCP 키 존재/분리/길이 |
 | RESOURCE | gcloud 로그인, 버킷 위치, Native Firestore, 코퍼스 ACTIVE, Drive SA 실접근 |
-| DEPLOY | parser·sync·학과별 MCP 2개의 Ready 및 latest revision 일치 |
+| DEPLOY | parser·sync·학과별 활성 MCP 1~2개의 Ready 및 latest revision 일치 |
 | RUNTIME | 준비된 서비스의 `/health`; parser·sync는 사용자 ID token으로 호출 |
 | SYNC | `rag-daily-sync` 최근 실행 상태와 완료 후 경과 시간 |
 
@@ -243,20 +257,24 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 | `GET /api/v1/common-config/resources` | 선택 프로젝트의 Artifact Registry·Firestore 조회 |
 | `POST /api/v1/common-config` | 최초 공통 설정 생성(기존 파일 덮어쓰기 금지) |
 | `GET /api/v1/departments/resource-options` | 표시 이름이 포함된 코퍼스와 보호된 리전 버킷 조회 |
-| `POST /api/v1/departments/drive-preflight` | 입력한 공유드라이브 ID의 Compute SA 실접근 확인 |
-| `POST /api/v1/departments/preview` | 신규 YAML 정규화·검증·비밀값 제거 preview |
-| `POST /api/v1/departments` | 신규 학과 YAML 원자적 생성과 MCP 키 자동 생성 |
+| `POST /api/v1/departments/drive-preflight` | 입력한 공유드라이브 ID의 Compute SA 실접근 확인. 다른 학과와 겹치면 `driveConflicts`를 함께 반환 |
+| `POST /api/v1/departments/preview` | 신규 YAML 정규화·검증·비밀값 제거 preview. Drive 중복은 `driveConflicts` 경고 |
+| `POST /api/v1/departments` | 신규 학과 YAML 원자적 생성과 MCP 키 자동 생성. Drive 중복은 확인 전 `409 DRIVE_ID_CONFLICT` |
 | `GET /api/v1/departments/{code}/config` | 비밀 키를 제외한 기존 학과 설정 조회 |
-| `POST /api/v1/corpus-query` | 선택한 학과·범위 코퍼스의 실제 검색 컨텍스트 조회 |
+| `POST /api/v1/departments/{code}/mcp-keys/{audience}` | 명시적으로 선택한 MCP 키 1개 복사 |
+| `POST /api/v1/departments/{code}/mcp-deployments` | 학과별 MCP Cloud Run 백그라운드 배포 시작 |
+| `GET /api/v1/mcp-deployments[/{runId}]` | 진행 중·완료된 MCP 배포 단계와 정제 로그 조회 |
+| `POST /api/v1/corpus-query` | 선택한 학과·범위 코퍼스 검색. `generate=true`면 같은 gcloud 토큰으로 Gemini 답변 |
 | `POST /api/v1/departments/{code}/preview` | 수정안 검증과 preview |
-| `PUT /api/v1/departments/{code}` | revision 확인 후 수정, 기존 MCP 키 보존 |
+| `PUT /api/v1/departments/{code}` | revision 확인 후 수정, 기존 MCP 키 보존. Drive 중복은 확인 전 `409 DRIVE_ID_CONFLICT` |
 | `POST /api/v1/status-runs` | 전체 또는 지정 학과 온라인 상태 검사 시작 |
 | `GET /api/v1/status-runs/{runId}` | 진행률·검사 결과 조회 |
 | `DELETE /api/v1/status-runs/{runId}` | 실행 취소 요청 |
 
 보안 경계:
 
-- 응답에 MCP 키, gcloud access/ID token, Authorization 헤더를 포함하지 않는다
+- 목록·설정 응답에 MCP 키, gcloud access/ID token, Authorization 헤더를 포함하지 않는다.
+  MCP 키는 로컬 세션이 검증된 명시적 복사 POST에서 선택한 값 하나만 반환한다
 - YAML preview의 키는 `<자동 생성>` 또는 `<기존 키 유지>`로만 표시한다
 - 서버는 loopback 주소에만 bind하며 Origin, CSP, frame 차단 헤더를 적용한다
 - subprocess는 인자 배열과 `shell=False`를 사용한다

@@ -61,6 +61,7 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dept_gui._RUNS.clear()
     dept_gui._RESOURCE_PLANS.clear()
     dept_gui._PROVISION_RUNS.clear()
+    dept_gui._MCP_DEPLOY_RUNS.clear()
     dept_gui._SYNC_AUTH_TOKEN = ""
     dept_gui._SYNC_AUTH_TOKEN_EXPIRES = 0.0
     return dept_dir
@@ -106,6 +107,94 @@ def test_preview_normalises_ids_and_never_returns_secret(isolated_config: Path) 
     assert body["valid"] is True
     assert "<자동 생성>" in body["yamlPreview"]
     assert "MCP_API_KEY" not in response.text
+    assert body["driveConflicts"] == []
+
+
+def test_duplicate_drive_ids_are_preview_warnings_not_errors(isolated_config: Path) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    payload = _payload()
+    payload["code"] = "cs"
+    payload["name"] = "컴퓨터공학과"
+
+    preview = client.post("/api/v1/departments/preview", headers=headers, json=payload)
+
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["valid"] is True
+    assert "drive.driveIds" not in body["fieldErrors"]
+    assert body["driveConflicts"] == [
+        {"code": "ee", "name": "전자공학과", "driveIds": ["DRIVE-1"]}
+    ]
+    assert any("ee" in item for item in body["warnings"])
+
+
+def test_duplicate_drive_ids_require_explicit_ack_then_create(isolated_config: Path) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    payload = _payload()
+    payload["code"] = "cs"
+    payload["name"] = "컴퓨터공학과"
+
+    blocked = client.post("/api/v1/departments", headers=headers, json=payload)
+    assert blocked.status_code == 409
+    error = blocked.json()["error"]
+    assert error["code"] == "DRIVE_ID_CONFLICT"
+    assert error["driveConflicts"][0]["code"] == "ee"
+    assert not (isolated_config / "cs.yaml").exists()
+
+    payload["allowDuplicateDriveIds"] = True
+    created = client.post("/api/v1/departments", headers=headers, json=payload)
+    assert created.status_code == 201
+    saved = yaml.safe_load((isolated_config / "cs.yaml").read_text(encoding="utf-8"))
+    assert saved["drive"]["driveIds"] == ["DRIVE-1"]
+
+
+def test_duplicate_drive_ids_require_ack_on_update(isolated_config: Path) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    payload = _payload()
+    payload["code"] = "cs"
+    payload["name"] = "컴퓨터공학과"
+    payload["drive"]["driveIds"] = ["DRIVE-2"]
+    assert client.post("/api/v1/departments", headers=headers, json=payload).status_code == 201
+
+    current = client.get("/api/v1/departments/cs/config").json()
+    payload["drive"]["driveIds"] = ["DRIVE-1"]
+    payload["configRevision"] = current["configRevision"]
+    blocked = client.put("/api/v1/departments/cs", headers=headers, json=payload)
+    assert blocked.status_code == 409
+    assert blocked.json()["error"]["code"] == "DRIVE_ID_CONFLICT"
+
+    payload["allowDuplicateDriveIds"] = True
+    updated = client.put("/api/v1/departments/cs", headers=headers, json=payload)
+    assert updated.status_code == 200
+    saved = yaml.safe_load((isolated_config / "cs.yaml").read_text(encoding="utf-8"))
+    assert saved["drive"]["driveIds"] == ["DRIVE-1"]
+
+
+def test_single_corpus_preview_and_create_omit_student_resources(
+    isolated_config: Path,
+) -> None:
+    client, headers = _client()
+    payload = _payload()
+    payload["corpusMode"] = "single"
+    payload["corpora"]["student"] = ""
+    payload["drive"]["studentFolderIds"] = []
+
+    preview = client.post("/api/v1/departments/preview", headers=headers, json=payload)
+    assert preview.status_code == 200
+    assert preview.json()["valid"] is True
+    assert "student:" not in preview.json()["yamlPreview"]
+
+    created = client.post("/api/v1/departments", headers=headers, json=payload)
+    assert created.status_code == 201
+    saved = yaml.safe_load((isolated_config / "ee.yaml").read_text(encoding="utf-8"))
+    assert saved["corpora"] == {"staff": payload["corpora"]["staff"]}
+    assert saved["keys"].keys() == {"staff"}
+    assert "studentFolderIds" not in saved["drive"]
+    assert dept_config.configured_audiences("ee") == ("staff",)
+    assert client.get("/api/v1/departments/ee/config").json()["corpusMode"] == "single"
 
 
 def test_department_resource_options_include_display_names(isolated_config: Path) -> None:
@@ -173,6 +262,161 @@ def test_department_mcp_servers_return_actual_cloud_run_urls(
     assert servers[1]["healthUrl"].endswith("/health")
 
 
+def test_single_corpus_department_lists_only_default_mcp(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    payload = _payload()
+    payload["corpusMode"] = "single"
+    assert client.post("/api/v1/departments", headers=headers, json=payload).status_code == 201
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_json",
+        lambda *args, **kwargs: (
+            True,
+            [
+                {
+                    "metadata": {"name": "rag-mcp-ee-staff"},
+                    "status": {
+                        "url": "https://rag-mcp-ee-staff.example.run.app",
+                        "conditions": [{"type": "Ready", "status": "True"}],
+                    },
+                }
+            ],
+        ),
+    )
+
+    servers = client.get("/api/v1/departments/ee/mcp-servers").json()["servers"]
+
+    assert [item["audience"] for item in servers] == ["staff"]
+    assert servers[0]["label"] == "기본"
+
+
+def test_mcp_deployment_tracks_steps_and_redacts_key(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    payload = _payload()
+    payload["corpusMode"] = "single"
+    assert client.post("/api/v1/departments", headers=headers, json=payload).status_code == 201
+    saved = yaml.safe_load((isolated_config / "ee.yaml").read_text(encoding="utf-8"))
+    secret = saved["keys"]["staff"]
+
+    class DeferredThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+    class DeferredThreading:
+        Thread = DeferredThread
+
+    monkeypatch.setattr(dept_gui, "threading", DeferredThreading)
+    run = dept_gui.start_mcp_deployment("ee")
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *args, **kwargs: (True, {}))
+
+    def fake_deploy(code: str, *, skip_build: bool, on_line) -> int:
+        assert code == "ee"
+        assert skip_build is True
+        on_line(f"deploying with hidden key {secret}")
+        return 0
+
+    monkeypatch.setattr(dept_gui, "_run_mcp_deploy_script", fake_deploy)
+    monkeypatch.setattr(
+        dept_gui,
+        "department_mcp_servers",
+        lambda code: {
+            "servers": [
+                {
+                    "serviceName": "rag-mcp-ee-staff",
+                    "status": "READY",
+                    "healthUrl": "https://mcp.example/health",
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(dept_gui, "_http_json", lambda *args, **kwargs: (200, {"ok": True}, 5))
+
+    dept_gui._execute_mcp_deployment(run["runId"])
+    result = dept_gui._MCP_DEPLOY_RUNS[run["runId"]]
+
+    assert result["status"] == "COMPLETED"
+    assert all(step["status"] == "COMPLETE" for step in result["steps"])
+    assert secret not in "\n".join(result["logs"])
+    assert "***" in "\n".join(result["logs"])
+
+
+def test_missing_mcp_status_offers_deployment_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
+
+    def fake_gcloud(args: list[str], timeout: int = 12):
+        service = args[3] if args[:3] == ["run", "services", "describe"] else ""
+        if service == "rag-mcp-it-staff":
+            return False, "NOT_FOUND: service does not exist"
+        return (
+            True,
+            {
+                "status": {
+                    "url": f"https://{service}.example.run.app",
+                    "latestReadyRevisionName": f"{service}-00001",
+                    "latestCreatedRevisionName": f"{service}-00001",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                }
+            },
+        )
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+    monkeypatch.setattr(dept_gui, "_run_command", lambda *args, **kwargs: (True, "token"))
+    monkeypatch.setattr(dept_gui, "_http_json", lambda *args, **kwargs: (200, {"ok": True}, 5))
+
+    checks = dept_gui._deploy_and_runtime_status(
+        "it",
+        {"GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3"},
+        {"corpora": {"staff": "corpus"}},
+    )
+    missing = next(item for item in checks if item["name"] == "mcp-it-staff")
+
+    assert missing["status"] == "WARN"
+    assert missing["actionType"] == "MCP_DEPLOY"
+    assert missing["departmentCode"] == "it"
+
+
+def test_mcp_deployment_api_starts_and_returns_run(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    expected = {
+        "runId": "deploy-123",
+        "code": "ee",
+        "status": "RUNNING",
+        "steps": [],
+        "logs": [],
+    }
+    monkeypatch.setattr(dept_gui, "start_mcp_deployment", lambda code: expected)
+
+    response = client.post("/api/v1/departments/ee/mcp-deployments", headers=headers)
+
+    assert response.status_code == 202
+    assert response.json() == expected
+
+
+def test_mcp_key_copy_returns_only_explicit_audience_key(isolated_config: Path) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    saved = yaml.safe_load((isolated_config / "ee.yaml").read_text(encoding="utf-8"))
+
+    response = client.post(
+        "/api/v1/departments/ee/mcp-keys/staff",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"audience": "staff", "key": saved["keys"]["staff"]}
+    assert saved["keys"]["student"] not in response.text
+    assert client.get("/api/v1/departments/ee/config").json().get("keys") is None
+
+
 def test_corpus_query_uses_selected_department_corpus(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -214,6 +458,89 @@ def test_corpus_query_uses_selected_department_corpus(
         "/student-1"
     )
     assert captured["payload"]["query"]["ragRetrievalConfig"]["topK"] == 3
+    assert "answer" not in response.json()
+
+
+def test_corpus_query_generate_uses_gcloud_token_and_returns_answer(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    monkeypatch.setattr(dept_gui, "_provision_access_token", lambda: "caller-token")
+    urls: list[str] = []
+
+    def fake_post(url: str, payload: dict, token: str = "", timeout: int = 10):
+        urls.append(url)
+        assert token == "caller-token"
+        if url.endswith(":retrieveContexts"):
+            return (
+                200,
+                {
+                    "contexts": {
+                        "contexts": [
+                            {
+                                "sourceDisplayName": "학사 안내.md",
+                                "text": "수강신청은 2월에 합니다.",
+                                "score": 0.1,
+                            }
+                        ]
+                    }
+                },
+                12,
+            )
+        assert url.endswith(":generateContent")
+        assert "locations/global/publishers/google/models/gemini-2.5-flash" in url
+        assert "asia-northeast3" not in url
+        assert "수강신청" in payload["contents"][0]["parts"][0]["text"]
+        return (
+            200,
+            {"candidates": [{"content": {"parts": [{"text": "수강신청은 2월입니다. [1]"}]}}]},
+            40,
+        )
+
+    monkeypatch.setattr(dept_gui, "_http_post_json", fake_post)
+    response = client.post(
+        "/api/v1/corpus-query",
+        headers=headers,
+        json={"code": "ee", "audience": "staff", "query": "수강신청", "generate": True},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["answer"] == "수강신청은 2월입니다. [1]"
+    assert body["answerModel"] == "gemini-2.5-flash"
+    assert body["answerError"] == ""
+    assert len(urls) == 2
+
+
+def test_corpus_query_generate_keeps_contexts_when_model_fails(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    monkeypatch.setattr(dept_gui, "_provision_access_token", lambda: "caller-token")
+
+    def fake_post(url: str, payload: dict, token: str = "", timeout: int = 10):
+        if url.endswith(":retrieveContexts"):
+            return (
+                200,
+                {"contexts": {"contexts": [{"sourceDisplayName": "안내", "text": "본문"}]}},
+                8,
+            )
+        return (403, {"error": {"message": "permission denied"}}, 5)
+
+    monkeypatch.setattr(dept_gui, "_http_post_json", fake_post)
+    response = client.post(
+        "/api/v1/corpus-query",
+        headers=headers,
+        json={"code": "ee", "audience": "staff", "query": "일정", "generate": True},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["contexts"][0]["text"] == "본문"
+    assert body["answer"] == ""
+    assert "permission denied" in body["answerError"]
 
 
 def test_same_hwp_and_source_bucket_is_rejected(isolated_config: Path) -> None:
@@ -518,6 +845,34 @@ def test_resource_plan_and_provision_run_create_selected_resources(
     assert {item[1] for item in created_buckets} == {"project-test"}
 
 
+def test_single_corpus_resource_plan_creates_only_base_corpus(
+    isolated_config: Path,
+) -> None:
+    client, headers = _client()
+
+    response = client.post(
+        "/api/v1/departments/resource-plans",
+        headers=headers,
+        json={
+            "code": "it",
+            "name": "IT정보처",
+            "corpusMode": "single",
+            "resources": ["corpusStaff"],
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["resources"] == [
+        {
+            "key": "corpusStaff",
+            "kind": "corpus",
+            "label": "기본 코퍼스",
+            "displayName": "it-rag-corpus",
+            "value": "",
+        }
+    ]
+
+
 def test_corpus_creation_uses_multilingual_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict = {}
 
@@ -693,6 +1048,20 @@ def test_update_preserves_keys_and_hides_them_from_config_api(isolated_config: P
     assert saved["drive"]["studentFolderIds"] == ["STAFF-1", "STUDENT-1"]
 
 
+def test_update_requires_migration_for_corpus_mode_change(isolated_config: Path) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    payload = client.get("/api/v1/departments/ee/config").json()
+    payload["corpusMode"] = "single"
+    payload["corpora"]["student"] = ""
+    payload["drive"]["studentFolderIds"] = []
+
+    response = client.put("/api/v1/departments/ee", headers=headers, json=payload)
+
+    assert response.status_code == 422
+    assert "마이그레이션" in response.json()["error"]["fieldErrors"]["corpusMode"][0]
+
+
 def test_update_rejects_stale_revision(isolated_config: Path) -> None:
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
@@ -757,7 +1126,39 @@ def test_drive_preflight_checks_unsaved_ids(
     assert response.status_code == 200
     assert response.json()["status"] == "OK"
     assert response.json()["driveIds"] == ["DRIVE-1"]
+    assert response.json()["driveConflicts"] == []
     assert "AI 공유드라이브" in response.json()["detail"]
+
+
+def test_drive_preflight_includes_duplicate_department_conflicts(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
+    monkeypatch.setattr(dept_gui, "_run_command", lambda args: (True, "caller-token"))
+    monkeypatch.setattr(
+        dept_gui,
+        "_drive_service_account_status",
+        lambda cfg, project, token: {
+            "status": "OK",
+            "detail": "1개 Drive SA 실접근 확인 · AI 공유드라이브",
+            "latencyMs": 20,
+        },
+    )
+
+    response = client.post(
+        "/api/v1/departments/drive-preflight",
+        headers=headers,
+        json={"driveIds": ["DRIVE-1"], "code": "cs"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "OK"
+    assert body["driveConflicts"] == [
+        {"code": "ee", "name": "전자공학과", "driveIds": ["DRIVE-1"]}
+    ]
 
 
 def test_drive_preflight_requires_an_id(isolated_config: Path) -> None:
@@ -902,153 +1303,6 @@ def test_drive_folder_lookup_requires_valid_ids(isolated_config: Path) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "INVALID_FOLDER_IDS"
-
-
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    [
-        ("FILE_1234567890.md", "FILE_1234567890"),
-        ("FILE_1234567890.meta.md", "FILE_1234567890"),
-        ("nested/FILE_1234567890.part2.pdf", "FILE_1234567890"),
-        ("FILE_1234567890.future-format", "FILE_1234567890"),
-        ("readme.md", ""),
-    ],
-)
-def test_bucket_object_file_id_handles_current_and_future_suffixes(
-    name: str, expected: str
-) -> None:
-    assert dept_gui._bucket_object_file_id(name) == expected
-
-
-def test_bucket_discovery_groups_drives_and_excludes_other_department(
-    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    (isolated_config / "cs.yaml").write_text(
-        yaml.safe_dump({"drive": {"driveIds": ["DRIVE_CONFLICT_123"]}}),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        dept_gui,
-        "_service_account_access_token",
-        lambda *args, **kwargs: ("sa-token", "compute@example.com", 5, ""),
-    )
-
-    bucket_objects = {
-        "hwp-bucket": ["FILE_STATE_12345.hwp", "FILE_API_123456.hwp"],
-        "source-bucket": [
-            "FILE_STATE_12345.md",
-            "FILE_API_123456.meta.md",
-            "FILE_CONFLICT_1.pdf",
-            "README.md",
-        ],
-    }
-    monkeypatch.setattr(
-        dept_gui,
-        "_list_bucket_object_names",
-        lambda bucket, token: (bucket_objects[bucket], False),
-    )
-    monkeypatch.setattr(
-        dept_gui,
-        "_firestore_drive_index",
-        lambda *args, **kwargs: ({"FILE_STATE_12345": "DRIVE_NEW_123456"}, False),
-    )
-
-    def fake_owner(file_id: str, token: str) -> tuple[str, str, str]:
-        if file_id == "FILE_API_123456":
-            return "DRIVE_NEW_123456", "API 문서", ""
-        if file_id == "FILE_CONFLICT_1":
-            return "DRIVE_CONFLICT_123", "타 학과 문서", ""
-        raise AssertionError(file_id)
-
-    monkeypatch.setattr(dept_gui, "_drive_file_owner", fake_owner)
-    monkeypatch.setattr(
-        dept_gui,
-        "_drive_names",
-        lambda ids, token: {
-            "DRIVE_NEW_123456": "신규 공유드라이브",
-            "DRIVE_CONFLICT_123": "컴공 공유드라이브",
-        },
-    )
-
-    result = dept_gui._discover_bucket_drives(
-        ["hwp-bucket", "source-bucket"],
-        "project-test",
-        "rag-sync-state",
-        "doc_state",
-        "caller-token",
-        current_code="ee",
-    )
-
-    assert result["stats"] == {
-        "objects": 6,
-        "ignoredObjects": 1,
-        "uniqueFiles": 3,
-        "resolvedFiles": 3,
-        "unresolvedFiles": 0,
-        "drives": 2,
-    }
-    assert result["applicableDriveIds"] == ["DRIVE_NEW_123456"]
-    by_id = {item["driveId"]: item for item in result["drives"]}
-    assert by_id["DRIVE_NEW_123456"]["fileCount"] == 2
-    assert by_id["DRIVE_NEW_123456"]["fromFirestore"] == 1
-    assert by_id["DRIVE_NEW_123456"]["fromDriveApi"] == 1
-    assert by_id["DRIVE_CONFLICT_123"]["conflicts"] == ["cs"]
-    assert by_id["DRIVE_CONFLICT_123"]["canApply"] is False
-
-
-def test_bucket_drive_discovery_endpoint_uses_selected_buckets(
-    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    client, headers = _client()
-    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
-    monkeypatch.setattr(dept_gui, "_run_command", lambda args: (True, "caller-token"))
-    captured: dict[str, object] = {}
-
-    def fake_discovery(buckets, project, database, collection, token, *, current_code=""):
-        captured.update(
-            buckets=buckets,
-            project=project,
-            database=database,
-            collection=collection,
-            token=token,
-            current_code=current_code,
-        )
-        return {
-            "status": "COMPLETE",
-            "drives": [],
-            "applicableDriveIds": [],
-            "unresolved": [],
-            "warnings": [],
-            "stats": {"objects": 0},
-        }
-
-    monkeypatch.setattr(dept_gui, "_discover_bucket_drives", fake_discovery)
-    response = client.post(
-        "/api/v1/departments/bucket-drive-discovery",
-        headers=headers,
-        json={"buckets": ["hwp-bucket", "source-bucket"], "code": "ee"},
-    )
-
-    assert response.status_code == 200
-    assert captured == {
-        "buckets": ["hwp-bucket", "source-bucket"],
-        "project": "project-test",
-        "database": "rag-sync-state",
-        "collection": "doc_state",
-        "token": "caller-token",
-        "current_code": "ee",
-    }
-
-
-def test_bucket_drive_discovery_requires_bucket(isolated_config: Path) -> None:
-    client, headers = _client()
-    response = client.post(
-        "/api/v1/departments/bucket-drive-discovery",
-        headers=headers,
-        json={"buckets": []},
-    )
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "BUCKET_REQUIRED"
 
 
 def test_sync_execution_record_parses_manual_backfill() -> None:

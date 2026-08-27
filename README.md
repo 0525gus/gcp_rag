@@ -137,15 +137,16 @@ python -c "import secrets;print(secrets.token_urlsafe(32))"   # 키 2개 생성
 
 | 키 | 값 |
 |---|---|
-| `corpora.staff` / `corpora.student` | 코퍼스 경로. **서로 달라야 한다** |
-| `keys.staff` / `keys.student` | MCP 키. **서로 달라야 한다** |
+| `corpora.staff` | 단일·분리 모드 모두 사용하는 기본 코퍼스 경로 |
+| `keys.staff` | 기본 MCP 키 |
 | `drive.driveIds` | 공유드라이브 ID |
 | `drive.syncFolderIds` | 수집 폴더 ID (`folders/` 뒤) |
 | `buckets.hwpOriginal` / `buckets.source` | 학과 버킷. **짝으로** (생략하면 공용 상속) |
 
 **조건부**
 
-- `drive.studentFolderIds` 는 `syncFolderIds` 의 부분집합. 비우면 그 학과는 단일 코퍼스로 동작한다
+- GUI의 `단일 코퍼스`를 선택하면 `corpora.student`, `drive.studentFolderIds`, `keys.student`를 만들지 않는다
+- 학생 분리는 위 세 값을 모두 설정하며, `studentFolderIds` 는 `syncFolderIds` 의 부분집합이어야 한다
 - `minInstances` 는 학과당 상주 인스턴스 수. `1` 은 24시간 과금이다
 - `QG_MODE`(common.yaml)는 `log` 유지. `fallback` 은 parser 이미지에 LibreOffice 가 없어 런타임에 실패한다
 
@@ -189,6 +190,8 @@ python -c "import secrets;print(secrets.token_urlsafe(32))"   # 키 2개 생성
 | Workflows · Scheduler · IAM | 만든다 | 안 건드린다 |
 
 - **`deploy.ps1` 한 번이면 FactChat 연결까지 끝난다** — MCP 가 공개(`ALLOW_UNAUTH=true`, 기본)로 올라간다
+- 로컬 관리 GUI에서도 학과 생성 직후 또는 상태 상세의 `미배포` 항목에서 학과 MCP만
+  배포할 수 있다. 기존 Artifact Registry 이미지를 우선 재사용하고 단계별 상태를 표시한다
 - 학생 분리(`RAG_CORPUS_NAME_STUDENT` + `STUDENT_FOLDER_IDS`)가 켜져 있으면 **학생 MCP 도 같이** 올린다. `MCP_API_KEY_STUDENT` 가 비면 배포 전에 거부된다
 - `deploy_mcp.ps1` 은 **MCP 만 재배포**할 때 쓴다 (검색 파라미터·키 교체 등)
 - `ALLOW_UNAUTH=false` 로 두면 IAM 전용이 되고 FactChat 은 붙지 못한다

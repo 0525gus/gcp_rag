@@ -1,5 +1,6 @@
 # 템플릿. cp 후 <학과>.yaml 로 저장.
-# 파일명 = 학과 코드. 서비스: rag-mcp-{학과}-{staff|student}
+# 파일명 = 학과 코드. 기본 서비스: rag-mcp-{학과}-staff
+# 학생 분리 시 corpora.student / keys.student / drive.studentFolderIds 를 모두 추가.
 # 배포: .\scripts\deploy_mcp.ps1 -Dept <학과>
 
 name: 학과 이름

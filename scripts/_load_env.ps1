@@ -69,6 +69,13 @@ function Get-DepartmentCodes {
   return $codes
 }
 
+function Get-DepartmentAudiences {
+  param([string]$DeptCode)
+  $audiences = @(Invoke-DeptConfig --dept $DeptCode --audiences | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  if (-not $audiences) { throw "$DeptCode : 배포할 MCP 범위를 찾지 못했다" }
+  return $audiences
+}
+
 # rag-sync 가 읽는 학과 맵(한 줄 JSON). 시크릿은 안 들어간다.
 function Get-DepartmentsJson {
   $json = (Invoke-DeptConfig --departments-json) -join ""

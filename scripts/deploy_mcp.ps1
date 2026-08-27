@@ -45,7 +45,7 @@ function Assert-LastExit {
 $targets = @()
 if ($All) {
   foreach ($c in (Get-DepartmentCodes)) {
-    foreach ($a in @("staff", "student")) {
+    foreach ($a in @(Get-DepartmentAudiences -DeptCode $c)) {
       $targets += [pscustomobject]@{ Dept = $c; Audience = $a }
     }
   }

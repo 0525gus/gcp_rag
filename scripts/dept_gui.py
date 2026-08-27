@@ -43,7 +43,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import dept_config
-from shared.search_postprocess import extract_file_id
 
 CONFIG_DIR = ROOT / "config"
 DEPT_DIR = CONFIG_DIR / "departments"
@@ -93,6 +92,9 @@ _RESOURCE_PLANS: dict[str, dict[str, Any]] = {}
 _PROVISION_RUNS: dict[str, dict[str, Any]] = {}
 _PROVISION_LOCK = threading.Lock()
 _PROVISION_TTL_SECONDS = 30 * 60
+_MCP_DEPLOY_RUNS: dict[str, dict[str, Any]] = {}
+_MCP_DEPLOY_LOCK = threading.Lock()
+_MCP_DEPLOY_TTL_SECONDS = 60 * 60
 _AUTH_PROCESS: subprocess.Popen[Any] | None = None
 _SYNC_AUTH_LOCK = threading.Lock()
 _SYNC_AUTH_TOKEN = ""
@@ -105,9 +107,8 @@ PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, str]] = {
     "corpusStudent": {"kind": "corpus", "label": "학생 코퍼스"},
 }
 RAG_EMBEDDING_MODEL = "text-multilingual-embedding-002"
-BUCKET_DISCOVERY_OBJECT_LIMIT = 20_000
-BUCKET_DISCOVERY_STATE_LIMIT = 50_000
-BUCKET_DISCOVERY_DRIVE_LOOKUP_LIMIT = 5_000
+CORPUS_CHAT_MODEL = "gemini-2.5-flash-lite"
+CORPUS_CHAT_LOCATION = "global"
 DRIVE_FOLDER_LOOKUP_LIMIT = 200
 DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 SYNC_WORKFLOW_NAME = "rag-daily-sync"
@@ -197,6 +198,56 @@ def _field_error(errors: dict[str, list[str]], field: str, message: str) -> None
     errors.setdefault(field, []).append(message)
 
 
+def _department_drive_conflicts(code: str, drive_ids: list[str]) -> list[dict[str, Any]]:
+    """다른 학과 YAML과 겹치는 공유드라이브 ID. 자기 자신은 제외."""
+    wanted = set(drive_ids)
+    if not wanted:
+        return []
+    conflicts: list[dict[str, Any]] = []
+    for other in dept_config.list_departments():
+        if other == code:
+            continue
+        try:
+            other_cfg = _read_yaml(DEPT_DIR / f"{other}.yaml")
+        except (OSError, TypeError, UnicodeError, ValueError, yaml.YAMLError):
+            continue
+        other_ids = _normalise_ids((other_cfg.get("drive") or {}).get("driveIds"))
+        duplicate = sorted(wanted & set(other_ids))
+        if not duplicate:
+            continue
+        conflicts.append(
+            {
+                "code": other,
+                "name": str(other_cfg.get("name") or other),
+                "driveIds": duplicate,
+            }
+        )
+    return conflicts
+
+
+def _drive_conflict_response(conflicts: list[dict[str, Any]]) -> JSONResponse:
+    owners = ", ".join(f"{item['name']}({item['code']})" for item in conflicts)
+    return JSONResponse(
+        {
+            "error": {
+                "code": "DRIVE_ID_CONFLICT",
+                "message": f"다른 학과와 공유드라이브 ID가 겹칩니다: {owners}",
+                "driveConflicts": conflicts,
+            }
+        },
+        status_code=409,
+    )
+
+
+def _unacked_drive_conflicts(
+    payload: dict[str, Any], result: dict[str, Any]
+) -> JSONResponse | None:
+    conflicts = result.get("driveConflicts") or []
+    if not conflicts or payload.get("allowDuplicateDriveIds"):
+        return None
+    return _drive_conflict_response(conflicts)
+
+
 def _has_secret_input(value: Any) -> bool:
     if not isinstance(value, dict):
         return False
@@ -252,11 +303,23 @@ def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) 
             _field_error(errors, "code", availability["reason"])
 
     corpora = payload.get("corpora") if isinstance(payload.get("corpora"), dict) else {}
+    requested_mode = str(payload.get("corpusMode") or "").strip().lower()
     staff_corpus = str(corpora.get("staff") or "").strip()
     student_corpus = str(corpora.get("student") or "").strip()
+    drive = payload.get("drive") if isinstance(payload.get("drive"), dict) else {}
+    student_ids = _normalise_ids(drive.get("studentFolderIds"))
+    split_enabled = requested_mode == "split" if requested_mode else bool(student_corpus or student_ids)
+    if requested_mode not in {"", "single", "split"}:
+        _field_error(errors, "corpusMode", "단일 코퍼스 또는 학생 분리를 선택해 주세요.")
+    if not split_enabled:
+        student_corpus = ""
+        student_ids = []
     project = str(common.get("GCP_PROJECT_ID") or "").strip()
     region = str(common.get("GCP_REGION") or "asia-northeast3").strip()
-    for audience, value in (("staff", staff_corpus), ("student", student_corpus)):
+    corpus_values = [("staff", staff_corpus)]
+    if split_enabled:
+        corpus_values.append(("student", student_corpus))
+    for audience, value in corpus_values:
         match = CORPUS_RE.fullmatch(value)
         field = f"corpora.{audience}"
         if not match:
@@ -275,15 +338,13 @@ def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) 
     if hwp_bucket and hwp_bucket == source_bucket:
         _field_error(errors, "buckets.source", "HWP 원본 버킷과 달라야 합니다.")
 
-    drive = payload.get("drive") if isinstance(payload.get("drive"), dict) else {}
     drive_ids = _normalise_ids(drive.get("driveIds"))
     sync_ids = _normalise_ids(drive.get("syncFolderIds"))
-    student_ids = _normalise_ids(drive.get("studentFolderIds"))
     if not drive_ids:
         _field_error(errors, "drive.driveIds", "공유드라이브 ID가 하나 이상 필요합니다.")
     if not sync_ids:
         _field_error(errors, "drive.syncFolderIds", "동기화 폴더가 하나 이상 필요합니다.")
-    if not student_ids:
+    if split_enabled and not student_ids:
         _field_error(errors, "drive.studentFolderIds", "학생 폴더가 하나 이상 필요합니다.")
     outside = [item for item in student_ids if item not in sync_ids]
     if outside:
@@ -293,25 +354,16 @@ def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) 
             "동기화 폴더에 포함되지 않은 ID입니다: " + ", ".join(outside),
         )
 
-    for other in dept_config.list_departments():
-        if other == code:
-            continue
-        try:
-            other_cfg = _read_yaml(DEPT_DIR / f"{other}.yaml")
-        except (OSError, ValueError, yaml.YAMLError):
-            continue
-        other_ids = _normalise_ids((other_cfg.get("drive") or {}).get("driveIds"))
-        duplicate = sorted(set(drive_ids) & set(other_ids))
-        if duplicate:
-            _field_error(
-                errors,
-                "drive.driveIds",
-                f"{other} 학과와 중복된 공유드라이브 ID입니다: {', '.join(duplicate)}",
-            )
+    drive_conflicts = _department_drive_conflicts(code, drive_ids)
+    for item in drive_conflicts:
+        warnings.append(
+            f"{item['code']} 학과와 중복된 공유드라이브 ID입니다: {', '.join(item['driveIds'])}"
+        )
 
     mins = payload.get("minInstances") if isinstance(payload.get("minInstances"), dict) else {}
     min_instances: dict[str, int] = {}
-    for audience in dept_config.AUDIENCES:
+    active_audiences = dept_config.AUDIENCES if split_enabled else ("staff",)
+    for audience in active_audiences:
         raw = mins.get(audience, 0)
         try:
             parsed = int(raw)
@@ -321,27 +373,41 @@ def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) 
         except (TypeError, ValueError):
             _field_error(errors, f"minInstances.{audience}", "0 이상의 정수여야 합니다.")
 
-    candidate = {
+    candidate: dict[str, Any] = {
         "name": name,
-        "corpora": {"staff": staff_corpus, "student": student_corpus},
+        "corpora": {"staff": staff_corpus},
         "buckets": {"hwpOriginal": hwp_bucket, "source": source_bucket},
         "drive": {
             "driveIds": drive_ids,
             "syncFolderIds": sync_ids,
-            "studentFolderIds": student_ids,
         },
         "minInstances": min_instances,
     }
-    return candidate, {"valid": not errors, "fieldErrors": errors, "warnings": warnings}
+    if split_enabled:
+        candidate["corpora"]["student"] = student_corpus
+        candidate["drive"]["studentFolderIds"] = student_ids
+    return candidate, {
+        "valid": not errors,
+        "fieldErrors": errors,
+        "warnings": warnings,
+        "driveConflicts": drive_conflicts,
+    }
 
 
 def _render_yaml(
     candidate: dict[str, Any], *, preview: bool, keys: dict[str, str] | None = None
 ) -> str:
     body = dict(candidate)
-    body["keys"] = keys or {
-        "staff": "<자동 생성>" if preview else secrets.token_urlsafe(32),
-        "student": "<자동 생성>" if preview else secrets.token_urlsafe(32),
+    split_enabled = bool((body.get("corpora") or {}).get("student"))
+    active_audiences = dept_config.AUDIENCES if split_enabled else ("staff",)
+    available_keys = keys or {
+        audience: "<자동 생성>" if preview else secrets.token_urlsafe(32)
+        for audience in active_audiences
+    }
+    body["keys"] = {
+        audience: available_keys[audience]
+        for audience in active_audiences
+        if audience in available_keys
     }
     ordered = {
         "name": body["name"],
@@ -354,7 +420,17 @@ def _render_yaml(
     return yaml.safe_dump(ordered, allow_unicode=True, sort_keys=False, width=1000)
 
 
-def create_department(code: str, candidate: dict[str, Any]) -> Path:
+def _verify_written_department(code: str, *, allow_duplicate_drives: bool = False) -> None:
+    for audience in dept_config.configured_audiences(code):
+        dept_config.build_env(code, audience)
+    if allow_duplicate_drives:
+        return
+    dept_config.build_departments_map()
+
+
+def create_department(
+    code: str, candidate: dict[str, Any], *, allow_duplicate_drives: bool = False
+) -> Path:
     target = (DEPT_DIR / f"{code}.yaml").resolve()
     dept_root = DEPT_DIR.resolve()
     if target.parent != dept_root:
@@ -373,9 +449,7 @@ def create_department(code: str, candidate: dict[str, Any]) -> Path:
             raise RuntimeError("작성한 YAML의 재검증에 실패했습니다.")
         os.replace(temp, target)
         try:
-            dept_config.build_env(code, "staff")
-            dept_config.build_env(code, "student")
-            dept_config.build_departments_map()
+            _verify_written_department(code, allow_duplicate_drives=allow_duplicate_drives)
         except SystemExit as exc:
             target.unlink(missing_ok=True)
             raise RuntimeError(str(exc)) from exc
@@ -387,18 +461,22 @@ def create_department(code: str, candidate: dict[str, Any]) -> Path:
         temp.unlink(missing_ok=True)
 
 
-def update_department(code: str, candidate: dict[str, Any]) -> Path:
+def update_department(
+    code: str, candidate: dict[str, Any], *, allow_duplicate_drives: bool = False
+) -> Path:
     target = (DEPT_DIR / f"{code}.yaml").resolve()
     if target.parent != DEPT_DIR.resolve() or not target.exists():
         raise FileNotFoundError(target)
     original = target.read_bytes()
     existing = _read_yaml(target)
     keys = existing.get("keys") if isinstance(existing.get("keys"), dict) else {}
-    preserved_keys = {
-        audience: str(keys.get(audience) or "") for audience in dept_config.AUDIENCES
-    }
-    if any(not value for value in preserved_keys.values()):
+    split_enabled = bool((candidate.get("corpora") or {}).get("student"))
+    staff_key = str(keys.get("staff") or "")
+    if not staff_key:
         raise RuntimeError("기존 MCP 키를 읽지 못해 수정을 중단했습니다.")
+    preserved_keys = {"staff": staff_key}
+    if split_enabled:
+        preserved_keys["student"] = str(keys.get("student") or "") or secrets.token_urlsafe(32)
 
     temp = DEPT_DIR / f".{code}.{uuid.uuid4().hex}.tmp"
     rollback = DEPT_DIR / f".{code}.{uuid.uuid4().hex}.rollback"
@@ -413,9 +491,7 @@ def update_department(code: str, candidate: dict[str, Any]) -> Path:
             raise RuntimeError("수정한 YAML의 재검증에 실패했습니다.")
         os.replace(temp, target)
         try:
-            dept_config.build_env(code, "staff")
-            dept_config.build_env(code, "student")
-            dept_config.build_departments_map()
+            _verify_written_department(code, allow_duplicate_drives=allow_duplicate_drives)
         except (SystemExit, OSError, TypeError, ValueError, yaml.YAMLError) as exc:
             rollback.write_bytes(original)
             os.replace(rollback, target)
@@ -441,6 +517,7 @@ def department_public_config(code: str) -> dict[str, Any]:
         "buckets": data.get("buckets") or {},
         "drive": data.get("drive") or {},
         "minInstances": data.get("minInstances") or {},
+        "corpusMode": "split" if (data.get("corpora") or {}).get("student") else "single",
         "configRevision": _config_revision(path),
     }
 
@@ -451,6 +528,7 @@ def list_department_records() -> list[dict[str, Any]]:
         return records
     for path in sorted(DEPT_DIR.glob("*.yaml")):
         code = path.stem
+        data: dict[str, Any] = {}
         try:
             data = _read_yaml(path)
             name = str(data.get("name") or code)
@@ -471,6 +549,9 @@ def list_department_records() -> list[dict[str, Any]]:
                     "STALE" if stale else (latest or {}).get("overall", "UNKNOWN")
                 ),
                 "parseError": parse_error,
+                "corpusMode": (
+                    "split" if not parse_error and (data.get("corpora") or {}).get("student") else "single"
+                ),
                 "lastResult": None if stale else latest,
             }
         )
@@ -482,6 +563,8 @@ def department_mcp_servers(code: str) -> dict[str, Any]:
     normalised = str(code or "").strip().lower()
     if not DEPT_CODE_RE.fullmatch(normalised) or not (DEPT_DIR / f"{normalised}.yaml").exists():
         raise FileNotFoundError(normalised)
+    config = _read_yaml(DEPT_DIR / f"{normalised}.yaml")
+    split_enabled = bool((config.get("corpora") or {}).get("student"))
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
     region = str(common.get("GCP_REGION") or "asia-northeast3")
@@ -508,7 +591,8 @@ def department_mcp_servers(code: str) -> dict[str, Any]:
             inventory[service_name] = item
 
     servers: list[dict[str, Any]] = []
-    for audience, label in (("staff", "교직원"), ("student", "학생")):
+    audiences = (("staff", "기본"), ("student", "학생")) if split_enabled else (("staff", "기본"),)
+    for audience, label in audiences:
         service_name = f"rag-mcp-{normalised}-{audience}"
         item = inventory.get(service_name) or {}
         status_data = item.get("status") or {}
@@ -531,6 +615,23 @@ def department_mcp_servers(code: str) -> dict[str, Any]:
             }
         )
     return {"code": normalised, "projectId": project, "region": region, "servers": servers}
+
+
+def department_mcp_key(code: str, audience: str) -> str:
+    """명시적인 로컬 복사 요청에만 MCP 키 하나를 읽어 반환한다."""
+    normalised = str(code or "").strip().lower()
+    if not DEPT_CODE_RE.fullmatch(normalised):
+        raise FileNotFoundError(normalised)
+    if audience not in dept_config.AUDIENCES:
+        raise ValueError("교직원 또는 학생 MCP 키를 선택해 주세요.")
+    path = (DEPT_DIR / f"{normalised}.yaml").resolve()
+    if path.parent != DEPT_DIR.resolve() or not path.exists():
+        raise FileNotFoundError(path)
+    data = _read_yaml(path)
+    key = str((data.get("keys") or {}).get(audience) or "").strip()
+    if not key or key in dept_config.PLACEHOLDER_KEYS:
+        raise ValueError("복사할 MCP 키가 설정되어 있지 않습니다.")
+    return key
 
 
 def _check(layer: str, name: str, status: str, detail: str, **extra: Any) -> dict[str, Any]:
@@ -558,17 +659,21 @@ def _local_status(code: str) -> list[dict[str, Any]]:
     except (OSError, TypeError, UnicodeError, yaml.YAMLError) as exc:
         return [_check("LOCAL", "yaml", "FAIL", str(exc))]
 
+    split_enabled = bool((data.get("corpora") or {}).get("student"))
     try:
-        dept_config.build_env(code, "staff")
-        dept_config.build_env(code, "student")
-        checks.append(_check("LOCAL", "derived-env", "OK", "staff · student 설정 생성 가능"))
+        for audience in dept_config.configured_audiences(code):
+            dept_config.build_env(code, audience)
+        mode_label = "기본 · 학생 설정 생성 가능" if split_enabled else "단일 코퍼스 설정 생성 가능"
+        checks.append(_check("LOCAL", "derived-env", "OK", mode_label))
     except SystemExit as exc:
         checks.append(_check("LOCAL", "derived-env", "FAIL", str(exc)))
 
     drive = data.get("drive") or {}
     sync_ids = set(_normalise_ids(drive.get("syncFolderIds")))
     student_ids = set(_normalise_ids(drive.get("studentFolderIds")))
-    if not student_ids - sync_ids and student_ids:
+    if not split_enabled:
+        checks.append(_check("LOCAL", "folder-scope", "SKIP", "단일 코퍼스 운영"))
+    elif not student_ids - sync_ids and student_ids:
         checks.append(_check("LOCAL", "folder-scope", "OK", "student ⊆ sync"))
     else:
         missing = sorted(student_ids - sync_ids)
@@ -577,11 +682,13 @@ def _local_status(code: str) -> list[dict[str, Any]]:
         )
 
     keys = data.get("keys") or {}
-    weak = [aud for aud in dept_config.AUDIENCES if len(str(keys.get(aud) or "")) < 24]
+    audiences = dept_config.AUDIENCES if split_enabled else ("staff",)
+    weak = [aud for aud in audiences if len(str(keys.get(aud) or "")) < 24]
     if weak:
         checks.append(_check("LOCAL", "mcp-keys", "WARN", "24자 미만: " + ", ".join(weak)))
     else:
-        checks.append(_check("LOCAL", "mcp-keys", "OK", "서로 다른 키 · 길이 기준 충족"))
+        detail = "서로 다른 키 · 길이 기준 충족" if split_enabled else "기본 키 길이 기준 충족"
+        checks.append(_check("LOCAL", "mcp-keys", "OK", detail))
     checks[0]["latencyMs"] = round((time.perf_counter() - started) * 1000)
     return checks
 
@@ -992,6 +1099,11 @@ def create_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
     resource_keys = list(dict.fromkeys(str(item) for item in requested))
     if not resource_keys or any(item not in PROVISION_RESOURCE_DEFINITIONS for item in resource_keys):
         raise ValueError("생성할 리소스를 올바르게 선택해 주세요.")
+    corpus_mode = str(payload.get("corpusMode") or "split").strip().lower()
+    if corpus_mode not in {"single", "split"}:
+        raise ValueError("단일 코퍼스 또는 학생 분리를 선택해 주세요.")
+    if corpus_mode == "single" and "corpusStudent" in resource_keys:
+        raise ValueError("단일 코퍼스 모드에서는 학생 코퍼스를 생성하지 않습니다.")
 
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "").strip()
@@ -1005,17 +1117,18 @@ def create_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
         "bucketSource": f"rag-{code}-source-{suffix}",
     }
     corpus_display_names = {
-        "corpusStaff": f"{code}-rag-corpus-staff",
+        "corpusStaff": f"{code}-rag-corpus" if corpus_mode == "single" else f"{code}-rag-corpus-staff",
         "corpusStudent": f"{code}-rag-corpus-student",
     }
     resources: list[dict[str, Any]] = []
     for key in resource_keys:
         definition = PROVISION_RESOURCE_DEFINITIONS[key]
+        label = "기본 코퍼스" if corpus_mode == "single" and key == "corpusStaff" else definition["label"]
         resources.append(
             {
                 "key": key,
                 "kind": definition["kind"],
-                "label": definition["label"],
+                "label": label,
                 "displayName": bucket_names.get(key) or corpus_display_names.get(key) or "",
                 "value": bucket_names.get(key, ""),
             }
@@ -1027,6 +1140,7 @@ def create_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
         "code": code,
         "name": name,
         "editingCode": editing_code,
+        "corpusMode": corpus_mode,
         "projectId": project,
         "region": region,
         "resources": resources,
@@ -1198,7 +1312,7 @@ def _create_corpus_resource(display_name: str, project: str, region: str, token:
 
 
 def retrieve_department_corpus(
-    code: str, audience: str, query: str, top_k: int = 5
+    code: str, audience: str, query: str, top_k: int = 5, *, generate: bool = False
 ) -> dict[str, Any]:
     """로컬 콘솔에서 선택한 학과 코퍼스의 원문 컨텍스트를 조회한다."""
     normalised = str(code or "").strip().lower()
@@ -1264,7 +1378,96 @@ def retrieve_department_corpus(
         "query": text,
         "contexts": contexts,
         "latencyMs": round((time.perf_counter() - started) * 1000),
+        **(_corpus_answer_fields(text, contexts, project, token) if generate else {}),
     }
+
+
+def _gemini_text(body: dict[str, Any]) -> str:
+    blocked = str(((body.get("promptFeedback") or {}).get("blockReason")) or "")
+    if blocked:
+        raise RuntimeError(f"답변 생성이 차단되었습니다: {blocked}")
+    candidates = body.get("candidates") if isinstance(body.get("candidates"), list) else []
+    if not candidates or not isinstance(candidates[0], dict):
+        return ""
+    parts = ((candidates[0].get("content") or {}).get("parts") or [])
+    return "".join(
+        str(part.get("text") or "") for part in parts if isinstance(part, dict)
+    ).strip()
+
+
+def _vertex_generate_url(project: str) -> str:
+    """생성은 코퍼스 리전과 분리한다. Seoul에는 Gemini publisher model이 없다."""
+    location = CORPUS_CHAT_LOCATION
+    host = (
+        "aiplatform.googleapis.com"
+        if location == "global"
+        else f"{location}-aiplatform.googleapis.com"
+    )
+    return (
+        f"https://{host}/v1/projects/{project}/locations/{location}"
+        f"/publishers/google/models/{CORPUS_CHAT_MODEL}:generateContent"
+    )
+
+
+def _generate_corpus_answer(
+    query: str,
+    contexts: list[dict[str, Any]],
+    project: str,
+    token: str,
+) -> tuple[str, int]:
+    """검색된 원문만 근거로 Gemini 답을 만든다. gcloud access token을 재사용한다."""
+    blocks: list[str] = []
+    used = 0
+    for item in contexts:
+        title = str(item.get("sourceDisplayName") or f"결과 {item.get('rank')}")
+        block = f"[{item.get('rank')}] {title}\n{item.get('text') or ''}"
+        if used + len(block) > 24000:
+            break
+        blocks.append(block)
+        used += len(block)
+    prompt = (
+        "다음은 Vertex RAG에서 검색한 문서 조각입니다. 이 내용만 근거로 질문에 한국어로 답하세요.\n"
+        "근거에 없으면 확인되지 않는다고 답하고, 지어내지 마세요.\n"
+        "찾은 자료에 대해 제목 : {제목} 이렇게 표기하세요\n"
+        "가능하면 [번호]로 출처를 표시하세요.\n\n"
+        f"질문: {query}\n\n검색 결과:\n"
+        + ("\n\n".join(blocks) if blocks else "(검색 결과 없음)")
+    )
+    url = _vertex_generate_url(project)
+    status, body, latency = _http_post_json(
+        url,
+        {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048},
+        },
+        token,
+        timeout=60,
+    )
+    if status != 200 or not isinstance(body, dict):
+        message = str((body.get("error") or {}).get("message") or "") if isinstance(body, dict) else ""
+        detail = f": {message[:300]}" if message else ""
+        raise RuntimeError(f"답변 생성 실패 (HTTP {status or 'timeout'}){detail}")
+    answer = _gemini_text(body)
+    if not answer:
+        raise RuntimeError("모델이 빈 답변을 반환했습니다.")
+    return answer, latency
+
+
+def _corpus_answer_fields(
+    query: str,
+    contexts: list[dict[str, Any]],
+    project: str,
+    token: str,
+) -> dict[str, Any]:
+    fields = {"answer": "", "answerModel": CORPUS_CHAT_MODEL, "answerError": ""}
+    if not contexts:
+        return fields
+    try:
+        answer, _latency = _generate_corpus_answer(query, contexts, project, token)
+        fields["answer"] = answer
+    except RuntimeError as exc:
+        fields["answerError"] = str(exc)[:400]
+    return fields
 
 
 def _set_provision_step(run_id: str, key: str, **changes: Any) -> None:
@@ -1374,12 +1577,253 @@ def start_provision_run(
     return copy.deepcopy(run)
 
 
+def _cleanup_mcp_deployments() -> None:
+    cutoff = time.time() - _MCP_DEPLOY_TTL_SECONDS
+    expired = [
+        run_id
+        for run_id, run in _MCP_DEPLOY_RUNS.items()
+        if run.get("finishedEpoch", run.get("createdEpoch", time.time())) < cutoff
+    ]
+    for run_id in expired:
+        _MCP_DEPLOY_RUNS.pop(run_id, None)
+
+
+def _set_mcp_deploy_step(run_id: str, key: str, **changes: Any) -> None:
+    with _MCP_DEPLOY_LOCK:
+        run = _MCP_DEPLOY_RUNS.get(run_id)
+        if not run:
+            return
+        for step in run["steps"]:
+            if step["key"] == key:
+                step.update(changes)
+                return
+
+
+def _append_mcp_deploy_log(run_id: str, line: str, secrets_to_redact: list[str]) -> None:
+    clean = str(line or "").strip()
+    if not clean:
+        return
+    for secret in secrets_to_redact:
+        if secret:
+            clean = clean.replace(secret, "***")
+    clean = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s]+", r"\1***", clean)
+    with _MCP_DEPLOY_LOCK:
+        run = _MCP_DEPLOY_RUNS.get(run_id)
+        if not run:
+            return
+        run["logs"] = [*run.get("logs", []), clean[:500]][-160:]
+        for step in run["steps"]:
+            if step["key"] == "deploy" and step["status"] == "RUNNING":
+                step["detail"] = clean[:300]
+                break
+
+
+def _run_mcp_deploy_script(
+    code: str,
+    *,
+    skip_build: bool,
+    on_line: Any,
+) -> int:
+    executable = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not executable:
+        raise RuntimeError("PowerShell 7(pwsh)을 찾을 수 없습니다.")
+    args = [
+        executable,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(ROOT / "scripts" / "deploy_mcp.ps1"),
+        "-Dept",
+        code,
+    ]
+    if skip_build:
+        args.append("-SkipBuild")
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "CLOUDSDK_CORE_DISABLE_PROMPTS": "1",
+        }
+    )
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    process = subprocess.Popen(
+        args,
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+        creationflags=flags,
+    )
+    if process.stdout:
+        for line in process.stdout:
+            on_line(line)
+    return process.wait()
+
+
+def _execute_mcp_deployment(run_id: str) -> None:
+    with _MCP_DEPLOY_LOCK:
+        run = copy.deepcopy(_MCP_DEPLOY_RUNS[run_id])
+    code = run["code"]
+    try:
+        config_path = DEPT_DIR / f"{code}.yaml"
+        config = _read_yaml(config_path)
+        audiences = dept_config.configured_audiences(code)
+        secrets_to_redact = [
+            str((config.get("keys") or {}).get(audience) or "") for audience in audiences
+        ]
+        _set_mcp_deploy_step(
+            run_id,
+            "config",
+            status="COMPLETE",
+            detail=f"{len(audiences)}개 MCP 설정 검증 완료",
+        )
+
+        common = _common()
+        project = str(common.get("GCP_PROJECT_ID") or "")
+        region = str(common.get("GCP_REGION") or "asia-northeast3")
+        repository = str(common.get("ARTIFACT_REPO") or "rag-mcp")
+        image = f"{region}-docker.pkg.dev/{project}/{repository}/mcp:latest"
+        _set_mcp_deploy_step(run_id, "image", status="RUNNING", detail="Artifact Registry 확인 중")
+        image_ok, _image_info = _gcloud_json(
+            ["artifacts", "docker", "images", "describe", image], timeout=30
+        )
+        _set_mcp_deploy_step(
+            run_id,
+            "image",
+            status="COMPLETE",
+            detail="기존 MCP 이미지 사용" if image_ok else "이미지 없음 · 이번 배포에서 빌드",
+        )
+
+        _set_mcp_deploy_step(run_id, "deploy", status="RUNNING", detail="Cloud Run 배포 시작")
+        exit_code = _run_mcp_deploy_script(
+            code,
+            skip_build=image_ok,
+            on_line=lambda line: _append_mcp_deploy_log(run_id, line, secrets_to_redact),
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"MCP 배포 스크립트가 종료 코드 {exit_code}로 실패했습니다.")
+        _set_mcp_deploy_step(run_id, "deploy", status="COMPLETE", detail="Cloud Run 배포 명령 완료")
+
+        _set_mcp_deploy_step(run_id, "ready", status="RUNNING", detail="Cloud Run Ready 확인 중")
+        inventory = department_mcp_servers(code)
+        servers = inventory.get("servers") or []
+        expected = {f"rag-mcp-{code}-{audience}" for audience in audiences}
+        ready = {
+            str(item.get("serviceName") or "")
+            for item in servers
+            if item.get("status") == "READY"
+        }
+        missing = sorted(expected - ready)
+        if missing:
+            raise RuntimeError("Ready 상태가 아닌 서비스: " + ", ".join(missing))
+        _set_mcp_deploy_step(
+            run_id,
+            "ready",
+            status="COMPLETE",
+            detail=f"{len(expected)}개 서비스 Ready",
+        )
+
+        _set_mcp_deploy_step(run_id, "health", status="RUNNING", detail="서비스 health 확인 중")
+        health_failures: list[str] = []
+        for server in servers:
+            status_code, _body, _latency = _http_json(str(server.get("healthUrl") or ""), timeout=30)
+            if status_code != 200:
+                health_failures.append(
+                    f"{server.get('serviceName')}: HTTP {status_code or 'timeout'}"
+                )
+        if health_failures:
+            raise RuntimeError(" · ".join(health_failures))
+        _set_mcp_deploy_step(
+            run_id,
+            "health",
+            status="COMPLETE",
+            detail=f"{len(servers)}개 서비스 정상 응답",
+        )
+        with _MCP_DEPLOY_LOCK:
+            current = _MCP_DEPLOY_RUNS[run_id]
+            current.update(
+                status="COMPLETED",
+                servers=servers,
+                finishedEpoch=time.time(),
+            )
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError, yaml.YAMLError) as exc:
+        message = str(exc)[:500]
+        with _MCP_DEPLOY_LOCK:
+            current = _MCP_DEPLOY_RUNS.get(run_id)
+            if not current:
+                return
+            running_step = next(
+                (step for step in current["steps"] if step["status"] == "RUNNING"),
+                None,
+            )
+            if running_step:
+                running_step.update(status="FAILED", detail=message)
+            current.update(status="FAILED", error=message, finishedEpoch=time.time())
+
+
+def start_mcp_deployment(code: str) -> dict[str, Any]:
+    normalised = str(code or "").strip().lower()
+    if not DEPT_CODE_RE.fullmatch(normalised) or not (DEPT_DIR / f"{normalised}.yaml").exists():
+        raise FileNotFoundError(normalised)
+    config = department_public_config(normalised)
+    audiences = dept_config.configured_audiences(normalised)
+    services = [f"rag-mcp-{normalised}-{audience}" for audience in audiences]
+    with _MCP_DEPLOY_LOCK:
+        _cleanup_mcp_deployments()
+        active = next(
+            (
+                copy.deepcopy(run)
+                for run in _MCP_DEPLOY_RUNS.values()
+                if run["code"] == normalised and run["status"] == "RUNNING"
+            ),
+            None,
+        )
+        if active:
+            raise FileExistsError(active["runId"])
+        run_id = uuid.uuid4().hex
+        run = {
+            "runId": run_id,
+            "code": normalised,
+            "name": config["name"],
+            "corpusMode": config["corpusMode"],
+            "status": "RUNNING",
+            "serviceNames": services,
+            "services": [],
+            "steps": [
+                {"key": "config", "label": "설정 확인", "status": "RUNNING", "detail": "YAML 및 MCP 키 검증 중"},
+                {"key": "image", "label": "MCP 이미지", "status": "PENDING", "detail": "대기 중"},
+                {"key": "deploy", "label": "Cloud Run 배포", "status": "PENDING", "detail": "대기 중"},
+                {"key": "ready", "label": "Ready 확인", "status": "PENDING", "detail": "대기 중"},
+                {"key": "health", "label": "Health 확인", "status": "PENDING", "detail": "대기 중"},
+            ],
+            "logs": [],
+            "createdEpoch": time.time(),
+        }
+        _MCP_DEPLOY_RUNS[run_id] = run
+    threading.Thread(
+        target=_execute_mcp_deployment,
+        args=(run_id,),
+        name=f"mcp-deploy-{normalised}-{run_id[:8]}",
+        daemon=True,
+    ).start()
+    return copy.deepcopy(run)
+
+
 def _merge_live_resource_validation(candidate: dict[str, Any], result: dict[str, Any]) -> None:
     options = _department_resource_options(_common())
     corpus_names = {item["name"] for item in options["corpora"]}
     bucket_names = {item["name"] for item in options["buckets"]}
     error = str(options.get("error") or "")
-    for audience in dept_config.AUDIENCES:
+    split_enabled = bool((candidate.get("corpora") or {}).get("student"))
+    audiences = dept_config.AUDIENCES if split_enabled else ("staff",)
+    for audience in audiences:
         field = f"corpora.{audience}"
         value = str((candidate.get("corpora") or {}).get(audience) or "")
         if value and value not in corpus_names:
@@ -1426,114 +1870,6 @@ def _service_account_access_token(
     if status != 200 or not token:
         return token, service_account, latency, f"서비스 계정 가장 토큰 HTTP {status or 'timeout'}"
     return token, service_account, latency, ""
-
-
-def _bucket_object_file_id(name: str) -> str:
-    """버킷 객체 키에서 Drive fileId를 복원한다.
-
-    정상 산출물은 ``{fileId}.확장자``이고 Drive fileId에는 점이 없다. 알려진
-    확장자는 공용 후처리기로 먼저 제거하고, 미래 확장자는 첫 점 앞을 사용한다.
-    """
-    base = str(name or "").rsplit("/", 1)[-1].strip()
-    if not base:
-        return ""
-    candidate = extract_file_id(base)
-    if DRIVE_FILE_ID_RE.fullmatch(candidate):
-        return candidate
-    candidate = base.split(".", 1)[0]
-    return candidate if DRIVE_FILE_ID_RE.fullmatch(candidate) else ""
-
-
-def _list_bucket_object_names(
-    bucket: str,
-    token: str,
-    *,
-    limit: int = BUCKET_DISCOVERY_OBJECT_LIMIT,
-) -> tuple[list[str], bool]:
-    names: list[str] = []
-    page_token = ""
-    while len(names) < limit:
-        params = {
-            "fields": "items(name),nextPageToken",
-            "maxResults": str(min(1000, limit - len(names))),
-        }
-        if page_token:
-            params["pageToken"] = page_token
-        url = (
-            f"https://storage.googleapis.com/storage/v1/b/{quote(bucket, safe='')}/o?"
-            + urlencode(params)
-        )
-        status, body, _ = _http_json(url, token, timeout=30)
-        if status != 200 or not isinstance(body, dict):
-            raise RuntimeError(f"버킷 객체 조회 실패: {bucket} (HTTP {status or 'timeout'})")
-        names.extend(
-            str(item.get("name") or "")
-            for item in (body.get("items") or [])
-            if isinstance(item, dict) and item.get("name")
-        )
-        page_token = str(body.get("nextPageToken") or "")
-        if not page_token:
-            return names, False
-    return names[:limit], bool(page_token)
-
-
-def _firestore_drive_index(
-    project: str,
-    database: str,
-    collection: str,
-    token: str,
-    *,
-    limit: int = BUCKET_DISCOVERY_STATE_LIMIT,
-) -> tuple[dict[str, str], bool]:
-    """doc_state 전체에서 fileId → driveId만 얇게 읽는다."""
-    index: dict[str, str] = {}
-    scanned = 0
-    page_token = ""
-    while scanned < limit:
-        params = {
-            "pageSize": str(min(1000, limit - scanned)),
-            "mask.fieldPaths": "driveId",
-        }
-        if page_token:
-            params["pageToken"] = page_token
-        url = (
-            "https://firestore.googleapis.com/v1/projects/"
-            f"{quote(project, safe='')}/databases/{quote(database, safe='')}/documents/"
-            f"{quote(collection, safe='')}?{urlencode(params)}"
-        )
-        status, body, _ = _http_json(url, token, timeout=30)
-        if status != 200 or not isinstance(body, dict):
-            raise RuntimeError(f"Firestore 상태 조회 실패 (HTTP {status or 'timeout'})")
-        documents = body.get("documents") or []
-        scanned += len(documents)
-        for document in documents:
-            if not isinstance(document, dict):
-                continue
-            file_id = str(document.get("name") or "").rsplit("/", 1)[-1]
-            drive_field = ((document.get("fields") or {}).get("driveId") or {})
-            drive_id = str(drive_field.get("stringValue") or "")
-            if file_id and drive_id:
-                index[file_id] = drive_id
-        page_token = str(body.get("nextPageToken") or "")
-        if not page_token:
-            return index, False
-    return index, bool(page_token)
-
-
-def _drive_file_owner(file_id: str, token: str) -> tuple[str, str, str]:
-    params = urlencode(
-        {"supportsAllDrives": "true", "fields": "id,name,driveId,trashed"}
-    )
-    url = f"https://www.googleapis.com/drive/v3/files/{quote(file_id, safe='')}?{params}"
-    status, body, _ = _http_json(url, token, timeout=15)
-    if status != 200 or not isinstance(body, dict):
-        return "", "", f"Drive HTTP {status or 'timeout'}"
-    if body.get("trashed"):
-        return "", str(body.get("name") or ""), "Drive 휴지통 파일"
-    drive_id = str(body.get("driveId") or "")
-    if not drive_id:
-        return "", str(body.get("name") or ""), "공유드라이브 소속 아님"
-    return drive_id, str(body.get("name") or ""), ""
 
 
 def _drive_folder_info(folder_id: str, token: str) -> dict[str, Any]:
@@ -1584,191 +1920,6 @@ def _lookup_drive_folders(folder_ids: list[str], token: str) -> dict[str, Any]:
             "requested": len(folder_ids),
             "resolved": resolved,
             "failed": len(folder_ids) - resolved,
-        },
-        "latencyMs": round((time.perf_counter() - started) * 1000),
-    }
-
-
-def _drive_names(drive_ids: list[str], token: str) -> dict[str, str]:
-    def lookup(drive_id: str) -> tuple[str, str]:
-        url = (
-            f"https://www.googleapis.com/drive/v3/drives/{quote(drive_id, safe='')}"
-            "?fields=id,name"
-        )
-        status, body, _ = _http_json(url, token, timeout=15)
-        name = str(body.get("name") or "") if status == 200 and isinstance(body, dict) else ""
-        return drive_id, name
-
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(drive_ids)))) as executor:
-        return dict(executor.map(lookup, drive_ids))
-
-
-def _department_drive_usage() -> dict[str, list[str]]:
-    usage: dict[str, list[str]] = {}
-    for code in dept_config.list_departments():
-        try:
-            config = _read_yaml(DEPT_DIR / f"{code}.yaml")
-        except (OSError, TypeError, UnicodeError, yaml.YAMLError):
-            continue
-        for drive_id in _normalise_ids((config.get("drive") or {}).get("driveIds")):
-            usage.setdefault(drive_id, []).append(code)
-    return usage
-
-
-def _discover_bucket_drives(
-    buckets: list[str],
-    project: str,
-    database: str,
-    collection: str,
-    caller_token: str,
-    *,
-    current_code: str = "",
-) -> dict[str, Any]:
-    """선택 버킷의 fileId를 Firestore 우선, Drive API 보조로 driveId에 연결한다."""
-    started = time.perf_counter()
-    token, service_account, _token_latency, token_error = _service_account_access_token(
-        project,
-        caller_token,
-        [
-            "https://www.googleapis.com/auth/cloud-platform",
-            "https://www.googleapis.com/auth/drive.readonly",
-        ],
-    )
-    if not token:
-        suffix = f" ({service_account})" if service_account else ""
-        raise RuntimeError(f"{token_error}{suffix}")
-
-    objects_by_file: dict[str, set[str]] = {}
-    object_count = 0
-    ignored_objects = 0
-    truncated_buckets: list[str] = []
-    bucket_errors: list[str] = []
-    for bucket in buckets:
-        try:
-            names, truncated = _list_bucket_object_names(bucket, token)
-        except RuntimeError as exc:
-            bucket_errors.append(str(exc))
-            continue
-        if truncated:
-            truncated_buckets.append(bucket)
-        object_count += len(names)
-        for name in names:
-            file_id = _bucket_object_file_id(name)
-            if not file_id:
-                ignored_objects += 1
-                continue
-            objects_by_file.setdefault(file_id, set()).add(f"{bucket}/{name}")
-
-    if bucket_errors and len(bucket_errors) == len(buckets):
-        raise RuntimeError(" · ".join(bucket_errors))
-
-    warnings = list(bucket_errors)
-    try:
-        state_index, state_truncated = _firestore_drive_index(
-            project, database, collection, token
-        )
-        if state_truncated:
-            warnings.append("Firestore 상태 조회 상한에 도달했습니다.")
-    except RuntimeError as exc:
-        state_index = {}
-        warnings.append(f"{exc}; Drive API로 직접 확인합니다.")
-
-    resolved: dict[str, tuple[str, str, str]] = {}
-    missing: list[str] = []
-    for file_id in objects_by_file:
-        drive_id = state_index.get(file_id, "")
-        if drive_id:
-            resolved[file_id] = (drive_id, "", "firestore")
-        else:
-            missing.append(file_id)
-
-    lookup_ids = missing[:BUCKET_DISCOVERY_DRIVE_LOOKUP_LIMIT]
-    if len(missing) > len(lookup_ids):
-        warnings.append(
-            f"Drive 직접 조회 상한({BUCKET_DISCOVERY_DRIVE_LOOKUP_LIMIT:,}건)을 넘어 일부를 보류했습니다."
-        )
-
-    def lookup(file_id: str) -> tuple[str, str, str, str]:
-        drive_id, file_name, error = _drive_file_owner(file_id, token)
-        return file_id, drive_id, file_name, error
-
-    unresolved: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=min(12, max(1, len(lookup_ids)))) as executor:
-        for file_id, drive_id, file_name, error in executor.map(lookup, lookup_ids):
-            if drive_id:
-                resolved[file_id] = (drive_id, file_name, "drive-api")
-            else:
-                unresolved.append(
-                    {
-                        "fileId": file_id,
-                        "name": file_name,
-                        "reason": error,
-                        "buckets": sorted({item.split("/", 1)[0] for item in objects_by_file[file_id]}),
-                    }
-                )
-    for file_id in missing[len(lookup_ids) :]:
-        unresolved.append(
-            {
-                "fileId": file_id,
-                "name": "",
-                "reason": "조회 상한 초과",
-                "buckets": sorted({item.split("/", 1)[0] for item in objects_by_file[file_id]}),
-            }
-        )
-
-    groups: dict[str, dict[str, Any]] = {}
-    for file_id, (drive_id, file_name, source) in resolved.items():
-        group = groups.setdefault(
-            drive_id,
-            {
-                "driveId": drive_id,
-                "name": "",
-                "fileCount": 0,
-                "objectCount": 0,
-                "fromFirestore": 0,
-                "fromDriveApi": 0,
-                "examples": [],
-            },
-        )
-        group["fileCount"] += 1
-        group["objectCount"] += len(objects_by_file[file_id])
-        group["fromFirestore" if source == "firestore" else "fromDriveApi"] += 1
-        if len(group["examples"]) < 3:
-            group["examples"].append({"fileId": file_id, "name": file_name})
-
-    names = _drive_names(sorted(groups), token) if groups else {}
-    usage = _department_drive_usage()
-    current_code = current_code.strip().lower()
-    for drive_id, group in groups.items():
-        group["name"] = names.get(drive_id, "")
-        owners = sorted(usage.get(drive_id, []))
-        conflicts = [code for code in owners if code != current_code]
-        group["usedBy"] = owners
-        group["conflicts"] = conflicts
-        group["canApply"] = not conflicts
-
-    drives = sorted(
-        groups.values(),
-        key=lambda item: (not item["canApply"], -item["fileCount"], item["driveId"]),
-    )
-    applicable = [item["driveId"] for item in drives if item["canApply"]]
-    if truncated_buckets:
-        warnings.append("객체 조회 상한에 도달한 버킷: " + ", ".join(truncated_buckets))
-    return {
-        "status": "PARTIAL" if warnings or unresolved else "COMPLETE",
-        "serviceAccount": service_account,
-        "buckets": buckets,
-        "drives": drives,
-        "applicableDriveIds": applicable,
-        "unresolved": unresolved[:50],
-        "warnings": warnings,
-        "stats": {
-            "objects": object_count,
-            "ignoredObjects": ignored_objects,
-            "uniqueFiles": len(objects_by_file),
-            "resolvedFiles": len(resolved),
-            "unresolvedFiles": len(unresolved),
-            "drives": len(drives),
         },
         "latencyMs": round((time.perf_counter() - started) * 1000),
     }
@@ -1914,7 +2065,9 @@ def _resource_status(
     )
 
     token_ok, token = run_command([gcloud, "auth", "print-access-token", "--quiet"])
-    for audience in dept_config.AUDIENCES:
+    split_enabled = bool((cfg.get("corpora") or {}).get("student"))
+    audiences = dept_config.AUDIENCES if split_enabled else ("staff",)
+    for audience in audiences:
         corpus = str((cfg.get("corpora") or {}).get(audience) or "")
         name = f"rag-corpus-{audience}"
         if not token_ok:
@@ -1949,6 +2102,7 @@ def _resource_status(
 def _deploy_and_runtime_status(
     code: str,
     common: dict[str, Any],
+    cfg: dict[str, Any] | None = None,
     cache: _StatusRunCache | None = None,
 ) -> list[dict]:
     checks: list[dict[str, Any]] = []
@@ -1959,7 +2113,10 @@ def _deploy_and_runtime_status(
         return [_check("DEPLOY", "gcloud", "FAIL", "gcloud를 찾을 수 없습니다.")]
     gcloud_json = cache.gcloud_json if cache else _gcloud_json
     run_command = cache.run_command if cache else _run_command
-    services = ["rag-parser", "rag-sync", f"rag-mcp-{code}-staff", f"rag-mcp-{code}-student"]
+    split_enabled = bool(((cfg or {}).get("corpora") or {}).get("student"))
+    services = ["rag-parser", "rag-sync", f"rag-mcp-{code}-staff"]
+    if split_enabled:
+        services.append(f"rag-mcp-{code}-student")
     discovered: dict[str, str] = {}
     service_inventory: dict[str, dict[str, Any]] | None = None
     if cache:
@@ -1996,7 +2153,25 @@ def _deploy_and_runtime_status(
             )
         label = service.removeprefix("rag-")
         if not ok:
-            checks.append(_check("DEPLOY", label, "FAIL", "Cloud Run 서비스 없음 또는 조회 실패"))
+            missing_detail = str(data or "").lower()
+            confirmed_missing = service_inventory is not None or any(
+                marker in missing_detail
+                for marker in ("not found", "not_found", "does not exist")
+            )
+            if confirmed_missing and service.startswith(f"rag-mcp-{code}-"):
+                checks.append(
+                    _check(
+                        "DEPLOY",
+                        label,
+                        "WARN",
+                        "Cloud Run MCP 서비스가 아직 배포되지 않았습니다.",
+                        action="MCP 배포",
+                        actionType="MCP_DEPLOY",
+                        departmentCode=code,
+                    )
+                )
+            else:
+                checks.append(_check("DEPLOY", label, "FAIL", "Cloud Run 서비스 없음 또는 조회 실패"))
             continue
         status_data = data.get("status") or {}
         ready_condition = next(
@@ -2451,7 +2626,7 @@ def _run_department_status(
         cfg = _read_yaml(path)
         common = _common()
         checks.extend(_resource_status(code, cfg, common, cache))
-        checks.extend(_deploy_and_runtime_status(code, common, cache))
+        checks.extend(_deploy_and_runtime_status(code, common, cfg, cache))
         checks.extend(_sync_status(common, cache))
     result = {
         "code": code,
@@ -2631,6 +2806,62 @@ def provision_run(run_id: str) -> JSONResponse:
                 status_code=404,
             )
         return JSONResponse(copy.deepcopy(run))
+
+
+@app.get("/api/v1/mcp-deployments")
+def mcp_deployments(code: str = "", status: str = "") -> JSONResponse:
+    with _MCP_DEPLOY_LOCK:
+        _cleanup_mcp_deployments()
+        rows = [
+            copy.deepcopy(run)
+            for run in _MCP_DEPLOY_RUNS.values()
+            if (not code or run["code"] == code)
+            and (not status or run["status"] == status.upper())
+        ]
+    rows.sort(key=lambda item: item.get("createdEpoch", 0), reverse=True)
+    return JSONResponse({"runs": rows})
+
+
+@app.get("/api/v1/mcp-deployments/{run_id}")
+def mcp_deployment(run_id: str) -> JSONResponse:
+    with _MCP_DEPLOY_LOCK:
+        _cleanup_mcp_deployments()
+        run = _MCP_DEPLOY_RUNS.get(run_id)
+        if not run:
+            return JSONResponse(
+                {"error": {"code": "MCP_DEPLOYMENT_NOT_FOUND", "message": "MCP 배포 작업을 찾을 수 없습니다."}},
+                status_code=404,
+            )
+        return JSONResponse(copy.deepcopy(run))
+
+
+@app.post("/api/v1/departments/{code}/mcp-deployments")
+def create_mcp_deployment(code: str, request: Request) -> JSONResponse:
+    _require_local_session(request)
+    try:
+        run = start_mcp_deployment(code)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": {"code": "NOT_FOUND", "message": "학과 설정을 찾을 수 없습니다."}},
+            status_code=404,
+        )
+    except FileExistsError as exc:
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "MCP_DEPLOYMENT_RUNNING",
+                    "message": "이 학과의 MCP 배포가 이미 진행 중입니다.",
+                    "runId": str(exc),
+                }
+            },
+            status_code=409,
+        )
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError, yaml.YAMLError) as exc:
+        return JSONResponse(
+            {"error": {"code": "MCP_DEPLOYMENT_INVALID", "message": str(exc)[:400]}},
+            status_code=422,
+        )
+    return JSONResponse(run, status_code=202)
 
 
 @app.get("/api/v1/environment")
@@ -2839,6 +3070,29 @@ def get_department_mcp_servers(code: str) -> JSONResponse:
         )
 
 
+@app.post("/api/v1/departments/{code}/mcp-keys/{audience}")
+def copy_department_mcp_key(code: str, audience: str, request: Request) -> JSONResponse:
+    _require_local_session(request)
+    try:
+        key = department_mcp_key(code, audience)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": {"code": "NOT_FOUND", "message": "학과 설정을 찾을 수 없습니다."}},
+            status_code=404,
+        )
+    except (TypeError, ValueError, yaml.YAMLError) as exc:
+        return JSONResponse(
+            {"error": {"code": "MCP_KEY_UNAVAILABLE", "message": str(exc)}},
+            status_code=422,
+        )
+    except (OSError, UnicodeError) as exc:
+        return JSONResponse(
+            {"error": {"code": "MCP_KEY_READ_FAILED", "message": str(exc)[:300]}},
+            status_code=500,
+        )
+    return JSONResponse({"audience": audience, "key": key})
+
+
 @app.post("/api/v1/corpus-query")
 async def corpus_query(request: Request) -> JSONResponse:
     _require_local_session(request)
@@ -2851,6 +3105,7 @@ async def corpus_query(request: Request) -> JSONResponse:
             str(payload.get("audience") or ""),
             str(payload.get("query") or ""),
             int(payload.get("topK") or 5),
+            generate=bool(payload.get("generate")),
         )
     except FileNotFoundError:
         return JSONResponse(
@@ -2908,6 +3163,7 @@ async def drive_preflight(request: Request) -> JSONResponse:
     result = _drive_service_account_status(
         {"drive": {"driveIds": drive_ids}}, project, token
     )
+    code = str(payload.get("code") or "").strip().lower() if isinstance(payload, dict) else ""
     return JSONResponse(
         {
             "status": result["status"],
@@ -2915,68 +3171,9 @@ async def drive_preflight(request: Request) -> JSONResponse:
             "action": result.get("action", ""),
             "latencyMs": result.get("latencyMs", 0),
             "driveIds": drive_ids,
+            "driveConflicts": _department_drive_conflicts(code, drive_ids),
         }
     )
-
-
-@app.post("/api/v1/departments/bucket-drive-discovery")
-async def bucket_drive_discovery(request: Request) -> JSONResponse:
-    """선택한 버킷의 객체 키를 조사해 연결된 공유드라이브 후보를 돌려준다."""
-    _require_local_session(request)
-    payload = await request.json()
-    if not isinstance(payload, dict):
-        payload = {}
-    buckets = [item.removeprefix("gs://") for item in _normalise_ids(payload.get("buckets"))]
-    if not buckets or len(buckets) > 4 or any(not BUCKET_RE.fullmatch(item) for item in buckets):
-        return JSONResponse(
-            {
-                "error": {
-                    "code": "BUCKET_REQUIRED",
-                    "message": "조사할 GCS 버킷을 선택해 주세요.",
-                }
-            },
-            status_code=422,
-        )
-    current_code = str(payload.get("code") or "").strip().lower()
-    if current_code and not DEPT_CODE_RE.fullmatch(current_code):
-        return JSONResponse(
-            {"error": {"code": "INVALID_DEPARTMENT_CODE", "message": "학과 코드를 확인해 주세요."}},
-            status_code=422,
-        )
-    try:
-        common = _common()
-    except (FileNotFoundError, OSError, TypeError, UnicodeError, yaml.YAMLError):
-        return JSONResponse(
-            {"error": {"code": "COMMON_REQUIRED", "message": "공통 설정이 먼저 필요합니다."}},
-            status_code=428,
-        )
-    gcloud = _gcloud_executable()
-    if not gcloud:
-        return JSONResponse(
-            {"error": {"code": "GCLOUD_REQUIRED", "message": "gcloud를 찾을 수 없습니다."}},
-            status_code=503,
-        )
-    token_ok, caller_token = _run_command([gcloud, "auth", "print-access-token", "--quiet"])
-    if not token_ok:
-        return JSONResponse(
-            {"error": {"code": "GCLOUD_AUTH_REQUIRED", "message": "gcloud 로그인이 필요합니다."}},
-            status_code=401,
-        )
-    try:
-        result = _discover_bucket_drives(
-            buckets,
-            str(common.get("GCP_PROJECT_ID") or ""),
-            str(common.get("FIRESTORE_DATABASE") or "rag-sync-state"),
-            str(common.get("DOC_STATE_COLLECTION") or "doc_state"),
-            caller_token,
-            current_code=current_code,
-        )
-    except RuntimeError as exc:
-        return JSONResponse(
-            {"error": {"code": "BUCKET_DRIVE_DISCOVERY_FAILED", "message": str(exc)[:500]}},
-            status_code=503,
-        )
-    return JSONResponse(result)
 
 
 @app.post("/api/v1/departments/folder-lookup")
@@ -3093,9 +3290,14 @@ async def create(request: Request) -> JSONResponse:
             },
             status_code=422,
         )
+    conflict = _unacked_drive_conflicts(payload, result)
+    if conflict:
+        return conflict
     code = str(payload["code"]).strip().lower()
     try:
-        target = create_department(code, candidate)
+        target = create_department(
+            code, candidate, allow_duplicate_drives=bool(payload.get("allowDuplicateDriveIds"))
+        )
     except FileExistsError:
         return JSONResponse(
             {"error": {"code": "FILE_EXISTS", "message": "기존 YAML은 변경하지 않았습니다."}},
@@ -3141,13 +3343,21 @@ async def preview_update(code: str, request: Request) -> JSONResponse:
             status_code=400,
         )
     try:
-        department_public_config(code)
+        current = department_public_config(code)
     except (FileNotFoundError, OSError, TypeError, UnicodeError, yaml.YAMLError):
         return JSONResponse(
             {"error": {"code": "NOT_FOUND", "message": "학과 설정을 찾을 수 없습니다."}},
             status_code=404,
         )
     candidate, result = validate_candidate(payload, check_existing=False)
+    candidate_mode = "split" if candidate.get("corpora", {}).get("student") else "single"
+    if candidate_mode != current["corpusMode"]:
+        _field_error(
+            result["fieldErrors"],
+            "corpusMode",
+            "운영 중 코퍼스 구성 변경은 재색인·기존 서비스 정리가 필요해 별도 마이그레이션으로 진행해야 합니다.",
+        )
+        result["valid"] = False
     if result["valid"]:
         _merge_live_resource_validation(candidate, result)
     result["yamlPreview"] = _render_yaml(
@@ -3189,6 +3399,14 @@ async def update(code: str, request: Request) -> JSONResponse:
             status_code=409,
         )
     candidate, result = validate_candidate(payload, check_existing=False)
+    candidate_mode = "split" if candidate.get("corpora", {}).get("student") else "single"
+    if candidate_mode != current["corpusMode"]:
+        _field_error(
+            result["fieldErrors"],
+            "corpusMode",
+            "운영 중 코퍼스 구성 변경은 별도 마이그레이션이 필요합니다.",
+        )
+        result["valid"] = False
     if result["valid"]:
         _merge_live_resource_validation(candidate, result)
     if not result["valid"]:
@@ -3202,8 +3420,13 @@ async def update(code: str, request: Request) -> JSONResponse:
             },
             status_code=422,
         )
+    conflict = _unacked_drive_conflicts(payload, result)
+    if conflict:
+        return conflict
     try:
-        target = update_department(code, candidate)
+        target = update_department(
+            code, candidate, allow_duplicate_drives=bool(payload.get("allowDuplicateDriveIds"))
+        )
     except (OSError, RuntimeError, TypeError, ValueError, yaml.YAMLError) as exc:
         return JSONResponse(
             {"error": {"code": "WRITE_FAILED", "message": str(exc)[:300]}}, status_code=500

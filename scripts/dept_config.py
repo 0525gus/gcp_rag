@@ -104,9 +104,21 @@ def build_env(dept: str, audience: str) -> dict[str, str]:
     corpora = dept_cfg.get("corpora") or {}
     staff_corpus = str(corpora.get("staff") or "").strip()
     student_corpus = str(corpora.get("student") or "").strip()
-    if not staff_corpus or not student_corpus:
-        raise SystemExit(f"{dept}: corpora.staff / corpora.student 가 둘 다 필요하다")
-    if staff_corpus == student_corpus:
+    drive = dept_cfg.get("drive") or {}
+    keys = dept_cfg.get("keys") or {}
+    student_folders = _fmt(drive.get("studentFolderIds") or "")
+    student_key = str(keys.get("student") or "").strip()
+    student_parts = (bool(student_corpus), bool(student_folders), bool(student_key))
+    if any(student_parts) and not all(student_parts):
+        raise SystemExit(
+            f"{dept}: 학생 분리는 corpora.student / drive.studentFolderIds / keys.student 가 모두 필요하다"
+        )
+    split_enabled = all(student_parts)
+    if not staff_corpus:
+        raise SystemExit(f"{dept}: corpora.staff 가 필요하다")
+    if audience == "student" and not split_enabled:
+        raise SystemExit(f"{dept}: 학생 코퍼스 분리를 사용하지 않는다")
+    if split_enabled and staff_corpus == student_corpus:
         # 같으면 학생 서비스가 교직원 전량을 검색하게 된다. 조용히 통과시키면 안 된다.
         raise SystemExit(f"{dept}: staff 와 student 코퍼스가 같다")
 
@@ -135,7 +147,6 @@ def build_env(dept: str, audience: str) -> dict[str, str]:
         if buckets.get(yaml_key):
             env[env_key] = _fmt(buckets[yaml_key])
 
-    drive = dept_cfg.get("drive") or {}
     for yaml_key, env_key in (
         ("driveIds", "DRIVE_IDS"),
         ("syncFolderIds", "SYNC_FOLDER_IDS"),
@@ -148,13 +159,12 @@ def build_env(dept: str, audience: str) -> dict[str, str]:
     env["MCP_MIN_INSTANCES"] = _fmt(min_instances.get(audience, 0))
 
     # 3) MCP 키. 학과 yaml 이 커밋되지 않는 유일한 이유다.
-    keys = dept_cfg.get("keys") or {}
     key = str(keys.get(audience) or "").strip()
     if not key:
         raise SystemExit(f"{dept}: keys.{audience} 가 비었다")
     if key in PLACEHOLDER_KEYS:
         raise SystemExit(f"{dept}: keys.{audience} 가 템플릿 값 그대로다")
-    if str(keys.get("staff") or "") == str(keys.get("student") or ""):
+    if split_enabled and str(keys.get("staff") or "") == student_key:
         # 같으면 학생 키로 교직원 코퍼스가 열린다.
         raise SystemExit(f"{dept}: staff 와 student 키가 같다")
     env["MCP_API_KEY"] = key
@@ -166,7 +176,9 @@ def build_env(dept: str, audience: str) -> dict[str, str]:
     # 배포 스크립트가 이 값을 얻으려고 같은 학과를 한 번 더 조회하지 않아도 되고,
     # 약한 키 경고가 두 번씩 찍히지도 않는다.
     for other in AUDIENCES:
-        env[f"MCP_API_KEY_{other.upper()}"] = str(keys.get(other) or "").strip()
+        other_key = str(keys.get(other) or "").strip()
+        if other_key:
+            env[f"MCP_API_KEY_{other.upper()}"] = other_key
     _warn_if_weak(dept, audience, key)
 
     # 4) 규칙으로 만드는 값 — 파일에 저장하지 않는다(두 곳에 적으면 갈라진다).
@@ -283,6 +295,15 @@ def load_config_env(dept: str | None = None, audience: str = "staff") -> str:
     return code
 
 
+def configured_audiences(dept: str) -> tuple[str, ...]:
+    """설정 검증을 거쳐 실제 배포할 MCP 범위를 반환한다."""
+    env = build_env(dept, "staff")
+    if env.get("RAG_CORPUS_NAME_STUDENT") and env.get("STUDENT_FOLDER_IDS"):
+        build_env(dept, "student")
+        return AUDIENCES
+    return ("staff",)
+
+
 def main() -> int:
     # 한국어 Windows 콘솔은 cp949 라 학과명(DEPT_NAME)이 깨진 채 넘어간다.
     force_utf8_stdout()
@@ -293,6 +314,7 @@ def main() -> int:
         action="store_true",
         help="rag-sync 용 DEPARTMENTS_JSON 값(한 줄)",
     )
+    ap.add_argument("--audiences", action="store_true", help="학과에 설정된 MCP 범위")
     ap.add_argument("--dept")
     ap.add_argument("--audience", default="staff", choices=AUDIENCES)
     args = ap.parse_args()
@@ -304,6 +326,13 @@ def main() -> int:
 
     if args.departments_json:
         print(departments_json())
+        return 0
+
+    if args.audiences:
+        if not args.dept:
+            ap.error("--audiences 에는 --dept 가 필요하다")
+        for audience in configured_audiences(args.dept):
+            print(audience)
         return 0
 
     if not args.dept:
