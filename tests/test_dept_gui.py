@@ -59,6 +59,8 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     dept_gui._LATEST.clear()
     dept_gui._RUNS.clear()
+    dept_gui._RESOURCE_PLANS.clear()
+    dept_gui._PROVISION_RUNS.clear()
     return dept_dir
 
 
@@ -127,6 +129,89 @@ def test_bucket_options_list_departments_already_using_them(isolated_config: Pat
     buckets = {item["name"]: item for item in response.json()["buckets"]}
     assert buckets["rag-ee-hwp-project-test"]["usedBy"] == ["cs", "ee"]
     assert buckets["rag-ee-source-project-test"]["usedBy"] == ["cs", "ee"]
+
+
+def test_department_mcp_servers_return_actual_cloud_run_urls(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+
+    def fake_gcloud(args: list[str], timeout: int = 12):
+        assert args[:3] == ["run", "services", "list"]
+        return (
+            True,
+            [
+                {
+                    "metadata": {"name": "rag-mcp-ee-staff"},
+                    "status": {
+                        "url": "https://rag-mcp-ee-staff.example.run.app",
+                        "conditions": [{"type": "Ready", "status": "True"}],
+                    },
+                },
+                {
+                    "metadata": {"name": "rag-mcp-ee-student"},
+                    "status": {
+                        "url": "https://rag-mcp-ee-student.example.run.app",
+                        "conditions": [{"type": "Ready", "status": "True"}],
+                    },
+                },
+            ],
+        )
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    response = client.get("/api/v1/departments/ee/mcp-servers")
+
+    assert response.status_code == 200
+    servers = response.json()["servers"]
+    assert [item["audience"] for item in servers] == ["staff", "student"]
+    assert all(item["status"] == "READY" for item in servers)
+    assert servers[0]["url"] == "https://rag-mcp-ee-staff.example.run.app"
+    assert servers[1]["healthUrl"].endswith("/health")
+
+
+def test_corpus_query_uses_selected_department_corpus(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    captured: dict = {}
+    monkeypatch.setattr(dept_gui, "_provision_access_token", lambda: "caller-token")
+
+    def fake_post(url: str, payload: dict, token: str = "", timeout: int = 10):
+        captured.update(url=url, payload=payload, token=token, timeout=timeout)
+        return (
+            200,
+            {
+                "contexts": {
+                    "contexts": [
+                        {
+                            "sourceDisplayName": "학사 안내.md",
+                            "sourceUri": "gs://source/notice.md",
+                            "text": "수강신청 안내 본문",
+                            "score": 0.12,
+                        }
+                    ]
+                }
+            },
+            12,
+        )
+
+    monkeypatch.setattr(dept_gui, "_http_post_json", fake_post)
+    response = client.post(
+        "/api/v1/corpus-query",
+        headers=headers,
+        json={"code": "ee", "audience": "student", "query": "수강신청", "topK": 3},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["contexts"][0]["text"] == "수강신청 안내 본문"
+    assert captured["token"] == "caller-token"
+    assert captured["payload"]["vertexRagStore"]["ragResources"][0]["ragCorpus"].endswith(
+        "/student-1"
+    )
+    assert captured["payload"]["query"]["ragRetrievalConfig"]["topK"] == 3
 
 
 def test_same_hwp_and_source_bucket_is_rejected(isolated_config: Path) -> None:
@@ -333,6 +418,153 @@ def test_create_generates_distinct_keys_and_will_not_overwrite(
     second = client.post("/api/v1/departments", headers=headers, json=_payload())
     assert second.status_code == 409
     assert target.read_bytes() == before
+
+
+def test_department_code_availability_blocks_existing_code(isolated_config: Path) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+
+    response = client.get("/api/v1/departments/code-availability?code=EE")
+
+    assert response.status_code == 200
+    assert response.json()["code"] == "ee"
+    assert response.json()["available"] is False
+    assert "이미" in response.json()["reason"]
+
+    plan = client.post(
+        "/api/v1/departments/resource-plans",
+        headers=headers,
+        json={"code": "ee", "name": "중복 학과", "resources": ["bucketHwp"]},
+    )
+    assert plan.status_code == 409
+    assert plan.json()["error"]["code"] == "DEPARTMENT_CODE_EXISTS"
+
+
+def test_resource_plan_and_provision_run_create_selected_resources(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    created_buckets: list[tuple[str, str, str]] = []
+    created_corpora: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(dept_gui, "_provision_access_token", lambda: "caller-token")
+
+    def fake_bucket(name: str, project: str, region: str) -> str:
+        created_buckets.append((name, project, region))
+        return name
+
+    def fake_corpus(display_name: str, project: str, region: str, token: str) -> str:
+        assert token == "caller-token"
+        created_corpora.append((display_name, project, region))
+        corpus_id = "staff-created" if "교직원" in display_name else "student-created"
+        return f"projects/{project}/locations/{region}/ragCorpora/{corpus_id}"
+
+    monkeypatch.setattr(dept_gui, "_create_bucket_resource", fake_bucket)
+    monkeypatch.setattr(dept_gui, "_create_corpus_resource", fake_corpus)
+
+    planned = client.post(
+        "/api/v1/departments/resource-plans",
+        headers=headers,
+        json={
+            "code": "cs",
+            "name": "컴퓨터공학부",
+            "resources": ["bucketHwp", "bucketSource", "corpusStaff", "corpusStudent"],
+        },
+    )
+    assert planned.status_code == 201
+    plan = planned.json()
+    assert len(plan["resources"]) == 4
+    assert plan["resources"][0]["value"].startswith("rag-cs-hwp-")
+    corpus_names = {
+        item["key"]: item["displayName"]
+        for item in plan["resources"]
+        if item["kind"] == "corpus"
+    }
+    assert corpus_names == {
+        "corpusStaff": "cs-rag-corpus-staff",
+        "corpusStudent": "cs-rag-corpus-student",
+    }
+    assert plan["bucketProtection"]["publicAccessPrevention"] == "enforced"
+
+    overrides = {
+        "bucketHwp": "custom-cs-hwp",
+        "bucketSource": "custom-cs-source",
+        "corpusStaff": "cs-rag-corpus",
+        "corpusStudent": "cs-rag-corpus-student-custom",
+    }
+    started = client.post(
+        "/api/v1/departments/resource-provisioning",
+        headers=headers,
+        json={"planId": plan["planId"], "overrides": overrides},
+    )
+    assert started.status_code == 202
+    run_id = started.json()["runId"]
+    for _ in range(50):
+        run = client.get(f"/api/v1/departments/resource-provisioning/{run_id}").json()
+        if run["status"] != "RUNNING":
+            break
+        time.sleep(0.01)
+
+    assert run["status"] == "COMPLETED"
+    assert all(item["status"] == "COMPLETE" for item in run["resources"])
+    assert len(created_buckets) == 2
+    assert len(created_corpora) == 2
+    assert {item[0] for item in created_buckets} == {"custom-cs-hwp", "custom-cs-source"}
+    assert {item[0] for item in created_corpora} == {
+        "cs-rag-corpus",
+        "cs-rag-corpus-student-custom",
+    }
+    assert {item[1] for item in created_buckets} == {"project-test"}
+
+
+def test_corpus_creation_uses_multilingual_embedding(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake_post(url: str, payload: dict, token: str = "", timeout: int = 10):
+        captured.update(payload)
+        return (
+            200,
+            {
+                "done": True,
+                "response": {
+                    "name": "projects/project-test/locations/asia-northeast3/ragCorpora/created"
+                },
+            },
+            5,
+        )
+
+    monkeypatch.setattr(dept_gui, "_http_post_json", fake_post)
+
+    name = dept_gui._create_corpus_resource(
+        "컴퓨터공학부 · 교직원", "project-test", "asia-northeast3", "caller-token"
+    )
+
+    assert name.endswith("/ragCorpora/created")
+    endpoint = captured["vectorDbConfig"]["ragEmbeddingModelConfig"][
+        "vertexPredictionEndpoint"
+    ]["endpoint"]
+    assert endpoint == (
+        "projects/project-test/locations/asia-northeast3/publishers/google/models/"
+        "text-multilingual-embedding-002"
+    )
+    assert captured["vectorDbConfig"]["ragManagedDb"] == {}
+    assert "ragVectorDbConfig" not in captured
+
+
+def test_corpus_creation_surfaces_google_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        dept_gui,
+        "_http_post_json",
+        lambda *args, **kwargs: (
+            400,
+            {"error": {"message": "Embedding model is not available in this location."}},
+            5,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="Embedding model is not available"):
+        dept_gui._create_corpus_resource(
+            "cs-rag-corpus-staff", "project-test", "asia-northeast3", "caller-token"
+        )
 
 
 def test_secret_input_is_rejected(isolated_config: Path) -> None:

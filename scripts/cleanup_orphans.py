@@ -5,7 +5,7 @@
 `/sync/delete` 는 한동안 source 버킷 만, 그것도 손으로 적은 확장자 목록으로
 지웠다. hwp-original 버킷 는 아예 손대지 않았다. 그래서 Drive 에서 지운 문서의 **원본이
 GCS 에 영구 잔존**했다(2026-07-30 실측: DELETED 100건 중 52건의 `.hwp` 원본).
-hwp-original 버킷 에는 명단·인사발령 같은 원문이 그대로 있어(docs/OPS_DEFERRED.md 6번)
+hwp-original 버킷 에는 명단·인사발령 같은 원문이 그대로 있어(docs/DEV_SPEC.md 운영 체크리스트)
 삭제가 이행되지 않는 것 자체가 문제다.
 
 삭제 경로는 prefix 훑기로 고쳤으므로 앞으로 새 잔존물은 생기지 않는다. 이

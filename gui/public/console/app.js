@@ -19,6 +19,17 @@
     departmentResourceRequest: 0,
     departmentBuckets: [],
     drivePreflightSignature: "",
+    codeAvailable: null,
+    codeAvailabilityRequest: 0,
+    codeAvailabilityTimer: null,
+    resourcePlan: null,
+    provisionRun: null,
+    provisionPollTimer: null,
+    mcpServers: new Map(),
+    mcpServerRequests: new Map(),
+    corpusAudience: "staff",
+    corpusMessages: [],
+    corpusQueryPending: false,
   };
 
   const statusLabels = {
@@ -87,7 +98,112 @@
     $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
     document.body.classList.remove("menu-open");
     if (view === "environment") loadEnvironment();
+    if (view === "corpus") {
+      renderCorpusDepartmentOptions();
+      window.setTimeout(() => $("#corpusChatInput").focus(), 120);
+    }
     window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function renderCorpusDepartmentOptions() {
+    const select = $("#corpusDepartment");
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = '<option value="">학과 선택</option>' + state.departments.map((dept) =>
+      `<option value="${escapeHtml(dept.code)}">${escapeHtml(dept.name)} · ${escapeHtml(dept.code)}</option>`
+    ).join("");
+    if (state.departments.some((dept) => dept.code === current)) select.value = current;
+    else if (state.departments.length === 1) select.value = state.departments[0].code;
+    select.disabled = state.departments.length === 0;
+    updateCorpusChatTarget();
+  }
+
+  function updateCorpusChatTarget(clear = false) {
+    const code = $("#corpusDepartment")?.value || "";
+    const dept = state.departments.find((item) => item.code === code);
+    const audienceLabel = state.corpusAudience === "staff" ? "교직원" : "학생";
+    $("#corpusChatTarget").textContent = dept ? `${dept.name} · ${audienceLabel} 코퍼스` : "코퍼스를 선택해 주세요";
+    $("#corpusChatMeta").textContent = dept ? `${code} · 실제 검색 결과 · 상위 5개` : "실제 검색 결과 · 상위 5개";
+    if (clear) clearCorpusChat();
+  }
+
+  function corpusContextHtml(context) {
+    const source = context.sourceDisplayName || context.sourceUri || `검색 결과 ${context.rank}`;
+    const score = Number.isFinite(Number(context.score)) ? Number(context.score).toFixed(4) : "—";
+    return `<article class="corpus-context-card">
+      <header><b title="${escapeHtml(source)}">${escapeHtml(source)}</b><span>#${escapeHtml(context.rank)} · ${escapeHtml(score)}</span></header>
+      <p>${escapeHtml(context.text || "본문이 없습니다.")}</p>
+      ${context.sourceUri ? `<small title="${escapeHtml(context.sourceUri)}">${escapeHtml(context.sourceUri)}</small>` : ""}
+    </article>`;
+  }
+
+  function renderCorpusChat() {
+    const feed = $("#corpusChatFeed");
+    if (!state.corpusMessages.length && !state.corpusQueryPending) {
+      feed.innerHTML = '<div class="corpus-chat-empty"><span class="chat-empty-mark">R</span><h2>코퍼스에 질문해 보세요</h2><p>답변을 생성하지 않고 검색된 원문과 출처를 그대로 보여줍니다.</p></div>';
+      return;
+    }
+    const messages = state.corpusMessages.map((message) => {
+      if (message.role === "user") return `<article class="corpus-message user"><div class="corpus-message-bubble">${escapeHtml(message.text)}</div><div class="corpus-message-meta">${escapeHtml(message.target)}</div></article>`;
+      if (message.error) return `<article class="corpus-message assistant"><div class="corpus-message-bubble">${escapeHtml(message.error)}</div><div class="corpus-message-meta">조회 실패</div></article>`;
+      const contexts = message.result.contexts || [];
+      const body = contexts.length
+        ? `<div class="corpus-context-list">${contexts.map(corpusContextHtml).join("")}</div>`
+        : '<div class="corpus-message-bubble">검색된 문서가 없습니다. 코퍼스에 문서가 색인되었는지 확인해 주세요.</div>';
+      return `<article class="corpus-message assistant"><div class="corpus-result-summary"><b>검색 결과 ${contexts.length}개</b><span>${escapeHtml(message.result.latencyMs)}ms · ${escapeHtml(message.result.audience === "staff" ? "교직원" : "학생")}</span></div>${body}<div class="corpus-message-meta">Vertex RAG 원문 조회</div></article>`;
+    }).join("");
+    const loading = state.corpusQueryPending
+      ? '<article class="corpus-message assistant"><div class="corpus-message-bubble corpus-chat-loading"><span class="loader-ring"></span>코퍼스에서 관련 문서를 찾고 있습니다.</div></article>'
+      : "";
+    feed.innerHTML = messages + loading;
+    feed.scrollTop = feed.scrollHeight;
+  }
+
+  function clearCorpusChat() {
+    state.corpusMessages = [];
+    renderCorpusChat();
+  }
+
+  async function submitCorpusQuery(event) {
+    event.preventDefault();
+    if (state.corpusQueryPending) return;
+    const code = $("#corpusDepartment").value;
+    const input = $("#corpusChatInput");
+    const query = input.value.trim();
+    if (!code) {
+      toast("학과를 선택해 주세요", "조회할 학과 코퍼스가 필요합니다.", "fail");
+      $("#corpusDepartment").focus();
+      return;
+    }
+    if (!query) {
+      input.focus();
+      return;
+    }
+    const dept = state.departments.find((item) => item.code === code);
+    const audienceLabel = state.corpusAudience === "staff" ? "교직원" : "학생";
+    state.corpusMessages.push({ role: "user", text: query, target: `${dept?.name || code} · ${audienceLabel}` });
+    state.corpusQueryPending = true;
+    input.value = "";
+    $("#sendCorpusQuery").disabled = true;
+    $("#corpusDepartment").disabled = true;
+    $$('[data-corpus-audience]').forEach((button) => { button.disabled = true; });
+    renderCorpusChat();
+    try {
+      const result = await api("/api/v1/corpus-query", {
+        method: "POST",
+        body: { code, audience: state.corpusAudience, query, topK: 5 },
+      });
+      state.corpusMessages.push({ role: "assistant", result });
+    } catch (error) {
+      state.corpusMessages.push({ role: "assistant", error: error.message });
+    } finally {
+      state.corpusQueryPending = false;
+      $("#sendCorpusQuery").disabled = false;
+      $("#corpusDepartment").disabled = state.departments.length === 0;
+      $$('[data-corpus-audience]').forEach((button) => { button.disabled = false; });
+      renderCorpusChat();
+      input.focus();
+    }
   }
 
   function layerStatus(result, layer) {
@@ -112,6 +228,70 @@
 
   function effectiveStatus(dept) {
     return state.checkingCodes.has(dept.code) ? "CHECKING" : (dept.lastStatus || "UNKNOWN");
+  }
+
+  async function loadDepartmentMcpServers(code, force = false) {
+    if (force) state.mcpServers.delete(code);
+    if (state.mcpServers.has(code)) return state.mcpServers.get(code);
+    if (state.mcpServerRequests.has(code)) return state.mcpServerRequests.get(code);
+    const request = api(`/api/v1/departments/${encodeURIComponent(code)}/mcp-servers`)
+      .then((data) => {
+        state.mcpServers.set(code, data);
+        return data;
+      })
+      .finally(() => state.mcpServerRequests.delete(code));
+    state.mcpServerRequests.set(code, request);
+    return request;
+  }
+
+  async function writeClipboard(value) {
+    if (!value) throw new Error("복사할 주소가 없습니다.");
+    await navigator.clipboard.writeText(value);
+  }
+
+  function renderDrawerMcpServers(code, data = null, error = "") {
+    const root = $("#drawerMcpServers");
+    if (error) {
+      root.innerHTML = `<div class="drawer-mcp-heading"><b>MCP SERVERS</b><small>Cloud Run</small></div><div class="drawer-mcp-loading">${escapeHtml(error)}</div>`;
+      return;
+    }
+    if (!data) {
+      root.innerHTML = '<div class="drawer-mcp-heading"><b>MCP SERVERS</b><small>실제 배포 URL 조회 중</small></div><div class="drawer-mcp-loading">교직원·학생 MCP 서버를 확인하고 있습니다.</div>';
+      return;
+    }
+    const servers = data.servers || [];
+    root.innerHTML = `<div class="drawer-mcp-heading"><b>MCP SERVERS</b><small>${escapeHtml(data.region || "Cloud Run")}</small></div>
+      <div class="drawer-mcp-grid">${servers.map((server) => {
+        const ready = server.status === "READY";
+        const statusLabel = ready ? "준비됨" : server.status === "NOT_READY" ? "배포 확인 필요" : "아직 배포되지 않음";
+        const url = server.url || "URL 없음";
+        const urlElement = server.healthUrl
+          ? `<a class="mcp-server-url" href="${escapeHtml(server.healthUrl)}" target="_blank" rel="noopener">${escapeHtml(url)}</a>`
+          : `<span class="mcp-server-url">${escapeHtml(url)}</span>`;
+        return `<article class="drawer-mcp-card" data-status="${escapeHtml(server.status)}">
+          <span class="mcp-audience-mark">${server.audience === "staff" ? "교" : "학"}</span>
+          <div class="mcp-server-main">
+            <div class="mcp-server-title"><span class="mcp-ready-dot" title="${escapeHtml(statusLabel)}"></span><b>${escapeHtml(server.serviceName)}</b><button type="button" class="mcp-url-copy" data-copy-mcp-url="${escapeHtml(server.url || "")}" ${server.url ? "" : "disabled"}>복사</button></div>
+            ${urlElement}
+          </div>
+        </article>`;
+      }).join("")}</div>`;
+  }
+
+  async function copySingleMcpServer(event) {
+    const button = event.target.closest("[data-copy-mcp-url]");
+    if (!button || !button.dataset.copyMcpUrl) return;
+    try {
+      await writeClipboard(button.dataset.copyMcpUrl);
+      button.textContent = "복사됨";
+      button.classList.add("is-copied");
+      window.setTimeout(() => {
+        button.textContent = "복사";
+        button.classList.remove("is-copied");
+      }, 1400);
+    } catch (error) {
+      toast("MCP 주소를 복사하지 못했습니다", error.message, "fail");
+    }
   }
 
   function renderSummary() {
@@ -177,6 +357,7 @@
       const data = await api("/api/v1/departments");
       state.departments = data.departments || [];
       renderDepartments();
+      renderCorpusDepartmentOptions();
     } catch (error) {
       toast("학과 목록을 불러오지 못했습니다", error.message, "fail");
     }
@@ -446,6 +627,7 @@
     results.forEach((result) => {
       const dept = state.departments.find((item) => item.code === result.code);
       if (dept) {
+        if (dept.lastResult?.checkedAt !== result.checkedAt) state.mcpServers.delete(result.code);
         dept.lastResult = result;
         dept.lastStatus = result.overall;
       }
@@ -522,6 +704,13 @@
     $("#drawerPath").textContent = dept.path;
     const overall = effectiveStatus(dept);
     $("#drawerSummary").innerHTML = `${badge(overall)}<span class="status-badge status-UNKNOWN">${escapeHtml(code)}</span>`;
+    const cachedMcp = state.mcpServers.get(code);
+    renderDrawerMcpServers(code, cachedMcp || null);
+    if (!cachedMcp) {
+      loadDepartmentMcpServers(code)
+        .then((data) => { if (state.selectedCode === code) renderDrawerMcpServers(code, data); })
+        .catch((error) => { if (state.selectedCode === code) renderDrawerMcpServers(code, null, error.message); });
+    }
     const result = dept.lastResult;
     if (!result?.checks?.length) {
       $("#drawerContent").innerHTML = `<div class="empty-state"><h3>아직 검사 결과가 없습니다</h3><p>이 학과의 상태를 확인하면 단계별 결과가 표시됩니다.</p></div>`;
@@ -552,6 +741,250 @@
 
   function splitIds(value) {
     return [...new Set(String(value || "").split(/[,\r\n]+/).map((item) => item.trim()).filter(Boolean))];
+  }
+
+  function setCodeAvailability(status, message = "") {
+    const output = $("#codeAvailabilityStatus");
+    output.dataset.status = status || "";
+    output.textContent = message;
+    state.codeAvailable = status === "ok" ? true : status === "fail" ? false : null;
+    updateResourceProvisionAvailability();
+  }
+
+  async function checkDepartmentCode(immediate = false) {
+    const form = $("#departmentForm");
+    const code = form.elements.code.value.trim().toLowerCase();
+    if (state.editingCode) {
+      setCodeAvailability("ok", "현재 학과 코드입니다.");
+      return true;
+    }
+    if (!/^[a-z][a-z0-9-]{1,19}$/.test(code)) {
+      setCodeAvailability(code ? "fail" : "", code ? "코드 형식을 확인해 주세요." : "");
+      return false;
+    }
+    const requestId = ++state.codeAvailabilityRequest;
+    setCodeAvailability("checking", "학과 코드 중복을 확인하고 있습니다.");
+    if (!immediate) await new Promise((resolve) => window.setTimeout(resolve, 0));
+    try {
+      const result = await api(`/api/v1/departments/code-availability?code=${encodeURIComponent(code)}`);
+      if (requestId !== state.codeAvailabilityRequest || form.elements.code.value.trim().toLowerCase() !== code) return false;
+      setCodeAvailability(result.available ? "ok" : "fail", result.reason);
+      return Boolean(result.available);
+    } catch (error) {
+      if (requestId !== state.codeAvailabilityRequest) return false;
+      setCodeAvailability("fail", error.message);
+      return false;
+    }
+  }
+
+  function scheduleDepartmentCodeCheck() {
+    window.clearTimeout(state.codeAvailabilityTimer);
+    state.codeAvailabilityRequest += 1;
+    setCodeAvailability("", "");
+    state.codeAvailabilityTimer = window.setTimeout(() => checkDepartmentCode(), 320);
+  }
+
+  const provisionFieldNames = {
+    bucketHwp: "hwpBucket",
+    bucketSource: "sourceBucket",
+    corpusStaff: "staffCorpus",
+    corpusStudent: "studentCorpus",
+  };
+
+  function missingProvisionResources(scope = "all") {
+    const form = $("#departmentForm");
+    const groups = {
+      all: Object.keys(provisionFieldNames),
+      buckets: ["bucketHwp", "bucketSource"],
+      corpora: ["corpusStaff", "corpusStudent"],
+    };
+    return groups[scope].filter((key) => !form.elements[provisionFieldNames[key]].value);
+  }
+
+  function updateResourceProvisionAvailability() {
+    const form = $("#departmentForm");
+    if (!form) return;
+    const identityReady = Boolean(
+      form.elements.name.value.trim()
+      && /^[a-z][a-z0-9-]{1,19}$/.test(form.elements.code.value.trim())
+      && (state.editingCode || state.codeAvailable === true)
+    );
+    const missingBuckets = missingProvisionResources("buckets");
+    const missingCorpora = missingProvisionResources("corpora");
+    $("#provisionBuckets").disabled = !identityReady || missingBuckets.length === 0;
+    $("#provisionCorpora").disabled = !identityReady || missingCorpora.length === 0;
+    $("#provisionAllResources").disabled = !identityReady || (missingBuckets.length + missingCorpora.length === 0);
+    $("#resourceProvisionCallout").classList.toggle("hidden", missingBuckets.length + missingCorpora.length === 0);
+    $("#bucketResourceMeta").textContent = missingBuckets.length
+      ? `${2 - missingBuckets.length}/2 연결됨 · 누락 리소스 생성 가능`
+      : "2/2 연결됨 · 보호 설정 확인 대상";
+    $("#corpusResourceMeta").textContent = missingCorpora.length
+      ? `${2 - missingCorpora.length}/2 연결됨 · 누락 리소스 생성 가능`
+      : "2/2 연결됨 · 교직원/학생 분리";
+  }
+
+  function renderResourcePlan(data) {
+    const resources = data.resources || [];
+    $("#resourcePlanProject").textContent = data.projectId || "—";
+    $("#resourcePlanRegion").textContent = data.region || "—";
+    const settings = [];
+    if (resources.some((item) => item.kind === "bucket")) settings.push("버킷 외부 공개 차단 · Uniform Access · Soft Delete 7일");
+    if (resources.some((item) => item.kind === "corpus")) settings.push(`코퍼스 ${data.corpusConfig?.embeddingModel || "다국어 임베딩"} · RAG Managed DB`);
+    $("#resourcePlanProtection").innerHTML = `<span>✓</span><p><b>생성 기본값</b>${escapeHtml(settings.join(" / "))}</p>`;
+    $("#resourcePlanList").innerHTML = resources.map((item) => {
+      const status = item.status || "PLANNED";
+      const icon = status === "COMPLETE" ? "✓" : status === "FAILED" ? "!" : "○";
+      const detail = item.detail && !["대기 중", "생성 요청 중"].includes(item.detail) ? `<p>${escapeHtml(item.detail)}</p>` : "";
+      const resourceName = item.kind === "bucket" ? item.value : item.displayName;
+      const nameControl = status === "PLANNED"
+        ? `<input class="resource-plan-name-input" data-resource-plan-key="${escapeHtml(item.key)}" data-resource-kind="${escapeHtml(item.kind)}" value="${escapeHtml(resourceName)}" maxlength="${item.kind === "bucket" ? 63 : 128}" aria-label="${escapeHtml(item.label)} 이름">`
+        : `<small>${escapeHtml(resourceName)}</small>`;
+      return `<div class="resource-plan-item" data-status="${escapeHtml(status)}">
+        <span class="resource-plan-kind">${item.kind === "bucket" ? "GCS" : "RAG"}</span>
+        <div class="resource-plan-copy"><b>${escapeHtml(item.label)}</b>${nameControl}${detail}</div>
+        <span class="resource-plan-state" aria-label="${escapeHtml(status)}">${icon}</span>
+      </div>`;
+    }).join("");
+  }
+
+  function openResourceModal() {
+    const modal = $("#resourceProvisionModal");
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden", "false");
+    window.setTimeout(() => $("#confirmResourceProvision").focus(), 220);
+  }
+
+  function closeResourceModal() {
+    const modal = $("#resourceProvisionModal");
+    modal.classList.remove("open");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  async function prepareResourcePlan(scope) {
+    const form = $("#departmentForm");
+    const resources = missingProvisionResources(scope);
+    if (!resources.length) {
+      toast("이미 연결되어 있습니다", "선택한 범위에 새로 만들 리소스가 없습니다.", "ok");
+      return;
+    }
+    const code = form.elements.code.value.trim().toLowerCase();
+    const name = form.elements.name.value.trim();
+    if (!name || !await checkDepartmentCode(true)) {
+      const identityErrors = {};
+      if (state.codeAvailable === false) identityErrors.code = [$("#codeAvailabilityStatus").textContent];
+      if (!name) identityErrors.name = ["학과명을 입력해 주세요."];
+      showFieldErrors(identityErrors);
+      toast("학과 정보를 먼저 확인해 주세요", "사용 가능한 학과 코드와 학과명이 필요합니다.", "fail");
+      return;
+    }
+    const error = $("#resourceProvisionError");
+    error.classList.add("hidden");
+    try {
+      const plan = await api("/api/v1/departments/resource-plans", {
+        method: "POST",
+        body: { code, name, editingCode: state.editingCode || "", resources },
+      });
+      state.resourcePlan = plan;
+      state.provisionRun = null;
+      $("#resourceModalTitle").textContent = "학과 리소스 만들기";
+      $("#resourceModalDescription").textContent = "생성 전 프로젝트와 리소스 이름을 확인해 주세요.";
+      $("#confirmResourceProvision").classList.remove("hidden");
+      $("#confirmResourceProvision").disabled = false;
+      $("#confirmResourceProvision").textContent = `${plan.resources.length}개 리소스 만들기`;
+      $("#closeResourceProvision").textContent = "취소";
+      renderResourcePlan(plan);
+      openResourceModal();
+    } catch (requestError) {
+      const fieldErrors = requestError.data?.error?.fieldErrors;
+      if (fieldErrors) showFieldErrors(fieldErrors);
+      toast("생성 계획을 만들지 못했습니다", requestError.message, "fail");
+    }
+  }
+
+  async function applyProvisionedResources(run) {
+    const selected = {};
+    const created = { corpora: [], buckets: [] };
+    (run.resources || []).forEach((item) => {
+      if (item.status !== "COMPLETE" || !item.value) return;
+      selected[provisionFieldNames[item.key]] = item.value;
+      if (item.kind === "corpus") {
+        created.corpora.push({ name: item.value, displayName: item.displayName || item.value });
+      } else {
+        created.buckets.push({ name: item.value, location: run.region || "", usedBy: [] });
+      }
+    });
+    if (Object.keys(selected).length) await loadDepartmentResources(selected, created);
+  }
+
+  async function pollProvisionRun(runId) {
+    window.clearTimeout(state.provisionPollTimer);
+    try {
+      const run = await api(`/api/v1/departments/resource-provisioning/${runId}`);
+      state.provisionRun = run;
+      renderResourcePlan(run);
+      if (run.status === "RUNNING") {
+        state.provisionPollTimer = window.setTimeout(() => pollProvisionRun(runId), 1300);
+        return;
+      }
+      await applyProvisionedResources(run);
+      const completed = (run.resources || []).filter((item) => item.status === "COMPLETE").length;
+      const failed = (run.resources || []).filter((item) => item.status === "FAILED").length;
+      $("#resourceModalTitle").textContent = failed ? "일부 리소스 확인 필요" : "학과 리소스 준비 완료";
+      $("#resourceModalDescription").textContent = failed
+        ? `${completed}개 완료 · ${failed}개 실패. 완료된 리소스는 그대로 연결했습니다.`
+        : `${completed}개 리소스를 생성하고 설정에 연결했습니다.`;
+      $("#confirmResourceProvision").classList.add("hidden");
+      $("#closeResourceProvision").textContent = "닫기";
+      toast(failed ? "일부 리소스 생성 실패" : "학과 리소스를 준비했습니다", failed ? "실패한 항목만 다시 시도할 수 있습니다." : `${completed}개 생성 완료`, failed ? "fail" : "ok");
+    } catch (error) {
+      const banner = $("#resourceProvisionError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+      $("#confirmResourceProvision").disabled = false;
+      $("#confirmResourceProvision").textContent = "다시 확인";
+    }
+  }
+
+  async function startResourceProvision() {
+    if (!state.resourcePlan) return;
+    const button = $("#confirmResourceProvision");
+    const inputs = $$("#resourcePlanList [data-resource-plan-key]");
+    const overrides = Object.fromEntries(inputs.map((input) => [input.dataset.resourcePlanKey, input.value.trim()]));
+    const invalidInput = inputs.find((input) => {
+      const value = input.value.trim().replace(/^gs:\/\//, "");
+      if (input.dataset.resourceKind === "bucket") return !/^[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]$/.test(value);
+      return !value || value.length > 128;
+    });
+    const bucketNames = inputs.filter((input) => input.dataset.resourceKind === "bucket").map((input) => input.value.trim().replace(/^gs:\/\//, ""));
+    const corpusNames = inputs.filter((input) => input.dataset.resourceKind === "corpus").map((input) => input.value.trim());
+    const duplicateNames = new Set(bucketNames).size !== bucketNames.length || new Set(corpusNames).size !== corpusNames.length;
+    if (invalidInput || duplicateNames) {
+      const banner = $("#resourceProvisionError");
+      banner.textContent = duplicateNames ? "같은 종류의 두 리소스는 서로 다른 이름이어야 합니다." : "리소스 이름의 형식을 확인해 주세요.";
+      banner.classList.remove("hidden");
+      invalidInput?.focus();
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "생성 시작 중…";
+    $("#closeResourceProvision").textContent = "닫기";
+    try {
+      const run = await api("/api/v1/departments/resource-provisioning", {
+        method: "POST",
+        body: { planId: state.resourcePlan.planId, overrides },
+      });
+      state.provisionRun = run;
+      $("#resourceModalTitle").textContent = "학과 리소스를 구성하고 있습니다";
+      $("#resourceModalDescription").textContent = "창을 닫아도 현재 실행은 계속됩니다.";
+      renderResourcePlan(run);
+      pollProvisionRun(run.runId);
+    } catch (error) {
+      const banner = $("#resourceProvisionError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+      button.disabled = false;
+      button.textContent = "리소스 만들기";
+    }
   }
 
   function updateDrivePreflightAvailability() {
@@ -638,9 +1071,10 @@
       output.textContent = usedBy.length ? `${usedBy.join(", ")} 학과가 사용 중인 버킷입니다.` : "";
       output.classList.toggle("is-visible", usedBy.length > 0);
     }
+    updateResourceProvisionAvailability();
   }
 
-  async function loadDepartmentResources(selected = {}) {
+  async function loadDepartmentResources(selected = {}, created = { corpora: [], buckets: [] }) {
     const form = $("#departmentForm");
     const names = ["staffCorpus", "studentCorpus", "hwpBucket", "sourceBucket"];
     const desired = Object.fromEntries(names.map((name) => [name, selected[name] ?? form.elements[name].value]));
@@ -655,22 +1089,28 @@
     try {
       const resources = await api("/api/v1/departments/resource-options");
       if (requestId !== state.departmentResourceRequest) return;
-      const corpora = resources.corpora || [];
-      const buckets = resources.buckets || [];
+      const corpora = [...(resources.corpora || [])];
+      const buckets = [...(resources.buckets || [])];
+      (created.corpora || []).forEach((item) => {
+        if (!corpora.some((existing) => existing.name === item.name)) corpora.push(item);
+      });
+      (created.buckets || []).forEach((item) => {
+        if (!buckets.some((existing) => existing.name === item.name)) buckets.push(item);
+      });
       state.departmentBuckets = buckets;
-      const corpusHtml = corpora.map((item) => {
+      const corpusHtml = '<option value="">코퍼스 선택</option>' + corpora.map((item) => {
         const shortId = item.name.split("/").at(-1);
         return `<option value="${escapeHtml(item.name)}">${escapeHtml(item.displayName)} · ${escapeHtml(shortId)}</option>`;
       }).join("");
       const bucketHtml = '<option value="">버킷 선택</option>' + buckets.map((item) => `<option value="${escapeHtml(item.name)}">${escapeHtml(item.name)} · ${escapeHtml(item.location)}</option>`).join("");
       for (const name of ["staffCorpus", "studentCorpus"]) {
         const value = desired[name];
-        form.elements[name].innerHTML = corpusHtml || '<option value="">RAG 코퍼스 없음</option>';
+        form.elements[name].innerHTML = corpora.length ? corpusHtml : '<option value="">사용 가능한 RAG 코퍼스 없음</option>';
         if (value && !corpora.some((item) => item.name === value)) {
           form.elements[name].insertAdjacentHTML("beforeend", `<option value="${escapeHtml(value)}">현재 설정 · 조회되지 않음</option>`);
         }
         form.elements[name].disabled = !corpora.length;
-        if (value) form.elements[name].value = value;
+        form.elements[name].value = value || "";
       }
       for (const name of ["hwpBucket", "sourceBucket"]) {
         const value = desired[name];
@@ -682,19 +1122,22 @@
         if (value) form.elements[name].value = value;
       }
       updateBucketSelectionState();
+      updateResourceProvisionAvailability();
       if (!corpora.length || !buckets.length) {
-        toast("선택할 GCP 리소스가 부족합니다", "RAG 코퍼스와 보호된 리전 버킷을 먼저 준비해 주세요.", "fail");
+        toast("선택할 리소스가 부족합니다", "기존 리소스를 선택하거나 이 화면에서 새로 만들 수 있습니다.");
       }
     } catch (error) {
       if (requestId !== state.departmentResourceRequest) return;
       state.departmentBuckets = [];
       names.forEach((name) => { form.elements[name].innerHTML = '<option value="">리소스 조회 실패</option>'; });
       updateBucketSelectionState();
+      updateResourceProvisionAvailability();
       toast("GCP 리소스를 불러오지 못했습니다", error.message, "fail");
     } finally {
       if (requestId === state.departmentResourceRequest) {
         button.disabled = false;
         button.textContent = "리소스 다시 불러오기";
+        updateResourceProvisionAvailability();
       }
     }
   }
@@ -728,9 +1171,13 @@
     const payload = formPayload();
     const errors = {};
     if (!/^[a-z][a-z0-9-]{1,19}$/.test(payload.code)) errors.code = ["영문 소문자로 시작하는 2~20자 코드가 필요합니다."];
+    else if (!state.editingCode && state.codeAvailable !== true) errors.code = [$("#codeAvailabilityStatus").textContent || "이미 사용 중인지 학과 코드를 확인해 주세요."];
     if (!payload.name) errors.name = ["학과명을 입력해 주세요."];
     if (!payload.corpora.staff) errors["corpora.staff"] = ["교직원 코퍼스를 입력해 주세요."];
     if (!payload.corpora.student) errors["corpora.student"] = ["학생 코퍼스를 입력해 주세요."];
+    if (payload.corpora.staff && payload.corpora.staff === payload.corpora.student) {
+      errors["corpora.student"] = ["교직원 코퍼스와 다른 코퍼스를 선택해 주세요."];
+    }
     if (!payload.buckets.hwpOriginal) errors["buckets.hwpOriginal"] = ["버킷 이름을 입력해 주세요."];
     if (!payload.buckets.source) errors["buckets.source"] = ["버킷 이름을 입력해 주세요."];
     if (payload.buckets.hwpOriginal && payload.buckets.hwpOriginal === payload.buckets.source) {
@@ -797,6 +1244,7 @@
 
   async function nextWizardStep() {
     if (state.currentStep === 1) {
+      await checkDepartmentCode(true);
       if (validateStepOne()) showStep(2);
       return;
     }
@@ -805,10 +1253,15 @@
 
   function resetWizard() {
     $("#departmentForm").reset();
+    window.clearTimeout(state.codeAvailabilityTimer);
     state.editingCode = null;
     state.editingRevision = null;
     state.drivePreflightSignature = "";
+    state.codeAvailable = null;
+    state.codeAvailabilityRequest += 1;
+    state.resourcePlan = null;
     $("#departmentForm").elements.code.readOnly = false;
+    setCodeAvailability("", "");
     setEditorMode(false);
     clearFieldErrors();
     $$(".tag-preview").forEach((item) => { item.innerHTML = ""; });
@@ -819,6 +1272,8 @@
     renderStudentFolderPicker();
     $("#confirmCreate").checked = false;
     $("#validationBanner").classList.add("hidden");
+    $("#resourceProvisionError").classList.add("hidden");
+    closeResourceModal();
     showStep(1);
   }
 
@@ -845,6 +1300,7 @@
       const form = $("#departmentForm");
       form.elements.code.value = config.code;
       form.elements.code.readOnly = true;
+      setCodeAvailability("ok", "현재 학과 코드입니다.");
       form.elements.name.value = config.name || "";
       form.elements.driveIds.value = (config.drive?.driveIds || []).join("\n");
       form.elements.syncFolderIds.value = (config.drive?.syncFolderIds || []).join("\n");
@@ -947,6 +1403,20 @@
     $("#checkAllButton").addEventListener("click", () => startStatus());
     $("#departmentSearch").addEventListener("input", renderDepartments);
     $("#statusFilter").addEventListener("change", renderDepartments);
+    $("#corpusDepartment").addEventListener("change", () => updateCorpusChatTarget(true));
+    $$('[data-corpus-audience]').forEach((button) => button.addEventListener("click", () => {
+      state.corpusAudience = button.dataset.corpusAudience;
+      $$('[data-corpus-audience]').forEach((item) => item.classList.toggle("active", item === button));
+      updateCorpusChatTarget(true);
+    }));
+    $("#corpusChatForm").addEventListener("submit", submitCorpusQuery);
+    $("#clearCorpusChat").addEventListener("click", clearCorpusChat);
+    $("#corpusChatInput").addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        $("#corpusChatForm").requestSubmit();
+      }
+    });
     $("#nextStep").addEventListener("click", nextWizardStep);
     $("#previousStep").addEventListener("click", () => showStep(Math.max(1, state.currentStep - 1)));
     $("#cancelCreate").addEventListener("click", () => { resetWizard(); switchView("dashboard"); });
@@ -958,9 +1428,18 @@
     $("#refreshDepartmentResources").addEventListener("click", () => loadDepartmentResources());
     $("#departmentForm").elements.hwpBucket.addEventListener("change", updateBucketSelectionState);
     $("#departmentForm").elements.sourceBucket.addEventListener("change", updateBucketSelectionState);
+    $("#departmentForm").elements.staffCorpus.addEventListener("change", updateResourceProvisionAvailability);
+    $("#departmentForm").elements.studentCorpus.addEventListener("change", updateResourceProvisionAvailability);
+    $("#departmentForm").elements.name.addEventListener("input", updateResourceProvisionAvailability);
+    $("#provisionAllResources").addEventListener("click", () => prepareResourcePlan("all"));
+    $("#provisionBuckets").addEventListener("click", () => prepareResourcePlan("buckets"));
+    $("#provisionCorpora").addEventListener("click", () => prepareResourcePlan("corpora"));
+    $("#confirmResourceProvision").addEventListener("click", startResourceProvision);
+    $$('[data-close-resource-modal]').forEach((item) => item.addEventListener("click", closeResourceModal));
     $("#departmentForm").elements.driveIds.addEventListener("input", updateDrivePreflightAvailability);
     $("#checkDriveIds").addEventListener("click", checkDriveIds);
     $("#environmentGrid").addEventListener("click", copyEnvironmentValue);
+    $("#drawerMcpServers").addEventListener("click", copySingleMcpServer);
     $("#confirmCreate").addEventListener("change", (event) => { $("#createDepartment").disabled = !event.target.checked; });
     $$("textarea").forEach((item) => item.addEventListener("input", () => updateTagPreview(item)));
     $("#departmentForm").elements.syncFolderIds.addEventListener("input", renderStudentFolderPicker);
@@ -973,6 +1452,7 @@
     });
     $("#departmentForm").elements.code.addEventListener("input", (event) => {
       event.target.value = event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "");
+      scheduleDepartmentCodeCheck();
     });
     $$('[data-close-drawer]').forEach((item) => item.addEventListener("click", closeDrawer));
     $("#drawerEdit").addEventListener("click", (event) => beginEdit(event.currentTarget.dataset.code));
@@ -983,7 +1463,9 @@
       catch (error) { toast("취소하지 못했습니다", error.message, "fail"); }
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && $("#detailDrawer").classList.contains("open")) closeDrawer();
+      if (event.key !== "Escape") return;
+      if ($("#resourceProvisionModal").classList.contains("open")) closeResourceModal();
+      else if ($("#detailDrawer").classList.contains("open")) closeDrawer();
     });
   }
 

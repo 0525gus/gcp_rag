@@ -84,6 +84,10 @@
             <span class="nav-icon plus-icon" aria-hidden="true"></span>
             <span>학과 추가</span>
           </button>
+          <button class="nav-item" data-view="corpus">
+            <span class="nav-icon chat-icon" aria-hidden="true"></span>
+            <span>코퍼스 대화</span>
+          </button>
           <button class="nav-item" data-view="environment">
             <span class="nav-icon terminal-icon" aria-hidden="true"></span>
             <span>실행 환경</span>
@@ -230,8 +234,9 @@
                 <div class="form-grid two-columns">
                   <label class="field">
                     <span>학과 코드 <em>필수</em></span>
-                    <input name="code" autocomplete="off" placeholder="예: ee" maxlength="20" />
+                    <input name="code" autocomplete="off" placeholder="예: ee" maxlength="20" aria-describedby="codeAvailabilityStatus" />
                     <small>영문 소문자로 시작하는 2~20자</small>
+                    <span class="preflight-result" id="codeAvailabilityStatus" aria-live="polite"></span>
                     <span class="field-error" data-error="code"></span>
                   </label>
                   <label class="field">
@@ -246,33 +251,53 @@
                   <div><span>REGION</span><b id="formRegion">—</b></div>
                   <span class="lock-note">common.yaml에서 가져옴</span>
                 </div>
-                <div class="form-grid">
-                  <label class="field">
-                    <span>교직원 코퍼스 <em>필수</em></span>
-                    <select name="staffCorpus" disabled><option value="">RAG 코퍼스 불러오는 중…</option></select>
-                    <small>Vertex RAG 코퍼스의 표시 이름으로 선택</small>
-                    <span class="field-error" data-error="corpora.staff"></span>
-                  </label>
-                  <label class="field">
-                    <span>학생 코퍼스 <em>필수</em></span>
-                    <select name="studentCorpus" disabled><option value="">RAG 코퍼스 불러오는 중…</option></select>
-                    <small>교직원 코퍼스와 다른 리소스를 선택</small>
-                    <span class="field-error" data-error="corpora.student"></span>
-                  </label>
+                <div class="resource-provision-callout hidden" id="resourceProvisionCallout">
+                  <span class="resource-callout-icon">＋</span>
+                  <div><b>필요한 학과 리소스를 여기서 만들 수 있습니다</b><p>선택되지 않은 버킷과 코퍼스만 안전한 기본값으로 생성합니다.</p></div>
+                  <button type="button" class="button primary compact" id="provisionAllResources">학과 리소스 자동 구성</button>
                 </div>
-                <div class="form-grid two-columns">
-                  <label class="field">
-                    <span>HWP 원본 버킷 <em>필수</em></span>
-                    <select name="hwpBucket" disabled><option value="">보호된 GCS 버킷 불러오는 중…</option></select>
-                    <small class="bucket-usage" id="hwpBucketUsage" aria-live="polite"></small>
-                    <span class="field-error" data-error="buckets.hwpOriginal"></span>
-                  </label>
-                  <label class="field">
-                    <span>Source 버킷 <em>필수</em></span>
-                    <select name="sourceBucket" disabled><option value="">보호된 GCS 버킷 불러오는 중…</option></select>
-                    <small class="bucket-usage" id="sourceBucketUsage" aria-live="polite"></small>
-                    <span class="field-error" data-error="buckets.source"></span>
-                  </label>
+                <div class="resource-card-grid">
+                  <section class="resource-config-card" aria-labelledby="corpusCardTitle">
+                    <header>
+                      <div class="resource-card-title"><span class="resource-card-icon corpus">R</span><div><h3 id="corpusCardTitle">RAG 코퍼스</h3><small id="corpusResourceMeta">기존 코퍼스 선택 또는 새로 생성</small></div></div>
+                      <button type="button" class="button secondary compact resource-create-button" id="provisionCorpora">코퍼스 2개 만들기</button>
+                    </header>
+                    <div class="resource-card-fields">
+                      <label class="field">
+                        <span>교직원 코퍼스 <em>필수</em></span>
+                        <select name="staffCorpus" disabled><option value="">RAG 코퍼스 불러오는 중…</option></select>
+                        <small>학과 전체 문서 검색용</small>
+                        <span class="field-error" data-error="corpora.staff"></span>
+                      </label>
+                      <label class="field">
+                        <span>학생 코퍼스 <em>필수</em></span>
+                        <select name="studentCorpus" disabled><option value="">RAG 코퍼스 불러오는 중…</option></select>
+                        <small>학생 공개 문서만 분리</small>
+                        <span class="field-error" data-error="corpora.student"></span>
+                      </label>
+                    </div>
+                  </section>
+                  <section class="resource-config-card" aria-labelledby="bucketCardTitle">
+                    <header>
+                      <div class="resource-card-title"><span class="resource-card-icon bucket">B</span><div><h3 id="bucketCardTitle">Cloud Storage</h3><small id="bucketResourceMeta">보호된 리전 버킷 선택 또는 새로 생성</small></div></div>
+                      <button type="button" class="button secondary compact resource-create-button" id="provisionBuckets">버킷 2개 만들기</button>
+                    </header>
+                    <div class="resource-card-fields two-columns">
+                      <label class="field">
+                        <span>HWP 원본 버킷 <em>필수</em></span>
+                        <select name="hwpBucket" disabled><option value="">보호된 GCS 버킷 불러오는 중…</option></select>
+                        <small class="bucket-usage" id="hwpBucketUsage" aria-live="polite"></small>
+                        <span class="field-error" data-error="buckets.hwpOriginal"></span>
+                      </label>
+                      <label class="field">
+                        <span>Source 버킷 <em>필수</em></span>
+                        <select name="sourceBucket" disabled><option value="">보호된 GCS 버킷 불러오는 중…</option></select>
+                        <small class="bucket-usage" id="sourceBucketUsage" aria-live="polite"></small>
+                        <span class="field-error" data-error="buckets.source"></span>
+                      </label>
+                    </div>
+                    <div class="resource-security-line"><span>✓</span> 동일 리전 · 외부 공개 차단 · Uniform Access · Soft Delete 7일</div>
+                  </section>
                 </div>
                 <details class="advanced-options">
                   <summary>고급 설정 <span>최소 인스턴스</span></summary>
@@ -356,6 +381,47 @@
           </div>
         </section>
 
+        <section class="view" id="corpusView" aria-labelledby="corpusTitle">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow">CORPUS CONVERSATION</span>
+              <h1 id="corpusTitle">학과 코퍼스 확인</h1>
+              <p>질문을 보내 실제 Vertex RAG 코퍼스에서 검색되는 문서 조각과 출처를 확인하세요.</p>
+            </div>
+          </div>
+          <div class="corpus-chat-layout">
+            <aside class="panel corpus-chat-settings">
+              <div class="corpus-settings-mark"><span></span><span></span><span></span></div>
+              <div><span class="eyebrow">TARGET CORPUS</span><h2>대화 대상</h2><p>학과와 공개 범위를 선택하면 해당 코퍼스만 조회합니다.</p></div>
+              <label class="field">
+                <span>학과</span>
+                <select id="corpusDepartment"><option value="">학과 선택</option></select>
+              </label>
+              <div class="corpus-audience-field">
+                <span>코퍼스 범위</span>
+                <div class="corpus-audience-toggle" role="group" aria-label="코퍼스 범위">
+                  <button type="button" class="active" data-corpus-audience="staff">교직원</button>
+                  <button type="button" data-corpus-audience="student">학생</button>
+                </div>
+              </div>
+              <div class="corpus-security-note"><span>✓</span><p>MCP 키와 gcloud 토큰은 브라우저에 전달하지 않습니다.</p></div>
+            </aside>
+            <section class="panel corpus-chat-panel">
+              <header>
+                <div><span class="corpus-live-dot"></span><div><b id="corpusChatTarget">코퍼스를 선택해 주세요</b><small id="corpusChatMeta">실제 검색 결과 · 상위 5개</small></div></div>
+                <button type="button" class="button ghost compact" id="clearCorpusChat">대화 지우기</button>
+              </header>
+              <div class="corpus-chat-feed" id="corpusChatFeed" aria-live="polite">
+                <div class="corpus-chat-empty"><span class="chat-empty-mark">R</span><h2>코퍼스에 질문해 보세요</h2><p>답변을 생성하지 않고 검색된 원문과 출처를 그대로 보여줍니다.</p></div>
+              </div>
+              <form class="corpus-chat-composer" id="corpusChatForm">
+                <textarea id="corpusChatInput" rows="2" maxlength="1000" placeholder="예: 수강신청 일정은 언제인가요?" aria-label="코퍼스 질문"></textarea>
+                <button type="submit" class="button primary" id="sendCorpusQuery">질문 보내기</button>
+              </form>
+            </section>
+          </div>
+        </section>
+
         <section class="view" id="environmentView" aria-labelledby="environmentTitle">
           <div class="page-heading">
             <div>
@@ -383,10 +449,36 @@
           <button class="icon-button" data-close-drawer aria-label="상세 닫기">×</button>
         </header>
         <div class="drawer-summary" id="drawerSummary"></div>
+        <section class="drawer-mcp-servers" id="drawerMcpServers" aria-live="polite"></section>
         <div class="drawer-content" id="drawerContent"></div>
         <footer>
           <button class="button primary" id="drawerEdit">설정 수정</button>
           <button class="button secondary" id="drawerCheck">이 학과 다시 확인</button>
+        </footer>
+      </div>
+    </aside>
+
+    <aside class="resource-modal" id="resourceProvisionModal" aria-hidden="true" aria-labelledby="resourceModalTitle">
+      <div class="resource-modal-backdrop" data-close-resource-modal></div>
+      <div class="resource-modal-panel" role="dialog" aria-modal="true">
+        <header>
+          <div><span class="eyebrow">RESOURCE PLAN</span><h2 id="resourceModalTitle">학과 리소스 만들기</h2><p id="resourceModalDescription">생성 전 프로젝트와 리소스 이름을 확인해 주세요.</p></div>
+          <button type="button" class="icon-button" data-close-resource-modal aria-label="리소스 생성 창 닫기">×</button>
+        </header>
+        <div class="resource-modal-body">
+          <div class="resource-plan-context">
+            <div><span>PROJECT</span><b id="resourcePlanProject">—</b></div>
+            <div><span>REGION</span><b id="resourcePlanRegion">—</b></div>
+          </div>
+          <div class="resource-plan-list" id="resourcePlanList"></div>
+          <div class="resource-plan-protection" id="resourcePlanProtection">
+            <span>✓</span><p><b>버킷 보호 설정</b>외부 공개 차단 · Uniform Access · Soft Delete 7일</p>
+          </div>
+          <div class="validation-banner hidden" id="resourceProvisionError"></div>
+        </div>
+        <footer>
+          <button type="button" class="button ghost" data-close-resource-modal id="closeResourceProvision">취소</button>
+          <button type="button" class="button primary" id="confirmResourceProvision">리소스 만들기</button>
         </footer>
       </div>
     </aside>

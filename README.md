@@ -51,15 +51,17 @@ gcloud auth application-default login
 gcloud config set project <GCP_PROJECT_ID>
 ```
 
-### 2. GCP 실물 생성
+### 2. GCP 리소스 준비
 
-스크립트는 **만들지 않는다.** 존재만 검사한다. 이미 있으면 다시 만들 필요 없음.
+학과 관리 웹 콘솔(`python scripts/dept_gui.py`)에서 학과별 버킷과 코퍼스를 기존
+목록에서 선택하거나 직접 생성할 수 있다. 상태 확인은 읽기 전용이며, 실제 생성은
+계획을 확인한 뒤 `리소스 만들기`를 눌렀을 때만 실행된다.
 
 | 대상 | 비고 |
 |---|---|
-| GCS 버킷 2개 | 이름은 전역 고유 — 프로젝트 ID를 붙이면 안전 |
+| GCS 버킷 2개 | 웹 콘솔에서 보호 기본값으로 생성 또는 기존 버킷 선택 |
 | Firestore Native DB | 이름·타입·리전 **생성 후 변경 불가**. `(default)` Datastore 불가 |
-| Vertex RAG 코퍼스 | 콘솔에서 생성. 학생 분리를 켤 거면 2개 |
+| Vertex RAG 코퍼스 | 웹 콘솔에서 교직원·학생 2개 생성 또는 기존 코퍼스 선택 |
 | 공유드라이브 공유 | Cloud Run SA `<프로젝트번호>-compute@developer.gserviceaccount.com` 를 뷰어 이상으로 초대 |
 
 ```powershell
@@ -67,6 +69,37 @@ gcloud storage buckets create gs://<hwp-original-bucket> --location=asia-northea
 gcloud storage buckets create gs://<source-bucket> --location=asia-northeast3 --uniform-bucket-level-access --pap
 gcloud firestore databases create --database=rag-sync-state --location=asia-northeast3 --type=firestore-native
 ```
+
+**공유드라이브에 서비스 계정 초대 (콘솔)**
+
+Drive 권한은 GCP IAM 과 **별개 체계**다. 프로젝트 소유자여도 공유드라이브 접근이
+자동으로 생기지 않으므로 여기서 직접 넣어야 한다. 안 넣으면 배포는 통과하고
+색인만 0건으로 끝난다 — preflight 는 확인이 막히면 WARN 으로 넘어간다.
+
+1. 초대할 계정 확인 (Cloud Run 기본 SA)
+
+   ```powershell
+   gcloud projects describe <프로젝트ID> --format="value(projectNumber)"
+   # -> <프로젝트번호>-compute@developer.gserviceaccount.com
+   ```
+
+2. [drive.google.com](https://drive.google.com) → 해당 **공유드라이브** 선택
+3. 이름 우클릭(또는 우상단 ⋮) → **멤버 관리**
+4. 위 SA 이메일 입력 → 역할 **뷰어** → **보내기**
+   - 알림 메일 체크는 꺼도 된다 (SA 는 메일함이 없다)
+   - 학과를 늘리면 **드라이브마다** 반복해야 한다
+5. 확인
+
+   ```powershell
+   .\scripts\preflight.ps1     # ok Drive <driveId> share(...) 가 뜨면 됨
+   ```
+
+> **`share_drive.ps1` 은 왜 안 쓰나**
+> 스크립트로도 초대할 수 있지만 토큰에 Drive 스코프가 있어야 하고,
+> **gcloud 내장 OAuth 클라이언트는 Drive 스코프를 못 받는다** — 별도 OAuth
+> 클라이언트를 만들어 `--client-id-file` 로 넘겨야 한다
+> (`gcloud auth application-default login --help` 에 명시돼 있다).
+> 드라이브가 몇 개뿐이면 콘솔이 빠르다. 스크립트는 드라이브가 많아졌을 때 쓴다.
 
 - `--pap`(공개 접근 차단)와 `--uniform-bucket-level-access` 를 권장한다. hwp-original 에는 원본 공문이 상주한다
 - 덮어쓰기를 되돌리려면 버전관리도 켠다(선택). `source` 버킷 덮어쓰기는 되돌릴 수 없다
@@ -78,9 +111,9 @@ gcloud firestore databases create --database=rag-sync-state --location=asia-nort
 
 **코퍼스**
 
-`gcloud` 에는 RAG 코퍼스 명령이 없다. **Vertex AI RAG 콘솔**에서 만든다.
-
-- 만든 뒤 리소스 경로(`projects/.../locations/asia-northeast3/ragCorpora/{id}`)를 학과 yaml 의 `corpora` 에 넣는다
+`gcloud` 전용 코퍼스 명령 대신 학과 관리 웹 콘솔이 Vertex AI API를 호출한다.
+생성 완료 후 리소스 경로(`projects/.../locations/asia-northeast3/ragCorpora/{id}`)를
+학과 입력란에 자동으로 선택한다.
 - **임베딩 모델과 벡터 DB는 생성 시점에만 정한다.** 나중에 못 바꾼다 — 바꾸려면 코퍼스를 새로 만들고 전량 재색인
 - 한국어 문서라 다국어 임베딩(`text-multilingual-embedding-002`)을 쓴다
 - 벡터 DB는 관리형(RAG Managed DB)과 Vertex Vector Search 중 선택. Vector Search 는 인덱스 엔드포인트가 **상시 과금**이고 코퍼스마다 인덱스가 따로 필요하다
@@ -136,7 +169,7 @@ python -c "import secrets;print(secrets.token_urlsafe(32))"   # 키 2개 생성
 | Firestore 존재 + `FIRESTORE_NATIVE` | 없음 / Datastore 모드를 구분해서 알려줌 |
 | RAG 코퍼스 존재 (교직원 + 학생) | 코퍼스 경로 확인 |
 | Cloud Run SA 해석 | 프로젝트 번호 조회 실패 |
-| Drive 에 SA 멤버십 | 토큰에 Drive 스코프가 없으면 WARN 으로 넘어감 |
+| Drive 에 SA 멤버십 | 토큰에 Drive 스코프가 없으면 WARN 으로 넘어감 — **통과가 아니다**. 위 2단계 콘솔 절차로 직접 확인할 것 |
 | Document AI processor | `QG_MODE=fallback` 일 때만 |
 
 - `deploy.ps1` 도 API enable 뒤 같은 검사를 돌린다

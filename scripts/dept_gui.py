@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -86,7 +87,19 @@ _RUNS: dict[str, dict[str, Any]] = {}
 _RUN_LOCK = threading.Lock()
 _LATEST: dict[str, dict[str, Any]] = {}
 _RUN_TTL_SECONDS = 15 * 60
+_RESOURCE_PLANS: dict[str, dict[str, Any]] = {}
+_PROVISION_RUNS: dict[str, dict[str, Any]] = {}
+_PROVISION_LOCK = threading.Lock()
+_PROVISION_TTL_SECONDS = 30 * 60
 _AUTH_PROCESS: subprocess.Popen[Any] | None = None
+
+PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, str]] = {
+    "bucketHwp": {"kind": "bucket", "label": "HWP 원본 버킷"},
+    "bucketSource": {"kind": "bucket", "label": "Source 버킷"},
+    "corpusStaff": {"kind": "corpus", "label": "교직원 코퍼스"},
+    "corpusStudent": {"kind": "corpus", "label": "학생 코퍼스"},
+}
+RAG_EMBEDDING_MODEL = "text-multilingual-embedding-002"
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -182,6 +195,32 @@ def _has_secret_input(value: Any) -> bool:
     return False
 
 
+def department_code_availability(code: str, *, current_code: str = "") -> dict[str, Any]:
+    """학과 코드 형식과 기존 YAML 충돌을 한 번에 확인한다."""
+    normalised = str(code or "").strip().lower()
+    current = str(current_code or "").strip().lower()
+    if not DEPT_CODE_RE.fullmatch(normalised):
+        return {
+            "code": normalised,
+            "available": False,
+            "reason": "영문 소문자로 시작하는 2~20자 코드여야 합니다.",
+        }
+    if current and current != normalised:
+        return {
+            "code": normalised,
+            "available": False,
+            "reason": "수정 중에는 학과 코드를 변경할 수 없습니다.",
+        }
+    target = DEPT_DIR / f"{normalised}.yaml"
+    if target.exists() and current != normalised:
+        return {
+            "code": normalised,
+            "available": False,
+            "reason": f"{normalised} 코드는 이미 다른 학과에서 사용 중입니다.",
+        }
+    return {"code": normalised, "available": True, "reason": "사용 가능한 학과 코드입니다."}
+
+
 def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) -> tuple[dict, dict]:
     """GUI 입력 정규화와 필드별 검증. secret은 입력으로 받지 않는다."""
     errors: dict[str, list[str]] = {}
@@ -194,9 +233,10 @@ def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) 
         _field_error(errors, "code", "영문 소문자로 시작하는 2~20자 코드여야 합니다.")
     if not name:
         _field_error(errors, "name", "학과명을 입력해 주세요.")
-    target = DEPT_DIR / f"{code}.yaml"
-    if check_existing and code and target.exists():
-        _field_error(errors, "code", "이미 같은 학과 YAML이 있습니다.")
+    if check_existing and code:
+        availability = department_code_availability(code)
+        if not availability["available"] and DEPT_CODE_RE.fullmatch(code):
+            _field_error(errors, "code", availability["reason"])
 
     corpora = payload.get("corpora") if isinstance(payload.get("corpora"), dict) else {}
     staff_corpus = str(corpora.get("staff") or "").strip()
@@ -422,6 +462,62 @@ def list_department_records() -> list[dict[str, Any]]:
             }
         )
     return records
+
+
+def department_mcp_servers(code: str) -> dict[str, Any]:
+    """학과별 교직원·학생 MCP Cloud Run 서비스의 실제 URL을 조회한다."""
+    normalised = str(code or "").strip().lower()
+    if not DEPT_CODE_RE.fullmatch(normalised) or not (DEPT_DIR / f"{normalised}.yaml").exists():
+        raise FileNotFoundError(normalised)
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    ok, rows = _gcloud_json(
+        [
+            "run",
+            "services",
+            "list",
+            "--platform=managed",
+            f"--region={region}",
+            f"--project={project}",
+        ],
+        timeout=20,
+    )
+    if not ok or not isinstance(rows, list):
+        raise RuntimeError(str(rows)[:300] or "Cloud Run 서비스 목록을 조회하지 못했습니다.")
+
+    inventory: dict[str, dict[str, Any]] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        service_name = str((item.get("metadata") or {}).get("name") or item.get("name") or "")
+        if service_name:
+            inventory[service_name] = item
+
+    servers: list[dict[str, Any]] = []
+    for audience, label in (("staff", "교직원"), ("student", "학생")):
+        service_name = f"rag-mcp-{normalised}-{audience}"
+        item = inventory.get(service_name) or {}
+        status_data = item.get("status") or {}
+        conditions = status_data.get("conditions") or item.get("conditions") or []
+        ready_condition = next(
+            (condition for condition in conditions if condition.get("type") == "Ready"), {}
+        )
+        ready = str(ready_condition.get("status") or "").lower() == "true"
+        url = str(status_data.get("url") or item.get("url") or "")
+        if url and not url.startswith("https://"):
+            url = ""
+        servers.append(
+            {
+                "audience": audience,
+                "label": label,
+                "serviceName": service_name,
+                "url": url,
+                "healthUrl": url.rstrip("/") + "/health" if url else "",
+                "status": "READY" if ready and url else ("NOT_READY" if item else "NOT_DEPLOYED"),
+            }
+        )
+    return {"code": normalised, "projectId": project, "region": region, "servers": servers}
 
 
 def _check(layer: str, name: str, status: str, detail: str, **extra: Any) -> dict[str, Any]:
@@ -716,7 +812,12 @@ def _http_json(url: str, token: str = "", timeout: int = 10) -> tuple[int, Any, 
             except json.JSONDecodeError:
                 return response.status, {}, elapsed
     except urllib.error.HTTPError as exc:
-        return exc.code, {}, round((time.perf_counter() - started) * 1000)
+        raw = exc.read(1024 * 1024).decode("utf-8", errors="replace")
+        try:
+            body = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            body = {}
+        return exc.code, body, round((time.perf_counter() - started) * 1000)
     except (OSError, TimeoutError):
         return 0, {}, round((time.perf_counter() - started) * 1000)
 
@@ -743,7 +844,12 @@ def _http_post_json(
             except json.JSONDecodeError:
                 return response.status, {}, elapsed
     except urllib.error.HTTPError as exc:
-        return exc.code, {}, round((time.perf_counter() - started) * 1000)
+        raw = exc.read(1024 * 1024).decode("utf-8", errors="replace")
+        try:
+            body = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            body = {}
+        return exc.code, body, round((time.perf_counter() - started) * 1000)
     except (OSError, TimeoutError):
         return 0, {}, round((time.perf_counter() - started) * 1000)
 
@@ -814,6 +920,428 @@ def _department_bucket_usage() -> dict[str, list[str]]:
             if name:
                 usage.setdefault(name, set()).add(path.stem)
     return {name: sorted(codes) for name, codes in usage.items()}
+
+
+def _cleanup_provision_state() -> None:
+    cutoff = time.time() - _PROVISION_TTL_SECONDS
+    for plan_id in [
+        key for key, item in _RESOURCE_PLANS.items() if item.get("createdEpoch", 0) < cutoff
+    ]:
+        _RESOURCE_PLANS.pop(plan_id, None)
+    for run_id in [
+        key
+        for key, item in _PROVISION_RUNS.items()
+        if item.get("finishedEpoch", item.get("createdEpoch", time.time())) < cutoff
+    ]:
+        _PROVISION_RUNS.pop(run_id, None)
+
+
+def _provision_editing_code(payload: dict[str, Any], code: str) -> str:
+    editing_code = str(payload.get("editingCode") or "").strip().lower()
+    if not editing_code:
+        return ""
+    if editing_code != code or not (DEPT_DIR / f"{editing_code}.yaml").exists():
+        raise ValueError("수정 중인 학과 설정을 다시 열어 주세요.")
+    return editing_code
+
+
+def create_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    """외부 리소스를 변경하지 않고 정확한 생성 이름과 옵션을 만든다."""
+    code = str(payload.get("code") or "").strip().lower()
+    name = str(payload.get("name") or "").strip()
+    editing_code = _provision_editing_code(payload, code)
+    availability = department_code_availability(code, current_code=editing_code)
+    if not availability["available"]:
+        raise FileExistsError(availability["reason"])
+    if not name:
+        raise ValueError("학과명을 먼저 입력해 주세요.")
+
+    requested = payload.get("resources")
+    if not isinstance(requested, list):
+        requested = list(PROVISION_RESOURCE_DEFINITIONS)
+    resource_keys = list(dict.fromkeys(str(item) for item in requested))
+    if not resource_keys or any(item not in PROVISION_RESOURCE_DEFINITIONS for item in resource_keys):
+        raise ValueError("생성할 리소스를 올바르게 선택해 주세요.")
+
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "").strip()
+    region = str(common.get("GCP_REGION") or "asia-northeast3").strip()
+    if not PROJECT_RE.fullmatch(project) or not REGION_RE.fullmatch(region):
+        raise ValueError("공통 프로젝트·리전 설정을 먼저 확인해 주세요.")
+
+    suffix = secrets.token_hex(4)
+    bucket_names = {
+        "bucketHwp": f"rag-{code}-hwp-{suffix}",
+        "bucketSource": f"rag-{code}-source-{suffix}",
+    }
+    corpus_display_names = {
+        "corpusStaff": f"{code}-rag-corpus-staff",
+        "corpusStudent": f"{code}-rag-corpus-student",
+    }
+    resources: list[dict[str, Any]] = []
+    for key in resource_keys:
+        definition = PROVISION_RESOURCE_DEFINITIONS[key]
+        resources.append(
+            {
+                "key": key,
+                "kind": definition["kind"],
+                "label": definition["label"],
+                "displayName": bucket_names.get(key) or corpus_display_names.get(key) or "",
+                "value": bucket_names.get(key, ""),
+            }
+        )
+
+    plan_id = uuid.uuid4().hex
+    plan = {
+        "planId": plan_id,
+        "code": code,
+        "name": name,
+        "editingCode": editing_code,
+        "projectId": project,
+        "region": region,
+        "resources": resources,
+        "bucketProtection": {
+            "uniformBucketLevelAccess": True,
+            "publicAccessPrevention": "enforced",
+            "softDeleteDays": 7,
+        },
+        "corpusConfig": {
+            "embeddingModel": RAG_EMBEDDING_MODEL,
+            "vectorDatabase": "RAG Managed DB",
+        },
+        "createdEpoch": time.time(),
+        "started": False,
+    }
+    with _PROVISION_LOCK:
+        _cleanup_provision_state()
+        _RESOURCE_PLANS[plan_id] = plan
+    return copy.deepcopy(plan)
+
+
+def _apply_resource_plan_overrides(
+    plan: dict[str, Any], overrides: dict[str, Any] | None
+) -> dict[str, Any]:
+    """사용자가 계획 화면에서 수정한 이름을 생성 직전에 다시 검증한다."""
+    if overrides is None:
+        return plan
+    if not isinstance(overrides, dict):
+        raise TypeError("수정한 리소스 이름이 올바르지 않습니다.")
+    resources = {item["key"]: item for item in plan["resources"]}
+    unknown = sorted(set(overrides) - set(resources))
+    if unknown:
+        raise ValueError("생성 계획에 없는 리소스는 수정할 수 없습니다.")
+    for key, raw_value in overrides.items():
+        value = str(raw_value or "").strip()
+        resource = resources[key]
+        if resource["kind"] == "bucket":
+            value = value.removeprefix("gs://").strip()
+            if not BUCKET_RE.fullmatch(value):
+                raise ValueError(f"{resource['label']} 이름이 GCS 버킷 규칙에 맞지 않습니다.")
+            resource["value"] = value
+            resource["displayName"] = value
+        else:
+            if not value or len(value) > 128:
+                raise ValueError(f"{resource['label']} 이름은 1~128자여야 합니다.")
+            resource["displayName"] = value
+
+    bucket_values = [item["value"] for item in resources.values() if item["kind"] == "bucket"]
+    if len(bucket_values) != len(set(bucket_values)):
+        raise ValueError("HWP 원본 버킷과 Source 버킷 이름은 서로 달라야 합니다.")
+    corpus_values = [
+        item["displayName"] for item in resources.values() if item["kind"] == "corpus"
+    ]
+    if len(corpus_values) != len(set(corpus_values)):
+        raise ValueError("교직원 코퍼스와 학생 코퍼스 이름은 서로 달라야 합니다.")
+    return plan
+
+
+def _provision_access_token() -> str:
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        raise RuntimeError("gcloud를 찾을 수 없습니다.")
+    ok, token = _run_command([gcloud, "auth", "print-access-token", "--quiet"], timeout=20)
+    if not ok or not token.strip():
+        raise RuntimeError("gcloud 로그인이 필요합니다.")
+    return token.strip()
+
+
+def _create_bucket_resource(name: str, project: str, region: str) -> str:
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        raise RuntimeError("gcloud를 찾을 수 없습니다.")
+    ok, output = _run_command(
+        [
+            gcloud,
+            "storage",
+            "buckets",
+            "create",
+            f"gs://{name}",
+            f"--project={project}",
+            f"--location={region}",
+            "--default-storage-class=STANDARD",
+            "--uniform-bucket-level-access",
+            "--public-access-prevention",
+            "--soft-delete-duration=7d",
+            "--quiet",
+        ],
+        timeout=120,
+    )
+    if not ok:
+        raise RuntimeError((output or "GCS 버킷 생성에 실패했습니다.")[-400:])
+    described, metadata = _gcloud_json(
+        ["storage", "buckets", "describe", f"gs://{name}"], timeout=30
+    )
+    if not described or not isinstance(metadata, dict):
+        raise RuntimeError("버킷은 생성됐지만 보호 설정을 다시 확인하지 못했습니다.")
+    location = str(metadata.get("location") or "").lower()
+    uniform = bool(metadata.get("uniform_bucket_level_access"))
+    pap = str(metadata.get("public_access_prevention") or "").lower()
+    if location != region.lower() or not uniform or pap != "enforced":
+        raise RuntimeError("버킷은 생성됐지만 필수 리전·접근 보호 설정이 일치하지 않습니다.")
+    return name
+
+
+def _create_corpus_resource(display_name: str, project: str, region: str, token: str) -> str:
+    url = (
+        f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/"
+        f"{region}/ragCorpora"
+    )
+    status, body, _ = _http_post_json(
+        url,
+        {
+            "displayName": display_name,
+            "description": "학과 관리 콘솔에서 생성한 RAG 코퍼스",
+            "vectorDbConfig": {
+                "ragEmbeddingModelConfig": {
+                    "vertexPredictionEndpoint": {
+                        "endpoint": (
+                            f"projects/{project}/locations/{region}/publishers/google/models/"
+                            f"{RAG_EMBEDDING_MODEL}"
+                        )
+                    }
+                },
+                "ragManagedDb": {},
+            },
+        },
+        token,
+        timeout=30,
+    )
+    if status not in {200, 201, 202} or not isinstance(body, dict):
+        message = str((body.get("error") or {}).get("message") or "") if isinstance(body, dict) else ""
+        detail = f": {message[:300]}" if message else ""
+        raise RuntimeError(f"RAG 코퍼스 생성 요청 실패 (HTTP {status or 'timeout'}){detail}")
+
+    if body.get("done"):
+        response_name = str((body.get("response") or {}).get("name") or "")
+        if response_name:
+            return response_name
+    operation_name = str(body.get("name") or "")
+    if operation_name.startswith("projects/") and "/ragCorpora/" in operation_name:
+        return operation_name
+    if not operation_name:
+        raise RuntimeError("RAG 코퍼스 생성 작업 ID를 받지 못했습니다.")
+
+    operation_url = f"https://{region}-aiplatform.googleapis.com/v1/{operation_name}"
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        poll_status, operation, _ = _http_json(operation_url, token, timeout=20)
+        if poll_status == 200 and isinstance(operation, dict):
+            if operation.get("done"):
+                if operation.get("error"):
+                    message = str((operation.get("error") or {}).get("message") or "")
+                    raise RuntimeError(message[:400] or "RAG 코퍼스 생성 작업이 실패했습니다.")
+                response_name = str((operation.get("response") or {}).get("name") or "")
+                if response_name:
+                    return response_name
+                break
+        elif poll_status not in {0, 429, 500, 502, 503, 504}:
+            raise RuntimeError(f"RAG 코퍼스 생성 상태 조회 실패 (HTTP {poll_status})")
+        time.sleep(2)
+
+    options = _department_resource_options({"GCP_PROJECT_ID": project, "GCP_REGION": region})
+    matches = [
+        item for item in options.get("corpora", []) if item.get("displayName") == display_name
+    ]
+    if len(matches) == 1:
+        return str(matches[0]["name"])
+    raise RuntimeError("코퍼스 생성 작업이 오래 걸리고 있습니다. 리소스를 새로 만들기 전에 목록을 확인해 주세요.")
+
+
+def retrieve_department_corpus(
+    code: str, audience: str, query: str, top_k: int = 5
+) -> dict[str, Any]:
+    """로컬 콘솔에서 선택한 학과 코퍼스의 원문 컨텍스트를 조회한다."""
+    normalised = str(code or "").strip().lower()
+    if not DEPT_CODE_RE.fullmatch(normalised):
+        raise FileNotFoundError(normalised)
+    if audience not in dept_config.AUDIENCES:
+        raise ValueError("교직원 또는 학생 코퍼스를 선택해 주세요.")
+    text = str(query or "").strip()
+    if not text or len(text) > 1000:
+        raise ValueError("질문은 1~1000자로 입력해 주세요.")
+    limit = max(1, min(int(top_k), 10))
+
+    config = department_public_config(normalised)
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    corpus = str((config.get("corpora") or {}).get(audience) or "")
+    match = CORPUS_RE.fullmatch(corpus)
+    if not match or match.group(1) != project or match.group(2) != region:
+        raise ValueError("학과 코퍼스가 현재 프로젝트·리전과 일치하지 않습니다.")
+
+    token = _provision_access_token()
+    url = (
+        f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/"
+        f"{region}:retrieveContexts"
+    )
+    started = time.perf_counter()
+    status, body, _ = _http_post_json(
+        url,
+        {
+            "vertexRagStore": {"ragResources": [{"ragCorpus": corpus}]},
+            "query": {"text": text, "ragRetrievalConfig": {"topK": limit}},
+        },
+        token,
+        timeout=45,
+    )
+    if status != 200 or not isinstance(body, dict):
+        message = str((body.get("error") or {}).get("message") or "") if isinstance(body, dict) else ""
+        detail = f": {message[:300]}" if message else ""
+        raise RuntimeError(f"코퍼스 조회 실패 (HTTP {status or 'timeout'}){detail}")
+
+    raw_contexts = (body.get("contexts") or {}).get("contexts") or []
+    contexts: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_contexts[:limit], start=1):
+        if not isinstance(item, dict):
+            continue
+        chunk = item.get("chunk") if isinstance(item.get("chunk"), dict) else {}
+        context_text = str(item.get("text") or chunk.get("text") or "")[:12000]
+        contexts.append(
+            {
+                "rank": index,
+                "text": context_text,
+                "sourceDisplayName": str(item.get("sourceDisplayName") or ""),
+                "sourceUri": str(item.get("sourceUri") or ""),
+                "score": item.get("score"),
+            }
+        )
+    return {
+        "code": normalised,
+        "departmentName": config["name"],
+        "audience": audience,
+        "corpus": corpus,
+        "query": text,
+        "contexts": contexts,
+        "latencyMs": round((time.perf_counter() - started) * 1000),
+    }
+
+
+def _set_provision_step(run_id: str, key: str, **changes: Any) -> None:
+    with _PROVISION_LOCK:
+        run = _PROVISION_RUNS.get(run_id)
+        if not run:
+            return
+        for item in run["resources"]:
+            if item["key"] == key:
+                item.update(changes)
+                return
+
+
+def _execute_provision_run(run_id: str) -> None:
+    with _PROVISION_LOCK:
+        run = copy.deepcopy(_PROVISION_RUNS[run_id])
+    token = ""
+    try:
+        token = _provision_access_token()
+    except RuntimeError as exc:
+        with _PROVISION_LOCK:
+            current = _PROVISION_RUNS[run_id]
+            for item in current["resources"]:
+                item.update(status="FAILED", detail=str(exc))
+            current.update(status="FAILED", finishedEpoch=time.time())
+        return
+
+    for resource in run["resources"]:
+        key = resource["key"]
+        _set_provision_step(run_id, key, status="RUNNING", detail="생성 요청 중")
+        try:
+            if resource["kind"] == "bucket":
+                value = _create_bucket_resource(
+                    resource["value"], run["projectId"], run["region"]
+                )
+            else:
+                value = _create_corpus_resource(
+                    resource["displayName"], run["projectId"], run["region"], token
+                )
+            _set_provision_step(
+                run_id,
+                key,
+                status="COMPLETE",
+                value=value,
+                detail="생성 및 연결 확인 완료",
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            _set_provision_step(run_id, key, status="FAILED", detail=str(exc)[:400])
+
+    with _PROVISION_LOCK:
+        current = _PROVISION_RUNS[run_id]
+        statuses = [item["status"] for item in current["resources"]]
+        if all(status == "COMPLETE" for status in statuses):
+            current["status"] = "COMPLETED"
+        elif any(status == "COMPLETE" for status in statuses):
+            current["status"] = "PARTIAL"
+        else:
+            current["status"] = "FAILED"
+        current["finishedEpoch"] = time.time()
+
+
+def start_provision_run(
+    plan_id: str, overrides: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    with _PROVISION_LOCK:
+        _cleanup_provision_state()
+        plan = _RESOURCE_PLANS.get(plan_id)
+        if not plan:
+            raise FileNotFoundError(plan_id)
+        if plan["started"]:
+            raise FileExistsError("이미 실행한 생성 계획입니다.")
+        plan_for_run = _apply_resource_plan_overrides(copy.deepcopy(plan), overrides)
+        availability = department_code_availability(
+            plan["code"], current_code=plan.get("editingCode", "")
+        )
+        if not availability["available"]:
+            raise FileExistsError(availability["reason"])
+        for active in _PROVISION_RUNS.values():
+            if active["code"] == plan["code"] and active["status"] == "RUNNING":
+                raise FileExistsError("이 학과의 리소스 생성이 이미 진행 중입니다.")
+
+        run_id = uuid.uuid4().hex
+        resources = copy.deepcopy(plan_for_run["resources"])
+        for item in resources:
+            item.update(status="PENDING", detail="대기 중")
+        run = {
+            "runId": run_id,
+            "planId": plan_id,
+            "code": plan_for_run["code"],
+            "projectId": plan_for_run["projectId"],
+            "region": plan_for_run["region"],
+            "bucketProtection": copy.deepcopy(plan_for_run["bucketProtection"]),
+            "corpusConfig": copy.deepcopy(plan_for_run["corpusConfig"]),
+            "status": "RUNNING",
+            "resources": resources,
+            "createdEpoch": time.time(),
+        }
+        plan["started"] = True
+        _PROVISION_RUNS[run_id] = run
+
+    threading.Thread(
+        target=_execute_provision_run,
+        args=(run_id,),
+        name=f"resource-provision-{run_id[:8]}",
+        daemon=True,
+    ).start()
+    return copy.deepcopy(run)
 
 
 def _merge_live_resource_validation(candidate: dict[str, Any], result: dict[str, Any]) -> None:
@@ -1087,8 +1615,17 @@ def _deploy_and_runtime_status(
         revision_ok = bool(latest_ready and latest_ready == latest_created)
         status = "OK" if ready and revision_ok else "FAIL"
         detail = latest_ready or str(ready_condition.get("message") or "Ready 아님")
-        checks.append(_check("DEPLOY", label, status, detail))
         url = str(status_data.get("url") or "")
+        checks.append(
+            _check(
+                "DEPLOY",
+                label,
+                status,
+                detail,
+                serviceName=service,
+                url=url,
+            )
+        )
         if ready and url:
             discovered[service] = url
 
@@ -1343,6 +1880,90 @@ def departments() -> dict[str, Any]:
     return {"departments": list_department_records()}
 
 
+@app.get("/api/v1/departments/code-availability")
+def code_availability(code: str, current: str = "") -> JSONResponse:
+    return JSONResponse(department_code_availability(code, current_code=current))
+
+
+@app.post("/api/v1/departments/resource-plans")
+async def resource_plan(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    if not isinstance(payload, dict) or _has_secret_input(payload):
+        return JSONResponse(
+            {"error": {"code": "INVALID_RESOURCE_PLAN", "message": "생성 계획 요청이 올바르지 않습니다."}},
+            status_code=400,
+        )
+    try:
+        plan = create_resource_plan(payload)
+    except FileExistsError as exc:
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "DEPARTMENT_CODE_EXISTS",
+                    "message": str(exc),
+                    "fieldErrors": {"code": [str(exc)]},
+                }
+            },
+            status_code=409,
+        )
+    except (ValueError, TypeError) as exc:
+        return JSONResponse(
+            {"error": {"code": "INVALID_RESOURCE_PLAN", "message": str(exc)}},
+            status_code=422,
+        )
+    except (FileNotFoundError, OSError, UnicodeError, yaml.YAMLError):
+        return JSONResponse(
+            {"error": {"code": "COMMON_REQUIRED", "message": "공통 설정이 먼저 필요합니다."}},
+            status_code=428,
+        )
+    return JSONResponse(plan, status_code=201)
+
+
+@app.post("/api/v1/departments/resource-provisioning")
+async def provision_resources(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    plan_id = str(payload.get("planId") or "") if isinstance(payload, dict) else ""
+    overrides = payload.get("overrides") if isinstance(payload, dict) else None
+    if not re.fullmatch(r"[0-9a-f]{32}", plan_id):
+        return JSONResponse(
+            {"error": {"code": "INVALID_RESOURCE_PLAN", "message": "생성 계획을 다시 열어 주세요."}},
+            status_code=422,
+        )
+    try:
+        run = start_provision_run(plan_id, overrides)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse(
+            {"error": {"code": "INVALID_RESOURCE_NAME", "message": str(exc)}},
+            status_code=422,
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": {"code": "RESOURCE_PLAN_EXPIRED", "message": "생성 계획이 만료되었습니다. 다시 확인해 주세요."}},
+            status_code=404,
+        )
+    except FileExistsError as exc:
+        return JSONResponse(
+            {"error": {"code": "RESOURCE_PROVISION_CONFLICT", "message": str(exc)}},
+            status_code=409,
+        )
+    return JSONResponse(run, status_code=202)
+
+
+@app.get("/api/v1/departments/resource-provisioning/{run_id}")
+def provision_run(run_id: str) -> JSONResponse:
+    with _PROVISION_LOCK:
+        _cleanup_provision_state()
+        run = _PROVISION_RUNS.get(run_id)
+        if not run:
+            return JSONResponse(
+                {"error": {"code": "PROVISION_RUN_NOT_FOUND", "message": "리소스 생성 실행을 찾을 수 없습니다."}},
+                status_code=404,
+            )
+        return JSONResponse(copy.deepcopy(run))
+
+
 @app.get("/api/v1/environment")
 def environment() -> dict[str, Any]:
     common_path = CONFIG_DIR / "common.yaml"
@@ -1531,6 +2152,53 @@ def department_resource_options() -> JSONResponse:
             status_code=503,
         )
     return JSONResponse(options)
+
+
+@app.get("/api/v1/departments/{code}/mcp-servers")
+def get_department_mcp_servers(code: str) -> JSONResponse:
+    try:
+        return JSONResponse(department_mcp_servers(code))
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": {"code": "NOT_FOUND", "message": "학과 설정을 찾을 수 없습니다."}},
+            status_code=404,
+        )
+    except (OSError, RuntimeError, TypeError, UnicodeError, yaml.YAMLError) as exc:
+        return JSONResponse(
+            {"error": {"code": "MCP_LOOKUP_FAILED", "message": str(exc)[:300]}},
+            status_code=503,
+        )
+
+
+@app.post("/api/v1/corpus-query")
+async def corpus_query(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        payload = {}
+    try:
+        result = retrieve_department_corpus(
+            str(payload.get("code") or ""),
+            str(payload.get("audience") or ""),
+            str(payload.get("query") or ""),
+            int(payload.get("topK") or 5),
+        )
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": {"code": "NOT_FOUND", "message": "학과 설정을 찾을 수 없습니다."}},
+            status_code=404,
+        )
+    except (TypeError, ValueError) as exc:
+        return JSONResponse(
+            {"error": {"code": "INVALID_CORPUS_QUERY", "message": str(exc)}},
+            status_code=422,
+        )
+    except (OSError, RuntimeError, UnicodeError, yaml.YAMLError) as exc:
+        return JSONResponse(
+            {"error": {"code": "CORPUS_QUERY_FAILED", "message": str(exc)[:400]}},
+            status_code=503,
+        )
+    return JSONResponse(result)
 
 
 @app.post("/api/v1/departments/drive-preflight")

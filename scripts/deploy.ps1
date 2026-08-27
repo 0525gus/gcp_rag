@@ -141,7 +141,7 @@ Write-Host "== Deploy Cloud Run =="
 # parser timeout 540 < sync httpx 600. 서버가 먼저 포기해야 sync 가 오류를 받는다.
 # concurrency 4: 요청당 메모리 한계. 넘치는 요청은 새 인스턴스로.
 # min-instances=0 은 기본값과 같지만 명시한다 — 콜드스타트를 감수하겠다는 의도
-# 표시(docs/OPS_DEFERRED.md #7). MCP 응답 지연이 문제되면 학과 yaml 의
+# 표시(docs/DEV_SPEC.md 운영 체크리스트). MCP 응답 지연이 문제되면 학과 yaml 의
 # minInstances 를 1로, sync/parser 는 배치라 0 유지.
 $parserEnv = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|RAG_CORPUS_NAME=$CORPUS|DOCAI_PROCESSOR_ID=$DOCAI|QG_MODE=$QG_MODE|FIRESTORE_DATABASE=$FS_DB|DOC_STATE_COLLECTION=$FS_COL"
 gcloud run deploy rag-parser `
@@ -322,12 +322,23 @@ if ($corpusToken) {
     }
   }
   if ($emptyDepts.Count -gt 0) {
+    # **빈 학과의 드라이브만** 넘긴다. 인자 없이 부르면 backfill.ps1 이 전 학과
+    # union 을 대상으로 잡아 **이미 찬 학과까지 전량 재적재**한다 — 학과를 하나
+    # 붙일 때마다 기존 학과 전체를 다시 넣는 비용이 붙는다.
+    $emptyDrives = @()
+    foreach ($code in $emptyDepts) {
+      foreach ($d in $DEPT_MAP.$code.driveIds) {
+        if ($emptyDrives -notcontains $d) { $emptyDrives += $d }
+      }
+    }
+    $driveArg = $emptyDrives -join ","
     Write-Host ""
     Write-Host "비어 있다: $($emptyDepts -join ', ') — 첫 적재가 필요하다."
-    if (Confirm-PreflightAction "지금 전체 백필을 실행하시겠습니까? (수 분~수십 분 소요)") {
-      & (Join-Path $PSScriptRoot "backfill.ps1")
+    Write-Host "   대상 드라이브: $driveArg"
+    if (Confirm-PreflightAction "이 학과만 백필을 실행하시겠습니까? (수 분~수십 분 소요)") {
+      & (Join-Path $PSScriptRoot "backfill.ps1") -DriveIds $driveArg
     } else {
-      Write-Host "건너뜀. 나중에: scripts\backfill.ps1"
+      Write-Host "건너뜀. 나중에: scripts\backfill.ps1 -DriveIds $driveArg"
     }
   }
 }
