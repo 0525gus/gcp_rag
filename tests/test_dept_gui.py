@@ -64,6 +64,8 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dept_gui._PROVISION_RUNS.clear()
     dept_gui._COMMON_RESOURCE_PLANS.clear()
     dept_gui._COMMON_PROVISION_RUNS.clear()
+    dept_gui._SA_REPAIR_PLANS.clear()
+    dept_gui._SA_REPAIR_RUNS.clear()
     dept_gui._MCP_DEPLOY_RUNS.clear()
     dept_gui._SYNC_AUTH_TOKEN = ""
     dept_gui._SYNC_AUTH_TOKEN_EXPIRES = 0.0
@@ -1725,4 +1727,210 @@ def test_common_resource_plan_requires_local_session(isolated_config: Path) -> N
         "/api/v1/common-config/resource-plans",
         json={"projectId": "project-test", "region": "asia-northeast3"},
     )
+    assert response.status_code in {401, 403}
+
+
+def _sa_common(monkeypatch: pytest.MonkeyPatch, project: str = "project-test") -> None:
+    _bootstrap(monkeypatch, project)
+    monkeypatch.setattr(
+        dept_gui, "_default_compute_service_account", lambda p: "42-compute@developer.gserviceaccount.com"
+    )
+    monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "caller-token")
+
+
+def test_drive_sa_status_reports_ok_when_impersonation_succeeds(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _ = _client()
+    _sa_common(monkeypatch)
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_enabled_services",
+        lambda p: (True, {"compute.googleapis.com", "iamcredentials.googleapis.com"}),
+    )
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda args, timeout=12: (True, {}))
+    monkeypatch.setattr(
+        dept_gui,
+        "_service_account_access_token",
+        lambda project, token, scopes, **kw: ("sa-token", "42-compute@x", 12, ""),
+    )
+
+    body = client.get("/api/v1/drive-service-account/status").json()
+
+    assert body["status"] == "OK"
+    assert body["issues"] == []
+    assert body["serviceAccount"] == "42-compute@developer.gserviceaccount.com"
+
+
+def test_drive_sa_status_flags_token_creator_when_impersonation_404(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """새 프로젝트에서 실제로 나온 증상 — SA 는 있는데 가장이 404 로 막힌다."""
+    client, _ = _client()
+    _sa_common(monkeypatch)
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_enabled_services",
+        lambda p: (True, {"compute.googleapis.com", "iamcredentials.googleapis.com"}),
+    )
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda args, timeout=12: (True, {}))
+    monkeypatch.setattr(
+        dept_gui,
+        "_service_account_access_token",
+        lambda project, token, scopes, **kw: ("", "42-compute@x", 30, "서비스 계정 가장 토큰 HTTP 404"),
+    )
+
+    body = client.get("/api/v1/drive-service-account/status").json()
+
+    assert body["status"] == "FAIL"
+    assert "tokenCreator" in body["issues"]
+    assert "404" in body["detail"]
+
+
+def test_drive_sa_status_flags_compute_api_on_fresh_project(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compute API 가 꺼져 있으면 기본 SA 자체가 없다 — 권한 문제와 구분해야 한다."""
+    client, _ = _client()
+    _sa_common(monkeypatch)
+    monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda p: (True, set()))
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda args, timeout=12: (False, "NOT_FOUND"))
+
+    body = client.get("/api/v1/drive-service-account/status").json()
+
+    assert body["status"] == "FAIL"
+    assert "computeApi" in body["issues"]
+    # SA 가 없는 원인이 Compute API 이면 'SA 없음' 을 따로 또 세지 않는다.
+    assert "serviceAccountMissing" not in body["issues"]
+
+
+def test_drive_sa_repair_plan_lists_actions_without_applying(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    _sa_common(monkeypatch)
+    monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda p: (True, set()))
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda args, timeout=12: (False, "NOT_FOUND"))
+    monkeypatch.setattr(
+        dept_gui,
+        "_run_command",
+        lambda *a, **k: pytest.fail("계획 단계는 아무것도 바꾸면 안 된다"),
+    )
+
+    plan = client.post("/api/v1/drive-service-account/repair-plans", headers=headers)
+
+    assert plan.status_code == 200
+    body = plan.json()
+    keys = [item["key"] for item in body["steps"]]
+    assert "enableCompute" in keys
+    assert "grantTokenCreator" in keys
+    grant = next(item for item in body["steps"] if item["key"] == "grantTokenCreator")
+    assert grant["role"] == "roles/iam.serviceAccountTokenCreator"
+    assert grant["member"] == "user:tester@example.com"
+
+
+def test_drive_sa_repair_plan_refuses_when_already_ok(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    _sa_common(monkeypatch)
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_enabled_services",
+        lambda p: (True, {"compute.googleapis.com", "iamcredentials.googleapis.com"}),
+    )
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda args, timeout=12: (True, {}))
+    monkeypatch.setattr(
+        dept_gui,
+        "_service_account_access_token",
+        lambda project, token, scopes, **kw: ("sa-token", "42-compute@x", 10, ""),
+    )
+
+    response = client.post("/api/v1/drive-service-account/repair-plans", headers=headers)
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "SA_ALREADY_OK"
+
+
+def test_drive_sa_repair_applies_then_reverifies(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """조치 후 같은 방법으로 되읽어야 한다 — 명령 성공만 믿으면 안 된다."""
+    client, headers = _client()
+    _sa_common(monkeypatch)
+    enabled: set[str] = set()
+    granted: list[str] = []
+    monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda p: (True, set(enabled)))
+    monkeypatch.setattr(
+        dept_gui, "_gcloud_json", lambda args, timeout=12: (bool(enabled), {} if enabled else "NOT_FOUND")
+    )
+    monkeypatch.setattr(
+        dept_gui, "_enable_gcloud_service", lambda service, project: enabled.add(service)
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_grant_service_account_role",
+        lambda sa, member, role, project: granted.append(role),
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_service_account_access_token",
+        lambda project, token, scopes, **kw: (
+            ("sa-token", "42-compute@x", 10, "") if granted else ("", "42-compute@x", 10, "HTTP 404")
+        ),
+    )
+
+    plan = client.post("/api/v1/drive-service-account/repair-plans", headers=headers).json()
+    started = client.post(
+        "/api/v1/drive-service-account/repairs", headers=headers, json={"planId": plan["planId"]}
+    )
+    assert started.status_code == 202
+
+    run = started.json()
+    deadline = time.time() + 10
+    while time.time() < deadline and run["status"] == "RUNNING":
+        time.sleep(0.05)
+        run = client.get(f"/api/v1/drive-service-account/repairs/{run['runId']}").json()
+
+    assert run["status"] == "COMPLETED"
+    assert "roles/iam.serviceAccountTokenCreator" in granted
+    assert "compute.googleapis.com" in enabled
+    assert run["verification"]["status"] == "OK"
+
+
+def test_drive_sa_repair_plan_is_single_use(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    _sa_common(monkeypatch)
+    monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda p: (True, set()))
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda args, timeout=12: (False, "NOT_FOUND"))
+    monkeypatch.setattr(dept_gui, "_enable_gcloud_service", lambda service, project: None)
+    monkeypatch.setattr(
+        dept_gui, "_grant_service_account_role", lambda sa, member, role, project: None
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_service_account_access_token",
+        lambda project, token, scopes, **kw: ("", "42-compute@x", 10, "HTTP 404"),
+    )
+
+    plan = client.post("/api/v1/drive-service-account/repair-plans", headers=headers).json()
+    run = client.post(
+        "/api/v1/drive-service-account/repairs", headers=headers, json={"planId": plan["planId"]}
+    ).json()
+    deadline = time.time() + 10
+    while time.time() < deadline and run["status"] == "RUNNING":
+        time.sleep(0.05)
+        run = client.get(f"/api/v1/drive-service-account/repairs/{run['runId']}").json()
+
+    repeated = client.post(
+        "/api/v1/drive-service-account/repairs", headers=headers, json={"planId": plan["planId"]}
+    )
+    assert repeated.status_code == 409
+
+
+def test_drive_sa_repair_requires_local_session(isolated_config: Path) -> None:
+    client, _ = _client()
+    response = client.post("/api/v1/drive-service-account/repair-plans")
     assert response.status_code in {401, 403}

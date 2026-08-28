@@ -30,6 +30,9 @@
     provisionPollTimer: null,
     commonResourcePlan: null,
     commonProvisionPollTimer: null,
+    driveSaStatus: null,
+    driveSaPlan: null,
+    driveSaPollTimer: null,
     mcpDeployment: null,
     mcpDeploymentCode: "",
     mcpDeploymentPollTimer: null,
@@ -659,7 +662,7 @@
     const cards = [
       { icon: "⌂", label: "저장소", value: env.repository, detail: `${env.departmentCount}개 학과 설정` },
       { icon: "G", label: "GCP 프로젝트", value: env.configuredProject || "미설정", detail: env.region },
-      { icon: "SA", label: "Drive 확인 서비스 계정", value: env.serviceAccount || "확인 필요", detail: "공유 드라이브 연결에 사용", copy: env.serviceAccount },
+      { icon: "SA", label: "Drive 확인 서비스 계정", value: env.serviceAccount || "확인 필요", detail: "공유 드라이브 연결에 사용", copy: env.serviceAccount, check: true },
       { icon: "›_", label: "gcloud", value: env.gcloudInstalled ? (env.gcloudAuthenticated ? "로그인됨" : "로그인 필요") : "설치되지 않음", detail: env.gcloudAccount || "활성 계정 없음" },
       { icon: "Py", label: "Python", value: env.pythonVersion, detail: "로컬 API 런타임" },
       { icon: "↔", label: "프로젝트 일치", value: projectMatch ? "일치" : "확인 필요", detail: env.gcloudProject || "gcloud 프로젝트 없음" },
@@ -673,10 +676,189 @@
           <div class="environment-value-row">
             <b>${escapeHtml(card.value)}</b>
             ${card.copy ? `<button type="button" class="copy-value-button" data-copy-value="${escapeHtml(card.copy)}" aria-label="서비스 계정 복사">복사</button>` : ""}
+            ${card.check ? `<button type="button" class="copy-value-button" id="checkDriveSa">상태 확인</button>` : ""}
           </div>
           <small>${escapeHtml(card.detail)}</small>
         </div>
       </article>`).join("");
+  }
+
+  const DRIVE_SA_ISSUE_LABELS = {
+    gcloudAuth: "gcloud 로그인이 필요합니다",
+    projectNumber: "프로젝트 번호를 확인하지 못했습니다",
+    computeApi: "Compute Engine API 가 꺼져 있어 기본 서비스 계정이 없습니다",
+    iamCredentialsApi: "IAM Credentials API 가 꺼져 있습니다",
+    serviceAccountMissing: "기본 Compute 서비스 계정을 찾지 못했습니다",
+    tokenCreator: "현재 계정에 이 서비스 계정을 가장할 권한이 없습니다",
+  };
+
+  function openDriveSaModal() {
+    const modal = $("#driveSaModal");
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden", "false");
+  }
+
+  function closeDriveSaModal() {
+    window.clearTimeout(state.driveSaPollTimer);
+    const modal = $("#driveSaModal");
+    modal.classList.remove("open");
+    modal.setAttribute("aria-hidden", "true");
+    state.driveSaPlan = null;
+    $("#driveSaError").classList.add("hidden");
+    $("#confirmDriveSaRepair").classList.add("hidden");
+    $("#closeDriveSa").textContent = "취소";
+  }
+
+  function renderDriveSaStatus(status) {
+    $("#driveSaProject").textContent = status.projectId || "—";
+    $("#driveSaAccount").textContent = status.account || "—";
+    const ok = status.status === "OK";
+    $("#driveSaModalDescription").textContent = ok
+      ? "공유 드라이브 연결에 바로 쓸 수 있습니다."
+      : "아래 문제로 공유 드라이브 확인이 막혀 있습니다.";
+    const issues = (status.issues || [])
+      .map((key) => `<li data-tone="fail"><b>${escapeHtml(DRIVE_SA_ISSUE_LABELS[key] || key)}</b></li>`)
+      .join("");
+    $("#driveSaBody").innerHTML = `
+      <ul class="setup-provision-list">
+        <li data-tone="${ok ? "ok" : "fail"}">
+          <b>${escapeHtml(status.serviceAccount || "서비스 계정 미확인")}</b>
+          <span>${escapeHtml(ok ? "정상" : "확인 필요")}</span>
+          ${status.detail ? `<small>${escapeHtml(status.detail)}</small>` : ""}
+        </li>
+      </ul>
+      ${issues ? `<h5 class="drive-sa-heading">확인된 문제</h5><ul class="setup-provision-list">${issues}</ul>` : ""}`;
+  }
+
+  function renderDriveSaPlan(plan) {
+    const steps = (plan.steps || [])
+      .map((item) => {
+        const label = item.status
+          ? { PENDING: "대기 중", RUNNING: "진행 중", COMPLETE: "완료", FAILED: "실패" }[item.status] || item.status
+          : "실행 예정";
+        const tone = item.status === "FAILED" ? "fail" : (item.status === "COMPLETE" ? "ok" : "warn");
+        return `<li data-tone="${tone}">
+          <b>${escapeHtml(item.label)}</b><span>${escapeHtml(label)}</span>
+          <small>${escapeHtml(item.target || "")}${item.role ? ` · ${escapeHtml(item.role)}` : ""}</small>
+          ${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}
+        </li>`;
+      })
+      .join("");
+    const verified = plan.verification && plan.verification.status;
+    $("#driveSaBody").innerHTML = `
+      <h5 class="drive-sa-heading">다음 조치를 진행합니다</h5>
+      <ul class="setup-provision-list">${steps}</ul>
+      ${verified ? `<h5 class="drive-sa-heading">조치 후 재확인</h5>
+        <ul class="setup-provision-list">
+          <li data-tone="${verified === "OK" ? "ok" : "fail"}">
+            <b>${escapeHtml(verified === "OK" ? "가장 토큰 발급 확인됨" : "여전히 확인 필요")}</b>
+            <small>${escapeHtml(plan.verification.detail || "")}</small>
+          </li>
+        </ul>` : ""}`;
+  }
+
+  async function checkDriveServiceAccount() {
+    const button = $("#checkDriveSa");
+    if (button) { button.disabled = true; button.textContent = "확인 중…"; }
+    openDriveSaModal();
+    $("#driveSaBody").innerHTML = '<p class="drive-sa-loading">서비스 계정 가장 토큰을 발급해 보는 중입니다…</p>';
+    $("#driveSaError").classList.add("hidden");
+    $("#confirmDriveSaRepair").classList.add("hidden");
+    try {
+      const status = await api("/api/v1/drive-service-account/status");
+      state.driveSaStatus = status;
+      renderDriveSaStatus(status);
+      if (status.status !== "OK") {
+        // 자동 조치가 가능한 문제일 때만 확인 버튼을 연다.
+        const fixable = (status.issues || []).some((key) =>
+          ["computeApi", "iamCredentialsApi", "serviceAccountMissing", "tokenCreator"].includes(key));
+        if (fixable) {
+          $("#confirmDriveSaRepair").classList.remove("hidden");
+          $("#confirmDriveSaRepair").disabled = false;
+          $("#confirmDriveSaRepair").textContent = "조치 내용 확인";
+        }
+      }
+    } catch (error) {
+      const banner = $("#driveSaError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+    } finally {
+      if (button) { button.disabled = false; button.textContent = "상태 확인"; }
+    }
+  }
+
+  async function planDriveSaRepair() {
+    const button = $("#confirmDriveSaRepair");
+    button.disabled = true;
+    button.textContent = "확인 중…";
+    try {
+      const plan = await api("/api/v1/drive-service-account/repair-plans", { method: "POST" });
+      state.driveSaPlan = plan;
+      renderDriveSaPlan(plan);
+      $("#driveSaModalDescription").textContent = "아래 조치를 진행할까요? 확인을 누르면 실제로 적용됩니다.";
+      button.disabled = false;
+      button.textContent = "확인";
+    } catch (error) {
+      const banner = $("#driveSaError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+      button.classList.add("hidden");
+    }
+  }
+
+  async function pollDriveSaRepair(runId) {
+    window.clearTimeout(state.driveSaPollTimer);
+    try {
+      const run = await api(`/api/v1/drive-service-account/repairs/${runId}`);
+      renderDriveSaPlan(run);
+      if (run.status === "RUNNING") {
+        state.driveSaPollTimer = window.setTimeout(() => pollDriveSaRepair(runId), 1500);
+        return;
+      }
+      const ok = run.status === "COMPLETED";
+      $("#driveSaModalDescription").textContent = ok
+        ? "조치가 끝났고 서비스 계정이 정상입니다."
+        : "일부 조치가 끝나지 않았습니다. 내용을 확인해 주세요.";
+      $("#confirmDriveSaRepair").classList.add("hidden");
+      $("#closeDriveSa").textContent = "닫기";
+      toast(
+        ok ? "서비스 계정을 사용할 수 있습니다" : "서비스 계정 조치 미완료",
+        ok ? "공유 드라이브 확인을 다시 시도해 보세요." : "권한이 없으면 프로젝트 관리자에게 요청해야 합니다.",
+        ok ? "ok" : "fail",
+      );
+      await loadEnvironment();
+    } catch (error) {
+      const banner = $("#driveSaError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+    }
+  }
+
+  async function confirmDriveSaAction() {
+    // 1단계: 계획 보기 → 2단계: 실제 적용
+    if (!state.driveSaPlan) {
+      await planDriveSaRepair();
+      return;
+    }
+    const button = $("#confirmDriveSaRepair");
+    button.disabled = true;
+    button.textContent = "진행 중…";
+    try {
+      const run = await api("/api/v1/drive-service-account/repairs", {
+        method: "POST",
+        body: { planId: state.driveSaPlan.planId },
+      });
+      renderDriveSaPlan(run);
+      pollDriveSaRepair(run.runId);
+    } catch (error) {
+      const banner = $("#driveSaError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+      // 계획은 1회용이라 실패하면 처음부터 다시 확인해야 한다.
+      state.driveSaPlan = null;
+      button.disabled = false;
+      button.textContent = "조치 내용 확인";
+    }
   }
 
   async function copyEnvironmentValue(event) {
@@ -2174,6 +2356,8 @@
     $("#departmentForm").addEventListener("submit", submitDepartment);
     $("#commonSetupForm").addEventListener("submit", submitCommonSetup);
     $("#refreshGcloudAuth").addEventListener("click", refreshGcloudSetup);
+    $("#confirmDriveSaRepair").addEventListener("click", confirmDriveSaAction);
+    $$("[data-close-drive-sa]").forEach((item) => item.addEventListener("click", closeDriveSaModal));
     $("#planCommonResources").addEventListener("click", planCommonResources);
     $("#confirmCommonProvision").addEventListener("click", confirmCommonProvision);
     $("#cancelCommonProvision").addEventListener("click", cancelCommonProvision);
@@ -2215,7 +2399,10 @@
     $$('[data-close-sync-modal]').forEach((item) => item.addEventListener("click", closeSyncConfirmModal));
     $("#confirmDriveConflict").addEventListener("click", confirmDuplicateDriveIds);
     $$('[data-close-drive-conflict]').forEach((item) => item.addEventListener("click", closeDriveConflictModal));
-    $("#environmentGrid").addEventListener("click", copyEnvironmentValue);
+    $("#environmentGrid").addEventListener("click", (event) => {
+      if (event.target.closest("#checkDriveSa")) return checkDriveServiceAccount();
+      return copyEnvironmentValue(event);
+    });
     $("#drawerMcpServers").addEventListener("click", copySingleMcpServer);
     $("#drawerContent").addEventListener("click", (event) => {
       const button = event.target.closest("[data-deploy-mcp]");

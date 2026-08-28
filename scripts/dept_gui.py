@@ -95,6 +95,9 @@ _PROVISION_TTL_SECONDS = 30 * 60
 _COMMON_RESOURCE_PLANS: dict[str, dict[str, Any]] = {}
 _COMMON_PROVISION_RUNS: dict[str, dict[str, Any]] = {}
 _COMMON_PROVISION_LOCK = threading.Lock()
+_SA_REPAIR_PLANS: dict[str, dict[str, Any]] = {}
+_SA_REPAIR_RUNS: dict[str, dict[str, Any]] = {}
+_SA_REPAIR_LOCK = threading.Lock()
 _MCP_DEPLOY_RUNS: dict[str, dict[str, Any]] = {}
 _MCP_DEPLOY_LOCK = threading.Lock()
 _MCP_DEPLOY_TTL_SECONDS = 60 * 60
@@ -1923,6 +1926,275 @@ def start_common_provision_run(plan_id: str) -> dict[str, Any]:
     return copy.deepcopy(run)
 
 
+# Drive 확인용 Compute SA 가 막히는 두 가지 원인. 새 프로젝트는 둘 다 해당한다.
+#   1) Compute Engine API 가 꺼져 있어 기본 SA 자체가 아직 안 만들어졌다
+#   2) SA 는 있는데 현재 로그인 계정에 가장(impersonate) 권한이 없다
+# 둘은 조치가 다르므로 반드시 구분해서 알린다 — 뭉뚱그리면 엉뚱한 걸 누른다.
+SA_TOKEN_CREATOR_ROLE = "roles/iam.serviceAccountTokenCreator"
+COMPUTE_SERVICE = "compute.googleapis.com"
+IAM_CREDENTIALS_SERVICE = "iamcredentials.googleapis.com"
+
+
+def drive_service_account_status(project: str) -> dict[str, Any]:
+    """Drive 확인 SA 가 실제로 쓸 수 있는 상태인지 본다. 아무것도 바꾸지 않는다."""
+    result: dict[str, Any] = {
+        "projectId": project,
+        "serviceAccount": "",
+        "account": "",
+        "status": "FAIL",
+        "detail": "",
+        "issues": [],
+    }
+    if not PROJECT_RE.fullmatch(project or ""):
+        result["detail"] = "공통 설정의 프로젝트를 먼저 확인해 주세요."
+        return result
+
+    bootstrap = _gcloud_bootstrap_state(include_projects=False)
+    if not bootstrap["installed"] or not bootstrap["authenticated"]:
+        result["detail"] = "gcloud 로그인이 필요합니다."
+        result["issues"].append("gcloudAuth")
+        return result
+    result["account"] = bootstrap["account"]
+
+    service_account = _default_compute_service_account(project)
+    if not service_account:
+        result["detail"] = "프로젝트 번호를 확인하지 못했습니다."
+        result["issues"].append("projectNumber")
+        return result
+    result["serviceAccount"] = service_account
+
+    services_ok, enabled = _gcloud_enabled_services(project)
+    if services_ok and COMPUTE_SERVICE not in enabled:
+        # 기본 Compute SA 는 Compute Engine API 를 켤 때 만들어진다.
+        result["issues"].append("computeApi")
+    if services_ok and IAM_CREDENTIALS_SERVICE not in enabled:
+        result["issues"].append("iamCredentialsApi")
+
+    exists_ok, _ = _gcloud_json(
+        ["iam", "service-accounts", "describe", service_account, f"--project={project}"],
+        timeout=20,
+    )
+    if not exists_ok:
+        if "computeApi" not in result["issues"]:
+            result["issues"].append("serviceAccountMissing")
+        result["status"] = "FAIL"
+        result["detail"] = "기본 Compute 서비스 계정이 아직 없습니다."
+        return result
+
+    # 실제로 가장 토큰을 받아본다 — 권한 표를 읽는 것보다 이게 정확하다.
+    try:
+        caller_token = _sync_access_token()
+    except RuntimeError as exc:
+        result["detail"] = str(exc)[:200]
+        result["issues"].append("gcloudAuth")
+        return result
+
+    _token, _sa, latency, token_error = _service_account_access_token(
+        project,
+        caller_token,
+        ["https://www.googleapis.com/auth/drive.readonly"],
+    )
+    result["latencyMs"] = latency
+    if token_error:
+        result["status"] = "FAIL"
+        result["detail"] = token_error
+        if "tokenCreator" not in result["issues"]:
+            result["issues"].append("tokenCreator")
+        return result
+
+    result["status"] = "OK"
+    result["detail"] = "서비스 계정 가장 토큰 발급 확인됨"
+    return result
+
+
+def create_sa_repair_plan(project: str) -> dict[str, Any]:
+    """무엇을 켜고 어떤 권한을 줄지만 계산한다. 외부는 바꾸지 않는다."""
+    status = drive_service_account_status(project)
+    if status["status"] == "OK":
+        raise FileExistsError("서비스 계정이 이미 정상입니다.")
+    if "gcloudAuth" in status["issues"] or "projectNumber" in status["issues"]:
+        raise ValueError(status["detail"] or "gcloud 로그인을 먼저 확인해 주세요.")
+
+    account = status["account"]
+    service_account = status["serviceAccount"]
+    steps: list[dict[str, Any]] = []
+    if "computeApi" in status["issues"] or "serviceAccountMissing" in status["issues"]:
+        steps.append(
+            {
+                "key": "enableCompute",
+                "kind": "service",
+                "label": "Compute Engine API 활성화",
+                "target": COMPUTE_SERVICE,
+                "detail": "기본 Compute 서비스 계정은 이 API 를 켤 때 만들어집니다.",
+            }
+        )
+    if "iamCredentialsApi" in status["issues"]:
+        steps.append(
+            {
+                "key": "enableIamCredentials",
+                "kind": "service",
+                "label": "IAM Credentials API 활성화",
+                "target": IAM_CREDENTIALS_SERVICE,
+                "detail": "서비스 계정 가장 토큰 발급에 필요합니다.",
+            }
+        )
+    # SA 가 아직 없으면 가장을 시험해 볼 수 없어 권한 필요 여부를 알 수 없다.
+    # 바인딩은 멱등이므로 이미 있으면 무해하다 — 두 번 왕복시키는 것보다 낫다.
+    # 어차피 계획 화면에 그대로 뜨고 사용자가 확인한 뒤에만 적용된다.
+    if service_account:
+        steps.append(
+            {
+                "key": "grantTokenCreator",
+                "kind": "iamBinding",
+                "label": "토큰 생성 권한 부여",
+                "target": service_account,
+                "role": SA_TOKEN_CREATOR_ROLE,
+                "member": f"user:{account}",
+                "detail": f"{account} 이 이 서비스 계정을 가장할 수 있게 합니다.",
+            }
+        )
+    if not steps:
+        raise FileExistsError("자동으로 조치할 항목이 없습니다.")
+
+    plan_id = uuid.uuid4().hex
+    plan = {
+        "planId": plan_id,
+        "projectId": project,
+        "account": account,
+        "serviceAccount": service_account,
+        "steps": steps,
+        "createdEpoch": time.time(),
+        "started": False,
+    }
+    with _SA_REPAIR_LOCK:
+        _cleanup_sa_repair_state()
+        _SA_REPAIR_PLANS[plan_id] = plan
+    return copy.deepcopy(plan)
+
+
+def _cleanup_sa_repair_state() -> None:
+    cutoff = time.time() - _PROVISION_TTL_SECONDS
+    for plan_id in [
+        key for key, item in _SA_REPAIR_PLANS.items() if item.get("createdEpoch", 0) < cutoff
+    ]:
+        _SA_REPAIR_PLANS.pop(plan_id, None)
+    for run_id in [
+        key
+        for key, item in _SA_REPAIR_RUNS.items()
+        if item.get("finishedEpoch", item.get("createdEpoch", time.time())) < cutoff
+    ]:
+        _SA_REPAIR_RUNS.pop(run_id, None)
+
+
+def _grant_service_account_role(
+    service_account: str, member: str, role: str, project: str
+) -> None:
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        raise RuntimeError("gcloud를 찾을 수 없습니다.")
+    ok, output = _run_command(
+        [
+            gcloud,
+            "iam",
+            "service-accounts",
+            "add-iam-policy-binding",
+            service_account,
+            f"--member={member}",
+            f"--role={role}",
+            f"--project={project}",
+            "--quiet",
+        ],
+        timeout=120,
+    )
+    if not ok:
+        raise RuntimeError((output or "권한 부여에 실패했습니다.")[-400:])
+
+
+def _set_sa_repair_step(run_id: str, key: str, **changes: Any) -> None:
+    with _SA_REPAIR_LOCK:
+        run = _SA_REPAIR_RUNS.get(run_id)
+        if not run:
+            return
+        for item in run["steps"]:
+            if item["key"] == key:
+                item.update(changes)
+                return
+
+
+def _execute_sa_repair_run(run_id: str) -> None:
+    with _SA_REPAIR_LOCK:
+        run = copy.deepcopy(_SA_REPAIR_RUNS[run_id])
+    project = run["projectId"]
+
+    for step in run["steps"]:
+        key = step["key"]
+        _set_sa_repair_step(run_id, key, status="RUNNING", detail="진행 중")
+        try:
+            if step["kind"] == "service":
+                _enable_gcloud_service(step["target"], project)
+            else:
+                _grant_service_account_role(
+                    step["target"], step["member"], step["role"], project
+                )
+        except (OSError, RuntimeError) as exc:
+            _set_sa_repair_step(run_id, key, status="FAILED", detail=str(exc)[:400])
+        else:
+            _set_sa_repair_step(run_id, key, status="COMPLETE", detail="완료")
+
+    # 조치가 실제로 통했는지 같은 방법으로 되읽는다 — 성공 표시만 믿지 않는다.
+    verified = drive_service_account_status(project)
+    with _SA_REPAIR_LOCK:
+        current = _SA_REPAIR_RUNS[run_id]
+        current["verification"] = verified
+        statuses = [item.get("status") for item in current["steps"]]
+        if verified["status"] == "OK":
+            current["status"] = "COMPLETED"
+        elif any(item == "COMPLETE" for item in statuses):
+            current["status"] = "PARTIAL"
+        else:
+            current["status"] = "FAILED"
+        current["finishedEpoch"] = time.time()
+
+
+def start_sa_repair_run(plan_id: str) -> dict[str, Any]:
+    with _SA_REPAIR_LOCK:
+        _cleanup_sa_repair_state()
+        plan = _SA_REPAIR_PLANS.get(plan_id)
+        if not plan:
+            raise FileNotFoundError(plan_id)
+        if plan["started"]:
+            raise FileExistsError("이미 실행한 조치 계획입니다.")
+        for active in _SA_REPAIR_RUNS.values():
+            if active["status"] == "RUNNING":
+                raise FileExistsError("서비스 계정 조치가 이미 진행 중입니다.")
+
+        run_id = uuid.uuid4().hex
+        steps = copy.deepcopy(plan["steps"])
+        for item in steps:
+            item.update(status="PENDING", detail="대기 중")
+        run = {
+            "runId": run_id,
+            "planId": plan_id,
+            "projectId": plan["projectId"],
+            "account": plan["account"],
+            "serviceAccount": plan["serviceAccount"],
+            "status": "RUNNING",
+            "steps": steps,
+            "verification": {},
+            "createdEpoch": time.time(),
+        }
+        plan["started"] = True
+        _SA_REPAIR_RUNS[run_id] = run
+
+    threading.Thread(
+        target=_execute_sa_repair_run,
+        args=(run_id,),
+        name=f"sa-repair-{run_id[:8]}",
+        daemon=True,
+    ).start()
+    return copy.deepcopy(run)
+
+
 def _cleanup_mcp_deployments() -> None:
     cutoff = time.time() - _MCP_DEPLOY_TTL_SECONDS
     expired = [
@@ -3346,6 +3618,84 @@ def common_config_provision_run(run_id: str) -> JSONResponse:
                     "error": {
                         "code": "PROVISION_RUN_NOT_FOUND",
                         "message": "리소스 생성 실행을 찾을 수 없습니다.",
+                    }
+                },
+                status_code=404,
+            )
+        return JSONResponse(copy.deepcopy(run))
+
+
+@app.get("/api/v1/drive-service-account/status")
+def drive_sa_status() -> JSONResponse:
+    """Drive 확인 SA 를 실제 가장 토큰까지 받아보고 판정한다."""
+    try:
+        project = str(_common().get("GCP_PROJECT_ID") or "")
+    except (OSError, TypeError, UnicodeError, yaml.YAMLError):
+        project = ""
+    return JSONResponse(drive_service_account_status(project))
+
+
+@app.post("/api/v1/drive-service-account/repair-plans")
+def drive_sa_repair_plan(request: Request) -> JSONResponse:
+    """무엇을 켜고 어떤 권한을 줄지만 돌려준다. 여기서는 아무것도 바꾸지 않는다."""
+    _require_local_session(request)
+    try:
+        project = str(_common().get("GCP_PROJECT_ID") or "")
+    except (OSError, TypeError, UnicodeError, yaml.YAMLError):
+        project = ""
+    try:
+        plan = create_sa_repair_plan(project)
+    except FileExistsError as exc:
+        return JSONResponse(
+            {"error": {"code": "SA_ALREADY_OK", "message": str(exc)}}, status_code=409
+        )
+    except (TypeError, ValueError) as exc:
+        return JSONResponse(
+            {"error": {"code": "SA_REPAIR_UNAVAILABLE", "message": str(exc)}}, status_code=422
+        )
+    return JSONResponse(plan, status_code=200)
+
+
+@app.post("/api/v1/drive-service-account/repairs")
+async def drive_sa_repair(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    plan_id = str(payload.get("planId") or "") if isinstance(payload, dict) else ""
+    if not re.fullmatch(r"[0-9a-f]{32}", plan_id):
+        return JSONResponse(
+            {"error": {"code": "INVALID_REPAIR_PLAN", "message": "조치 계획을 다시 열어 주세요."}},
+            status_code=422,
+        )
+    try:
+        run = start_sa_repair_run(plan_id)
+    except FileNotFoundError:
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "REPAIR_PLAN_EXPIRED",
+                    "message": "조치 계획이 만료되었습니다. 상태를 다시 확인해 주세요.",
+                }
+            },
+            status_code=404,
+        )
+    except FileExistsError as exc:
+        return JSONResponse(
+            {"error": {"code": "SA_REPAIR_CONFLICT", "message": str(exc)}}, status_code=409
+        )
+    return JSONResponse(run, status_code=202)
+
+
+@app.get("/api/v1/drive-service-account/repairs/{run_id}")
+def drive_sa_repair_run(run_id: str) -> JSONResponse:
+    with _SA_REPAIR_LOCK:
+        _cleanup_sa_repair_state()
+        run = _SA_REPAIR_RUNS.get(run_id)
+        if not run:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "REPAIR_RUN_NOT_FOUND",
+                        "message": "조치 실행을 찾을 수 없습니다.",
                     }
                 },
                 status_code=404,

@@ -169,6 +169,13 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 - Firestore는 Native 모드로만 만들며 위치는 `GCP_REGION`을 그대로 쓴다(생성 후
   변경 불가). `(default)` 데이터베이스는 Datastore 모드로 굳으면 되돌릴 수 없어
   이름으로 거부한다. 삭제는 GUI에서 제공하지 않는다
+- 실행 환경 화면의 `Drive 확인 서비스 계정`은 `상태 확인`으로 실제 가장 토큰을
+  받아본다. 새 프로젝트는 Compute Engine API가 꺼져 있어 기본 SA 자체가 없거나
+  (`computeApi`), SA는 있어도 현재 계정에 가장 권한이 없어(`tokenCreator`)
+  `HTTP 404`로 막힌다. 둘은 조치가 달라 구분해서 알린다
+- 조치도 계획 → 확인 → 실행이다. 계획에 켤 API와 부여할 역할
+  (`roles/iam.serviceAccountTokenCreator`)을 먼저 보여주고, 확인을 눌러야 적용한다.
+  적용 뒤에는 같은 가장 토큰 발급으로 재확인한다 — 명령 성공만 믿지 않는다
 - 학과 추가·수정 시 실제 Vertex RAG 코퍼스와 같은 리전의 보호된 GCS 버킷을
   목록에서 선택하거나 웹 콘솔에서 새로 생성한다
 - 신규 학과 코드는 기존 `config/departments/{code}.yaml`과 중복될 수 없으며 입력 중
@@ -262,6 +269,10 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 | `GET /api/v1/environment` | common 설정, gcloud 로그인·프로젝트, Drive 확인용 SA 표시 |
 | `POST /api/v1/gcloud-auth/login` | 시스템 브라우저에서 gcloud 사용자 로그인 유도 |
 | `GET /api/v1/common-config/resources` | 선택 프로젝트의 Artifact Registry·Firestore 조회 |
+| `GET /api/v1/drive-service-account/status` | Drive 확인 SA 를 실제 가장 토큰까지 받아보고 판정 |
+| `POST /api/v1/drive-service-account/repair-plans` | 켤 API·부여할 역할만 계산(외부 변경 없음) |
+| `POST /api/v1/drive-service-account/repairs` | 확인된 계획 적용 후 같은 방법으로 재확인(계획 1회용) |
+| `GET /api/v1/drive-service-account/repairs/{runId}` | 조치 진행 상태 |
 | `POST /api/v1/common-config/resource-plans` | 켤 API와 만들 공통 리소스를 계산만 한다(외부 변경 없음) |
 | `POST /api/v1/common-config/resource-provisioning` | 확인된 계획으로 API 활성화 후 공통 리소스 생성(계획 1회용) |
 | `GET /api/v1/common-config/resource-provisioning/{runId}` | 공통 리소스 생성 진행 상태 |

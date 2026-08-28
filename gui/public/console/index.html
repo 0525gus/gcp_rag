@@ -577,6 +577,28 @@
       </div>
     </aside>
 
+    <aside class="resource-modal" id="driveSaModal" aria-hidden="true" aria-labelledby="driveSaModalTitle">
+      <div class="resource-modal-backdrop" data-close-drive-sa></div>
+      <div class="resource-modal-panel" role="dialog" aria-modal="true">
+        <header>
+          <div><span class="eyebrow">SERVICE ACCOUNT</span><h2 id="driveSaModalTitle">Drive 확인 서비스 계정</h2><p id="driveSaModalDescription">상태를 확인하고 있습니다.</p></div>
+          <button type="button" class="icon-button" data-close-drive-sa aria-label="서비스 계정 창 닫기">×</button>
+        </header>
+        <div class="resource-modal-body">
+          <div class="resource-plan-context">
+            <div><span>PROJECT</span><b id="driveSaProject">—</b></div>
+            <div><span>ACCOUNT</span><b id="driveSaAccount">—</b></div>
+          </div>
+          <div id="driveSaBody"></div>
+          <div class="validation-banner hidden" id="driveSaError"></div>
+        </div>
+        <footer>
+          <button type="button" class="button ghost" data-close-drive-sa id="closeDriveSa">취소</button>
+          <button type="button" class="button primary hidden" id="confirmDriveSaRepair">확인</button>
+        </footer>
+      </div>
+    </aside>
+
     <aside class="resource-modal" id="mcpDeploymentModal" aria-hidden="true" aria-labelledby="mcpDeploymentTitle">
       <div class="resource-modal-backdrop" data-close-mcp-deployment></div>
       <div class="resource-modal-panel deployment-modal-panel" role="dialog" aria-modal="true">
