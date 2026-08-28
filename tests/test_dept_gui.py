@@ -815,7 +815,8 @@ def test_resource_plan_and_provision_run_create_selected_resources(
     assert planned.status_code == 201
     plan = planned.json()
     assert len(plan["resources"]) == 4
-    assert plan["resources"][0]["value"].startswith("rag-cs-hwp-")
+    # 버킷도 코퍼스와 같이 학과 코드가 맨 앞이어야 한다.
+    assert plan["resources"][0]["value"].startswith("cs-rag-hwp-")
     corpus_names = {
         item["key"]: item["displayName"]
         for item in plan["resources"]

@@ -39,8 +39,8 @@
 
 ```powershell
 # 1. 코퍼스 2개 + 버킷 2개 생성
-gcloud storage buckets create gs://rag-ee-hwp-PROJECT --location=asia-northeast3
-gcloud storage buckets create gs://rag-ee-source-PROJECT --location=asia-northeast3
+gcloud storage buckets create gs://ee-rag-hwp-PROJECT --location=asia-northeast3
+gcloud storage buckets create gs://ee-rag-source-PROJECT --location=asia-northeast3
 
 # 2. 템플릿 복사 후 채우기 (커밋하지 않는다)
 cp config/departments/dept.yaml.example config/departments/ee.yaml

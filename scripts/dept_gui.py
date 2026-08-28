@@ -1138,9 +1138,11 @@ def create_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("공통 프로젝트·리전 설정을 먼저 확인해 주세요.")
 
     suffix = secrets.token_hex(4)
+    # 학과 코드를 맨 앞에 둔다 — 코퍼스(`{code}-rag-corpus-*`)와 같은 순서라야
+    # 콘솔 목록에서 학과별로 붙어 보이고, 접두어 검색도 코드 하나로 끝난다.
     bucket_names = {
-        "bucketHwp": f"rag-{code}-hwp-{suffix}",
-        "bucketSource": f"rag-{code}-source-{suffix}",
+        "bucketHwp": f"{code}-rag-hwp-{suffix}",
+        "bucketSource": f"{code}-rag-source-{suffix}",
     }
     corpus_display_names = {
         "corpusStaff": f"{code}-rag-corpus" if corpus_mode == "single" else f"{code}-rag-corpus-staff",
