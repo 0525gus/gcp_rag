@@ -101,6 +101,9 @@ _SA_REPAIR_LOCK = threading.Lock()
 _MCP_DEPLOY_RUNS: dict[str, dict[str, Any]] = {}
 _MCP_DEPLOY_LOCK = threading.Lock()
 _MCP_DEPLOY_TTL_SECONDS = 60 * 60
+_COMMON_RUNTIME_DEPLOY_RUNS: dict[str, dict[str, Any]] = {}
+_COMMON_RUNTIME_DEPLOY_LOCK = threading.Lock()
+_COMMON_RUNTIME_DEPLOY_TTL_SECONDS = 60 * 60
 _AUTH_PROCESS: subprocess.Popen[Any] | None = None
 _SYNC_AUTH_LOCK = threading.Lock()
 _SYNC_AUTH_TOKEN = ""
@@ -133,6 +136,25 @@ COMMON_PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
 COMMON_PROVISION_WARNINGS: dict[str, str] = {
     "firestoreDatabase": "생성 후 위치를 변경할 수 없습니다. 리전을 확인해 주세요.",
 }
+# 콘솔과 배포/동기화가 실제로 호출하는 프로젝트 API 전체. 공통 설정을 저장하기
+# 전에 이 순서대로 상태를 확인하고, 꺼진 항목만 활성화한다.
+COMMON_REQUIRED_SERVICES: tuple[dict[str, str], ...] = (
+    {"name": "compute.googleapis.com", "label": "Compute Engine API"},
+    {"name": "iamcredentials.googleapis.com", "label": "IAM Service Account Credentials API"},
+    {"name": "run.googleapis.com", "label": "Cloud Run Admin API"},
+    {"name": "artifactregistry.googleapis.com", "label": "Artifact Registry API"},
+    {"name": "cloudbuild.googleapis.com", "label": "Cloud Build API"},
+    {"name": "aiplatform.googleapis.com", "label": "Vertex AI API"},
+    {"name": "documentai.googleapis.com", "label": "Document AI API"},
+    {"name": "storage.googleapis.com", "label": "Cloud Storage API"},
+    {"name": "firestore.googleapis.com", "label": "Cloud Firestore API"},
+    {"name": "workflows.googleapis.com", "label": "Workflows API"},
+    {"name": "workflowexecutions.googleapis.com", "label": "Workflow Executions API"},
+    {"name": "cloudscheduler.googleapis.com", "label": "Cloud Scheduler API"},
+    {"name": "appengine.googleapis.com", "label": "App Engine Admin API"},
+    {"name": "drive.googleapis.com", "label": "Google Drive API"},
+    {"name": "secretmanager.googleapis.com", "label": "Secret Manager API"},
+)
 ARTIFACT_REPO_RE = re.compile(r"[a-z][a-z0-9._-]{1,62}")
 FIRESTORE_DB_RE = re.compile(r"[a-z][a-z0-9-]{1,61}[a-z0-9]")
 RAG_EMBEDDING_MODEL = "text-multilingual-embedding-002"
@@ -143,6 +165,11 @@ DRIVE_FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 SYNC_WORKFLOW_NAME = "rag-daily-sync"
 SYNC_RUN_HISTORY_LIMIT = 30
 SYNC_TOKEN_COLLECTION = "sync_tokens"
+
+
+class WorkflowNotFoundError(RuntimeError):
+    """동기화 Workflow가 아직 배포되지 않은 정상적인 빈 상태."""
+
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -1384,15 +1411,21 @@ def create_common_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
     if names["firestoreDatabase"] == "(default)":
         raise ValueError("(default) 데이터베이스는 사용하지 않습니다. 다른 ID를 입력해 주세요.")
 
-    existing = _gcloud_project_resources(project, region)
+    # 리소스와 API는 동시에 읽는다. 서비스 계정 조회까지 같은 순간에 여러 gcloud
+    # 프로세스로 실행하면 Windows에서 프로젝트 번호 조회가 간헐적으로 실패하므로
+    # 정책/연결 확인은 둘이 끝난 뒤 안정적으로 실행한다.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        resources_future = pool.submit(_gcloud_project_resources, project, region)
+        services_future = pool.submit(_gcloud_enabled_services, project)
+        existing = resources_future.result()
+        services_ok, enabled = services_future.result()
+    service_account_status = drive_service_account_status(project)
     existing_ids = {
         "artifactRepo": {item["id"] for item in existing["artifactRepositories"]},
         "firestoreDatabase": {item["id"] for item in existing["firestoreDatabases"]},
     }
-    services_ok, enabled = _gcloud_enabled_services(project)
 
     resources: list[dict[str, Any]] = []
-    services: list[dict[str, Any]] = []
     for key, definition in COMMON_PROVISION_RESOURCE_DEFINITIONS.items():
         already = names[key] in existing_ids[key]
         resources.append(
@@ -1406,16 +1439,17 @@ def create_common_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
                 "warning": COMMON_PROVISION_WARNINGS.get(key, ""),
             }
         )
-        service = str(definition["service"])
-        if not any(item["name"] == service for item in services):
-            services.append(
-                {
-                    "name": service,
-                    # 조회 실패 시엔 '켜져 있다' 고 단정하지 않는다 — 화면에 확인 필요로 뜬다.
-                    "enabled": bool(services_ok and service in enabled),
-                    "known": services_ok,
-                }
-            )
+
+    services = [
+        {
+            "name": definition["name"],
+            "label": definition["label"],
+            # 조회 실패 시엔 '켜져 있다' 고 단정하지 않는다 — 화면에 확인 필요로 뜬다.
+            "enabled": bool(services_ok and definition["name"] in enabled),
+            "known": services_ok,
+        }
+        for definition in COMMON_REQUIRED_SERVICES
+    ]
 
     plan_id = uuid.uuid4().hex
     plan = {
@@ -1424,6 +1458,16 @@ def create_common_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
         "region": region,
         "resources": resources,
         "services": services,
+        "serviceAccount": {
+            "key": "driveImpersonation",
+            "label": "Drive 서비스 계정 사용 권한",
+            "role": "roles/iam.serviceAccountTokenCreator",
+            "serviceAccount": str(service_account_status.get("serviceAccount") or ""),
+            "account": str(service_account_status.get("account") or ""),
+            "ready": service_account_status.get("status") == "OK",
+            "issues": list(service_account_status.get("issues") or []),
+            "detail": str(service_account_status.get("detail") or "상태를 확인하지 못했습니다."),
+        },
         "createdEpoch": time.time(),
         "started": False,
     }
@@ -1823,6 +1867,95 @@ def _set_common_provision_service(run_id: str, name: str, **changes: Any) -> Non
                 return
 
 
+def _set_common_provision_service_account(run_id: str, **changes: Any) -> None:
+    with _COMMON_PROVISION_LOCK:
+        run = _COMMON_PROVISION_RUNS.get(run_id)
+        if run:
+            run["serviceAccount"].update(changes)
+
+
+def _prepare_common_service_account(
+    run_id: str, project: str, failed_services: set[str]
+) -> None:
+    """Compute SA 가장 권한을 확인하고 필요할 때 현재 계정에 부여한다."""
+    dependencies = {COMPUTE_SERVICE, IAM_CREDENTIALS_SERVICE}
+    failed_dependencies = sorted(dependencies & failed_services)
+    if failed_dependencies:
+        _set_common_provision_service_account(
+            run_id,
+            status="FAILED",
+            detail=f"{', '.join(failed_dependencies)} 활성화 실패로 확인하지 못했습니다.",
+        )
+        return
+
+    _set_common_provision_service_account(
+        run_id, status="RUNNING", detail="서비스 계정 연결 상태를 확인하는 중"
+    )
+    status = drive_service_account_status(project)
+    service_account = str(status.get("serviceAccount") or "")
+    account = str(status.get("account") or "")
+    _set_common_provision_service_account(
+        run_id, serviceAccount=service_account, account=account
+    )
+    if status.get("status") == "OK":
+        _set_common_provision_service_account(
+            run_id, status="SKIPPED", detail="서비스 계정 연결 확인됨 · 이미 정상"
+        )
+        return
+    if not service_account or not account:
+        _set_common_provision_service_account(
+            run_id,
+            status="FAILED",
+            detail=str(status.get("detail") or "서비스 계정을 확인하지 못했습니다.")[:400],
+        )
+        return
+
+    member_type = "serviceAccount" if account.endswith(".gserviceaccount.com") else "user"
+    _set_common_provision_service_account(
+        run_id,
+        status="RUNNING",
+        detail=f"{account}에 Token Creator 권한을 부여하는 중",
+    )
+    try:
+        _grant_service_account_role(
+            service_account,
+            f"{member_type}:{account}",
+            SA_TOKEN_CREATOR_ROLE,
+            project,
+        )
+    except (OSError, RuntimeError) as exc:
+        _set_common_provision_service_account(
+            run_id, status="FAILED", detail=str(exc)[:400]
+        )
+        return
+
+    # IAM 정책 반영은 실제로 10초 이상 걸릴 수 있다. 명령 성공 직후의 403을
+    # 최종 실패로 오판하지 않도록 약 30초 동안 실제 토큰 발급을 재확인한다.
+    verified = status
+    verification_attempts = 11
+    for attempt in range(1, verification_attempts + 1):
+        _set_common_provision_service_account(
+            run_id,
+            status="RUNNING",
+            detail=f"권한 적용 후 서비스 계정 연결 재확인 중 ({attempt}/{verification_attempts})",
+        )
+        verified = drive_service_account_status(project)
+        if verified.get("status") == "OK":
+            break
+        if attempt < verification_attempts:
+            time.sleep(3)
+    if verified.get("status") == "OK":
+        _set_common_provision_service_account(
+            run_id, status="COMPLETE", detail="Token Creator 권한 부여 및 서비스 계정 연결 확인 완료"
+        )
+    else:
+        _set_common_provision_service_account(
+            run_id,
+            status="FAILED",
+            detail=str(verified.get("detail") or "서비스 계정 연결 재확인에 실패했습니다.")[:400],
+        )
+
+
 def _execute_common_provision_run(run_id: str) -> None:
     """API 를 먼저 켜고 리소스를 만든다. API 가 꺼진 채로는 생성이 그냥 실패한다."""
     with _COMMON_PROVISION_LOCK:
@@ -1844,6 +1977,8 @@ def _execute_common_provision_run(run_id: str) -> None:
             _set_common_provision_service(run_id, name, status="FAILED", detail=str(exc)[:400])
         else:
             _set_common_provision_service(run_id, name, status="COMPLETE", detail="활성화 완료")
+
+    _prepare_common_service_account(run_id, project, failed_services)
 
     for resource in run["resources"]:
         key = resource["key"]
@@ -1874,7 +2009,8 @@ def _execute_common_provision_run(run_id: str) -> None:
 
     with _COMMON_PROVISION_LOCK:
         current = _COMMON_PROVISION_RUNS[run_id]
-        statuses = [item["status"] for item in current["resources"]]
+        statuses = [item["status"] for item in current["services"] + current["resources"]]
+        statuses.append(current["serviceAccount"]["status"])
         settled = [item for item in statuses if item in {"COMPLETE", "SKIPPED"}]
         if len(settled) == len(statuses):
             current["status"] = "COMPLETED"
@@ -1900,10 +2036,18 @@ def start_common_provision_run(plan_id: str) -> dict[str, Any]:
         run_id = uuid.uuid4().hex
         resources = copy.deepcopy(plan["resources"])
         for item in resources:
-            item.update(status="PENDING", detail="대기 중")
+            if item.get("exists"):
+                item.update(status="SKIPPED", detail="이미 존재해 건너뜀")
+            else:
+                item.update(status="PENDING", detail="생성 대기 중")
         services = copy.deepcopy(plan["services"])
         for item in services:
             item.update(status="PENDING", detail="대기 중")
+        service_account = copy.deepcopy(plan["serviceAccount"])
+        if service_account.get("ready"):
+            service_account.update(status="SKIPPED", detail="서비스 계정 연결 확인됨 · 이미 설정됨")
+        else:
+            service_account.update(status="PENDING", detail="필수 API 준비 후 권한 확인 및 설정")
         run = {
             "runId": run_id,
             "planId": plan_id,
@@ -1912,6 +2056,7 @@ def start_common_provision_run(plan_id: str) -> dict[str, Any]:
             "status": "RUNNING",
             "resources": resources,
             "services": services,
+            "serviceAccount": service_account,
             "createdEpoch": time.time(),
         }
         plan["started"] = True
@@ -1954,7 +2099,15 @@ def drive_service_account_status(project: str) -> dict[str, Any]:
         result["detail"] = "gcloud 로그인이 필요합니다."
         result["issues"].append("gcloudAuth")
         return result
-    result["account"] = bootstrap["account"]
+    # bootstrap 응답의 account는 화면 표시용으로 마스킹되어 있다. IAM member에는
+    # 원문 계정이 필요하므로 활성 계정을 다시 읽고, 조회 실패 때만 기존 값을 쓴다.
+    account_ok, active_accounts = _gcloud_json(
+        ["auth", "list", "--filter=status:ACTIVE"], timeout=20
+    )
+    if account_ok and isinstance(active_accounts, list) and active_accounts:
+        result["account"] = str(active_accounts[0].get("account") or "")
+    else:
+        result["account"] = bootstrap["account"]
 
     service_account = _default_compute_service_account(project)
     if not service_account:
@@ -2003,7 +2156,7 @@ def drive_service_account_status(project: str) -> dict[str, Any]:
         return result
 
     result["status"] = "OK"
-    result["detail"] = "서비스 계정 가장 토큰 발급 확인됨"
+    result["detail"] = "서비스 계정 연결 확인됨"
     return result
 
 
@@ -2035,13 +2188,16 @@ def create_sa_repair_plan(project: str) -> dict[str, Any]:
                 "kind": "service",
                 "label": "IAM Credentials API 활성화",
                 "target": IAM_CREDENTIALS_SERVICE,
-                "detail": "서비스 계정 가장 토큰 발급에 필요합니다.",
+                "detail": "서비스 계정 임시 접근 토큰 발급에 필요합니다.",
             }
         )
     # SA 가 아직 없으면 가장을 시험해 볼 수 없어 권한 필요 여부를 알 수 없다.
     # 바인딩은 멱등이므로 이미 있으면 무해하다 — 두 번 왕복시키는 것보다 낫다.
     # 어차피 계획 화면에 그대로 뜨고 사용자가 확인한 뒤에만 적용된다.
     if service_account:
+        member_type = (
+            "serviceAccount" if account.endswith(".gserviceaccount.com") else "user"
+        )
         steps.append(
             {
                 "key": "grantTokenCreator",
@@ -2049,8 +2205,8 @@ def create_sa_repair_plan(project: str) -> dict[str, Any]:
                 "label": "토큰 생성 권한 부여",
                 "target": service_account,
                 "role": SA_TOKEN_CREATOR_ROLE,
-                "member": f"user:{account}",
-                "detail": f"{account} 이 이 서비스 계정을 가장할 수 있게 합니다.",
+                "member": f"{member_type}:{account}",
+                "detail": f"{account} 계정이 이 서비스 계정으로 연결할 수 있게 합니다.",
             }
         )
     if not steps:
@@ -2141,8 +2297,21 @@ def _execute_sa_repair_run(run_id: str) -> None:
         else:
             _set_sa_repair_step(run_id, key, status="COMPLETE", detail="완료")
 
-    # 조치가 실제로 통했는지 같은 방법으로 되읽는다 — 성공 표시만 믿지 않는다.
-    verified = drive_service_account_status(project)
+    # 조치가 실제로 통했는지 같은 방법으로 되읽는다. IAM 반영 지연 때문에
+    # 명령 성공 직후에는 잠시 403일 수 있으므로 약 30초 동안 재확인한다.
+    verified: dict[str, Any] = {}
+    with _SA_REPAIR_LOCK:
+        grant_succeeded = any(
+            item.get("key") == "grantTokenCreator" and item.get("status") == "COMPLETE"
+            for item in _SA_REPAIR_RUNS[run_id]["steps"]
+        )
+    verification_attempts = 11 if grant_succeeded else 1
+    for attempt in range(1, verification_attempts + 1):
+        verified = drive_service_account_status(project)
+        if verified["status"] == "OK":
+            break
+        if attempt < verification_attempts:
+            time.sleep(3)
     with _SA_REPAIR_LOCK:
         current = _SA_REPAIR_RUNS[run_id]
         current["verification"] = verified
@@ -2267,6 +2436,265 @@ def _project_accessible(project_id: str) -> bool:
     if status != 200 or not isinstance(body, dict):
         return False
     return str(body.get("lifecycleState") or "ACTIVE") == "ACTIVE"
+
+
+def _cleanup_common_runtime_deployments() -> None:
+    cutoff = time.time() - _COMMON_RUNTIME_DEPLOY_TTL_SECONDS
+    expired = [
+        run_id
+        for run_id, run in _COMMON_RUNTIME_DEPLOY_RUNS.items()
+        if run.get("finishedEpoch", run.get("createdEpoch", time.time())) < cutoff
+    ]
+    for run_id in expired:
+        _COMMON_RUNTIME_DEPLOY_RUNS.pop(run_id, None)
+
+
+def _set_common_runtime_deploy_step(run_id: str, key: str, **changes: Any) -> None:
+    with _COMMON_RUNTIME_DEPLOY_LOCK:
+        run = _COMMON_RUNTIME_DEPLOY_RUNS.get(run_id)
+        if not run:
+            return
+        for step in run["steps"]:
+            if step["key"] == key:
+                step.update(changes)
+                return
+
+
+def _advance_common_runtime_deploy_from_log(run_id: str, line: str) -> None:
+    markers = (
+        ("== Build & push images ==", "config", "images", "공통 이미지 빌드 시작"),
+        ("== Deploy Cloud Run ==", "images", "cloudRun", "Parser / Sync 배포 시작"),
+        ("== Deploy Workflow ==", "cloudRun", "workflow", "Workflow 배포 시작"),
+        ("== Ensure Scheduler SA / App Engine ==", "workflow", "scheduler", "Scheduler 준비 시작"),
+    )
+    for marker, completed_key, running_key, detail in markers:
+        if marker in line:
+            _set_common_runtime_deploy_step(
+                run_id, completed_key, status="COMPLETE", detail="배포 명령 완료"
+            )
+            _set_common_runtime_deploy_step(
+                run_id, running_key, status="RUNNING", detail=detail
+            )
+            return
+    if "== Cloud Scheduler" in line:
+        _set_common_runtime_deploy_step(
+            run_id, "scheduler", status="RUNNING", detail="Scheduler 작업 등록 중"
+        )
+
+
+def _append_common_runtime_deploy_log(run_id: str, line: str) -> None:
+    clean = str(line or "").strip()
+    if not clean:
+        return
+    clean = re.sub(r"(?i)(authorization:\s*bearer\s+)[^\s]+", r"\1***", clean)
+    clean = re.sub(r"(?i)(access[_ -]?token[=:]\s*)[^\s]+", r"\1***", clean)
+    with _COMMON_RUNTIME_DEPLOY_LOCK:
+        run = _COMMON_RUNTIME_DEPLOY_RUNS.get(run_id)
+        if not run:
+            return
+        run["logs"] = [*run.get("logs", []), clean[:500]][-220:]
+        for step in run["steps"]:
+            if step["status"] == "RUNNING":
+                step["detail"] = clean[:300]
+                break
+    _advance_common_runtime_deploy_from_log(run_id, clean)
+
+
+def _run_common_runtime_deploy_script(*, on_line: Any) -> int:
+    executable = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not executable:
+        raise RuntimeError("PowerShell 7(pwsh)을 찾을 수 없습니다.")
+    args = [
+        executable,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(ROOT / "scripts" / "deploy.ps1"),
+        "-SkipMcp",
+    ]
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "CLOUDSDK_CORE_DISABLE_PROMPTS": "1",
+            "PREFLIGHT_NO_FIX": "1",
+        }
+    )
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    process = subprocess.Popen(
+        args,
+        cwd=ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        shell=False,
+        creationflags=flags,
+    )
+    if process.stdout:
+        for line in process.stdout:
+            on_line(line)
+    return process.wait()
+
+
+def _verify_common_runtime_deployment() -> list[dict[str, str]]:
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    services: list[dict[str, str]] = []
+    failures: list[str] = []
+    for service in ("rag-parser", "rag-sync"):
+        ok, data = _gcloud_json(
+            [
+                "run",
+                "services",
+                "describe",
+                service,
+                f"--region={region}",
+                f"--project={project}",
+            ],
+            timeout=30,
+        )
+        status_data = data.get("status") if ok and isinstance(data, dict) else {}
+        status_data = status_data if isinstance(status_data, dict) else {}
+        ready_condition = next(
+            (
+                item
+                for item in status_data.get("conditions") or []
+                if item.get("type") == "Ready"
+            ),
+            {},
+        )
+        ready = str(ready_condition.get("status") or "").lower() == "true"
+        url = str(status_data.get("url") or "")
+        if not ok or not ready or not url:
+            detail = str(data if not ok else ready_condition.get("message") or "Ready 아님")
+            failures.append(f"{service}: {detail[:180]}")
+            continue
+        services.append(
+            {
+                "serviceName": service,
+                "url": url,
+                "healthUrl": url.rstrip("/") + "/health",
+            }
+        )
+
+    for kind, args in (
+        (
+            "Workflow",
+            ["workflows", "describe", "rag-daily-sync", f"--location={region}", f"--project={project}"],
+        ),
+        (
+            "Scheduler",
+            ["scheduler", "jobs", "describe", "rag-daily-sync", f"--location={region}", f"--project={project}"],
+        ),
+    ):
+        ok, detail = _gcloud_json(args, timeout=30)
+        if not ok:
+            failures.append(f"{kind}: {str(detail)[:180]}")
+    if failures:
+        raise RuntimeError(" · ".join(failures))
+    return services
+
+
+def _execute_common_runtime_deployment(run_id: str) -> None:
+    try:
+        exit_code = _run_common_runtime_deploy_script(
+            on_line=lambda line: _append_common_runtime_deploy_log(run_id, line)
+        )
+        if exit_code != 0:
+            raise RuntimeError(f"공통 런타임 배포 스크립트가 종료 코드 {exit_code}로 실패했습니다.")
+        for key in ("config", "images", "cloudRun", "workflow", "scheduler"):
+            _set_common_runtime_deploy_step(
+                run_id, key, status="COMPLETE", detail="배포 명령 완료"
+            )
+        _set_common_runtime_deploy_step(
+            run_id, "ready", status="RUNNING", detail="배포 리소스 Ready 확인 중"
+        )
+        services = _verify_common_runtime_deployment()
+        _set_common_runtime_deploy_step(
+            run_id,
+            "ready",
+            status="COMPLETE",
+            detail="Parser / Sync / Workflow / Scheduler 확인 완료",
+        )
+        with _COMMON_RUNTIME_DEPLOY_LOCK:
+            current = _COMMON_RUNTIME_DEPLOY_RUNS[run_id]
+            current.update(status="COMPLETED", services=services, finishedEpoch=time.time())
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError, yaml.YAMLError) as exc:
+        message = str(exc)[:500]
+        with _COMMON_RUNTIME_DEPLOY_LOCK:
+            current = _COMMON_RUNTIME_DEPLOY_RUNS.get(run_id)
+            if not current:
+                return
+            running_step = next(
+                (step for step in current["steps"] if step["status"] == "RUNNING"),
+                None,
+            )
+            if running_step:
+                running_step.update(status="FAILED", detail=message)
+            current.update(status="FAILED", error=message, finishedEpoch=time.time())
+
+
+def start_common_runtime_deployment(follow_up_department_code: str = "") -> dict[str, Any]:
+    follow_up = str(follow_up_department_code or "").strip().lower()
+    if follow_up and (
+        not DEPT_CODE_RE.fullmatch(follow_up)
+        or not (DEPT_DIR / f"{follow_up}.yaml").exists()
+    ):
+        raise FileNotFoundError(follow_up)
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    if not project:
+        raise ValueError("공통 환경의 GCP 프로젝트가 설정되어 있지 않습니다.")
+    with _COMMON_RUNTIME_DEPLOY_LOCK:
+        _cleanup_common_runtime_deployments()
+        active = next(
+            (
+                copy.deepcopy(run)
+                for run in _COMMON_RUNTIME_DEPLOY_RUNS.values()
+                if run["status"] == "RUNNING"
+            ),
+            None,
+        )
+        if active:
+            if follow_up:
+                _COMMON_RUNTIME_DEPLOY_RUNS[active["runId"]]["followUpDepartmentCode"] = follow_up
+            raise FileExistsError(active["runId"])
+        run_id = uuid.uuid4().hex
+        run = {
+            "runId": run_id,
+            "status": "RUNNING",
+            "project": project,
+            "region": region,
+            "followUpDepartmentCode": follow_up,
+            "serviceNames": ["rag-parser", "rag-sync", "rag-daily-sync"],
+            "services": [],
+            "steps": [
+                {"key": "config", "label": "설정 확인", "status": "RUNNING", "detail": "학과 라우팅 및 공통 설정 확인 중"},
+                {"key": "images", "label": "공통 이미지", "status": "PENDING", "detail": "Parser / Sync 이미지 빌드 대기"},
+                {"key": "cloudRun", "label": "Parser / Sync", "status": "PENDING", "detail": "Cloud Run 배포 대기"},
+                {"key": "workflow", "label": "Workflow", "status": "PENDING", "detail": "rag-daily-sync 배포 대기"},
+                {"key": "scheduler", "label": "Scheduler", "status": "PENDING", "detail": "정기 동기화 작업 등록 대기"},
+                {"key": "ready", "label": "Ready 확인", "status": "PENDING", "detail": "배포 리소스 확인 대기"},
+            ],
+            "logs": [],
+            "createdEpoch": time.time(),
+        }
+        _COMMON_RUNTIME_DEPLOY_RUNS[run_id] = run
+    threading.Thread(
+        target=_execute_common_runtime_deployment,
+        args=(run_id,),
+        name=f"common-runtime-deploy-{run_id[:8]}",
+        daemon=True,
+    ).start()
+    return copy.deepcopy(run)
 
 
 def _cleanup_mcp_deployments() -> None:
@@ -2560,7 +2988,7 @@ def _service_account_access_token(
     )
     token = str(body.get("accessToken") or "") if isinstance(body, dict) else ""
     if status != 200 or not token:
-        return token, service_account, latency, f"서비스 계정 가장 토큰 HTTP {status or 'timeout'}"
+        return token, service_account, latency, f"서비스 계정 임시 접근 토큰 HTTP {status or 'timeout'}"
     return token, service_account, latency, ""
 
 
@@ -2850,7 +3278,19 @@ def _deploy_and_runtime_status(
                 marker in missing_detail
                 for marker in ("not found", "not_found", "does not exist")
             )
-            if confirmed_missing and service.startswith(f"rag-mcp-{code}-"):
+            if confirmed_missing and service in {"rag-parser", "rag-sync"}:
+                checks.append(
+                    _check(
+                        "DEPLOY",
+                        label,
+                        "WARN",
+                        "공통 Cloud Run 서비스가 아직 배포되지 않았습니다.",
+                        action="공통 런타임 배포",
+                        actionType="COMMON_RUNTIME_DEPLOY",
+                        departmentCode=code,
+                    )
+                )
+            elif confirmed_missing and service.startswith(f"rag-mcp-{code}-"):
                 checks.append(
                     _check(
                         "DEPLOY",
@@ -2877,6 +3317,15 @@ def _deploy_and_runtime_status(
         status = "OK" if ready and revision_ok else "FAIL"
         detail = latest_ready or str(ready_condition.get("message") or "Ready 아님")
         url = str(status_data.get("url") or "")
+        action_extra = (
+            {
+                "action": "공통 런타임 다시 배포",
+                "actionType": "COMMON_RUNTIME_DEPLOY",
+                "departmentCode": code,
+            }
+            if status != "OK" and service in {"rag-parser", "rag-sync"}
+            else {}
+        )
         checks.append(
             _check(
                 "DEPLOY",
@@ -2885,6 +3334,7 @@ def _deploy_and_runtime_status(
                 detail,
                 serviceName=service,
                 url=url,
+                **action_extra,
             )
         )
         if ready and url:
@@ -3152,7 +3602,17 @@ def _list_sync_execution_rows(
         timeout=20,
     )
     if not ok or not isinstance(rows, list):
-        raise RuntimeError(str(rows)[:300] or "동기화 실행 이력을 조회하지 못했습니다.")
+        message = str(rows)[:400]
+        normalized = message.lower()
+        if (
+            "not_found" in normalized
+            and SYNC_WORKFLOW_NAME in normalized
+            and ("does not exist" in normalized or "not found" in normalized)
+        ):
+            raise WorkflowNotFoundError(
+                f"{SYNC_WORKFLOW_NAME} 워크플로우가 아직 배포되지 않았습니다."
+            )
+        raise RuntimeError(message[:300] or "동기화 실행 이력을 조회하지 못했습니다.")
     return [row for row in rows if isinstance(row, dict)]
 
 
@@ -3517,6 +3977,68 @@ def mcp_deployments(code: str = "", status: str = "") -> JSONResponse:
         ]
     rows.sort(key=lambda item: item.get("createdEpoch", 0), reverse=True)
     return JSONResponse({"runs": rows})
+
+
+@app.get("/api/v1/common-runtime-deployments")
+def common_runtime_deployments(status: str = "") -> JSONResponse:
+    with _COMMON_RUNTIME_DEPLOY_LOCK:
+        _cleanup_common_runtime_deployments()
+        rows = [
+            copy.deepcopy(run)
+            for run in _COMMON_RUNTIME_DEPLOY_RUNS.values()
+            if not status or run["status"] == status.upper()
+        ]
+    rows.sort(key=lambda item: item.get("createdEpoch", 0), reverse=True)
+    return JSONResponse({"runs": rows})
+
+
+@app.get("/api/v1/common-runtime-deployments/{run_id}")
+def common_runtime_deployment(run_id: str) -> JSONResponse:
+    with _COMMON_RUNTIME_DEPLOY_LOCK:
+        _cleanup_common_runtime_deployments()
+        run = _COMMON_RUNTIME_DEPLOY_RUNS.get(run_id)
+        if not run:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "COMMON_RUNTIME_DEPLOYMENT_NOT_FOUND",
+                        "message": "공통 런타임 배포 작업을 찾을 수 없습니다.",
+                    }
+                },
+                status_code=404,
+            )
+        return JSONResponse(copy.deepcopy(run))
+
+
+@app.post("/api/v1/common-runtime-deployments")
+def create_common_runtime_deployment(
+    request: Request, followUpDepartmentCode: str = ""
+) -> JSONResponse:
+    _require_local_session(request)
+    try:
+        run = start_common_runtime_deployment(followUpDepartmentCode)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": {"code": "NOT_FOUND", "message": "후속 MCP 배포 대상 학과를 찾을 수 없습니다."}},
+            status_code=404,
+        )
+    except FileExistsError as exc:
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "COMMON_RUNTIME_DEPLOYMENT_RUNNING",
+                    "message": "공통 런타임 배포가 이미 진행 중입니다.",
+                    "runId": str(exc),
+                }
+            },
+            status_code=409,
+        )
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError, yaml.YAMLError) as exc:
+        return JSONResponse(
+            {"error": {"code": "COMMON_RUNTIME_DEPLOYMENT_INVALID", "message": str(exc)[:400]}},
+            status_code=422,
+        )
+    return JSONResponse(run, status_code=202)
 
 
 @app.get("/api/v1/mcp-deployments/{run_id}")
@@ -4319,6 +4841,17 @@ def sync_runs(limit: int = 20) -> JSONResponse:
         token = _sync_access_token()
         records = _sync_execution_records(common, rows, token)
         departments, _drive_owners = _sync_department_targets()
+    except WorkflowNotFoundError as exc:
+        departments, _drive_owners = _sync_department_targets()
+        return JSONResponse(
+            {
+                "runs": [],
+                "departments": list(departments.values()),
+                "workflow": SYNC_WORKFLOW_NAME,
+                "workflowStatus": "NOT_FOUND",
+                "message": str(exc),
+            }
+        )
     except (FileNotFoundError, OSError, RuntimeError, TypeError, UnicodeError, yaml.YAMLError) as exc:
         return JSONResponse(
             {"error": {"code": "SYNC_RUN_LOOKUP_FAILED", "message": str(exc)[:400]}},
@@ -4329,6 +4862,7 @@ def sync_runs(limit: int = 20) -> JSONResponse:
             "runs": records,
             "departments": list(departments.values()),
             "workflow": SYNC_WORKFLOW_NAME,
+            "workflowStatus": "READY",
         }
     )
 
@@ -4357,6 +4891,11 @@ async def start_sync_run(request: Request) -> JSONResponse:
         return JSONResponse(
             {"error": {"code": "SYNC_ALREADY_RUNNING", "message": str(exc)}},
             status_code=409,
+        )
+    except WorkflowNotFoundError as exc:
+        return JSONResponse(
+            {"error": {"code": "SYNC_WORKFLOW_NOT_FOUND", "message": str(exc)}},
+            status_code=412,
         )
     except ValueError as exc:
         return JSONResponse(

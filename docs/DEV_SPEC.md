@@ -177,13 +177,13 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 - Firestore는 Native 모드로만 만들며 위치는 `GCP_REGION`을 그대로 쓴다(생성 후
   변경 불가). `(default)` 데이터베이스는 Datastore 모드로 굳으면 되돌릴 수 없어
   이름으로 거부한다. 삭제는 GUI에서 제공하지 않는다
-- 실행 환경 화면의 `Drive 확인 서비스 계정`은 `상태 확인`으로 실제 가장 토큰을
-  받아본다. 새 프로젝트는 Compute Engine API가 꺼져 있어 기본 SA 자체가 없거나
-  (`computeApi`), SA는 있어도 현재 계정에 가장 권한이 없어(`tokenCreator`)
+- 실행 환경 화면의 `Drive 확인 서비스 계정`은 실제 임시 접근 토큰을 발급해
+  연결 상태를 확인한다. 새 프로젝트는 Compute Engine API가 꺼져 있어 기본 SA 자체가 없거나
+  (`computeApi`), SA는 있어도 현재 계정에 서비스 계정 사용 권한이 없어(`tokenCreator`)
   `HTTP 404`로 막힌다. 둘은 조치가 달라 구분해서 알린다
 - 조치도 계획 → 확인 → 실행이다. 계획에 켤 API와 부여할 역할
   (`roles/iam.serviceAccountTokenCreator`)을 먼저 보여주고, 확인을 눌러야 적용한다.
-  적용 뒤에는 같은 가장 토큰 발급으로 재확인한다 — 명령 성공만 믿지 않는다
+  적용 뒤에는 같은 임시 접근 토큰 발급으로 재확인한다 — 명령 성공만 믿지 않는다
 - 학과 추가·수정 시 실제 Vertex RAG 코퍼스와 같은 리전의 보호된 GCS 버킷을
   목록에서 선택하거나 웹 콘솔에서 새로 생성한다
 - 신규 학과 코드는 기존 `config/departments/{code}.yaml`과 중복될 수 없으며 입력 중
@@ -198,8 +198,11 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 - `hwpOriginal`과 `source`는 서로 달라야 한다. 학생 분리 시 두 코퍼스도 달라야 한다
 - 생성 후 단일/학생 분리 모드 전환은 일반 설정 수정에서 막는다. 코퍼스 재색인과 기존
   MCP 서비스 정리가 필요한 별도 마이그레이션으로 처리한다
-- 학과 생성이 끝나면 대시보드로 이동한다. MCP 배포는 이어서 뜨는 확인 창과
-  상태 상세의 `미배포` 항목에서 시작할 수 있다.
+- 학과 생성이 끝나면 대시보드로 이동하고 `deploy.ps1 -SkipMcp`로 공통 런타임
+  (Parser, Sync, Workflow, Scheduler)을 먼저 배포한다. 공통 런타임이 완료된 뒤
+  MCP 배포 확인 창을 연다. Parser/Sync가 없거나 Ready가 아니면 상태 상세의
+  `공통 런타임 배포` 버튼으로 같은 작업을 수동 실행할 수 있다.
+  MCP 배포는 이어서 뜨는 확인 창과 상태 상세의 `미배포` 항목에서 시작할 수 있다.
   단일 모드는 기본 MCP 1개, 학생 분리 모드는 2개를 배포하며 설정·이미지·Cloud Run·
   Ready·Health 단계를 백그라운드 작업으로 표시한다. 출력의 MCP 키와 토큰은 제거한다
 - 버킷 선택 시 기존 사용 학과를 표시한다. 공유드라이브 ID가 다른 학과와 겹치면
@@ -278,7 +281,7 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 | `POST /api/v1/gcloud-auth/login` | 시스템 브라우저에서 gcloud 사용자 로그인 유도 |
 | `GET /api/v1/projects/search` | 프로젝트 부분 일치 검색(Resource Manager REST). 전량 조회를 대체한다 |
 | `GET /api/v1/common-config/resources` | 선택 프로젝트의 Artifact Registry·Firestore 조회 |
-| `GET /api/v1/drive-service-account/status` | Drive 확인 SA 를 실제 가장 토큰까지 받아보고 판정 |
+| `GET /api/v1/drive-service-account/status` | Drive 확인 SA의 임시 접근 토큰을 발급해 연결 상태 판정 |
 | `POST /api/v1/drive-service-account/repair-plans` | 켤 API·부여할 역할만 계산(외부 변경 없음) |
 | `POST /api/v1/drive-service-account/repairs` | 확인된 계획 적용 후 같은 방법으로 재확인(계획 1회용) |
 | `GET /api/v1/drive-service-account/repairs/{runId}` | 조치 진행 상태 |
@@ -294,6 +297,8 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 | `POST /api/v1/departments/{code}/mcp-keys/{audience}` | 명시적으로 선택한 MCP 키 1개 복사 |
 | `POST /api/v1/departments/{code}/mcp-deployments` | 학과별 MCP Cloud Run 백그라운드 배포 시작 |
 | `GET /api/v1/mcp-deployments[/{runId}]` | 진행 중·완료된 MCP 배포 단계와 정제 로그 조회 |
+| `POST /api/v1/common-runtime-deployments` | Parser·Sync·Workflow·Scheduler 백그라운드 배포 시작 |
+| `GET /api/v1/common-runtime-deployments[/{runId}]` | 공통 런타임 배포 단계와 정제 로그 조회 |
 | `POST /api/v1/corpus-query` | 선택한 학과·범위 코퍼스 검색. `generate=true`면 같은 gcloud 토큰으로 Gemini 답변 |
 | `POST /api/v1/departments/{code}/preview` | 수정안 검증과 preview |
 | `PUT /api/v1/departments/{code}` | revision 확인 후 수정, 기존 MCP 키 보존. Drive 중복은 확인 전 `409 DRIVE_ID_CONFLICT` |

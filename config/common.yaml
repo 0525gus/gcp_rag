@@ -1,4 +1,4 @@
-GCP_PROJECT_ID: constant-cubist-506002-h7
+GCP_PROJECT_ID: tuk-mcp-rag
 GCP_REGION: asia-northeast3
 ARTIFACT_REPO: rag-mcp
 FIRESTORE_DATABASE: rag-sync-state

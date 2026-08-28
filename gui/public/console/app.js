@@ -35,11 +35,14 @@
     projectComboRows: [],
     projectComboActive: -1,
     driveSaStatus: null,
+    driveSaChecking: false,
     driveSaPlan: null,
     driveSaPollTimer: null,
     mcpDeployment: null,
     mcpDeploymentCode: "",
-    mcpDeploymentPollTimer: null,
+    mcpDeploymentPollTimers: new Map(),
+    commonRuntimeDeployment: null,
+    commonRuntimeDeploymentPollTimer: null,
     mcpServers: new Map(),
     mcpServerRequests: new Map(),
     driveConflicts: [],
@@ -50,6 +53,7 @@
     corpusQueryPending: false,
     syncRuns: [],
     syncTargets: [],
+    syncWorkflowStatus: "READY",
     syncMode: "delta",
     syncStartPending: false,
     syncPollTimer: null,
@@ -122,7 +126,10 @@
     $$(".view").forEach((item) => item.classList.toggle("active", item.id === `${view}View`));
     $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
     document.body.classList.remove("menu-open");
-    if (view === "environment") loadEnvironment();
+    if (view === "environment") {
+      loadEnvironment();
+      refreshDriveSaStatusInline();
+    }
     if (view === "sync") loadSyncRuns();
     if (view === "corpus") {
       renderCorpusDepartmentOptions();
@@ -490,8 +497,11 @@
       button.disabled = state.syncStartPending;
     });
     const start = $("#startManualSync");
-    start.disabled = !target || state.syncStartPending;
-    start.textContent = state.syncStartPending
+    const workflowMissing = state.syncWorkflowStatus === "NOT_FOUND";
+    start.disabled = !target || state.syncStartPending || workflowMissing;
+    start.textContent = workflowMissing
+      ? "워크플로우 배포 필요"
+      : state.syncStartPending
       ? "Workflow 시작 중…"
       : state.syncMode === "backfill" ? "전체 다시 적재" : "변경분 동기화 실행";
   }
@@ -548,6 +558,11 @@
   }
 
   function renderSyncHistory() {
+    if (state.syncWorkflowStatus === "NOT_FOUND") {
+      $("#syncHistoryMeta").textContent = "워크플로우 미생성";
+      $("#syncHistoryRows").innerHTML = '<tr><td colspan="8" class="sync-history-empty">rag-daily-sync 워크플로우가 아직 배포되지 않아 실행 이력이 없습니다.</td></tr>';
+      return;
+    }
     const rows = state.syncRuns;
     $("#syncHistoryMeta").textContent = `${rows.length}개 실행 · ${rows.filter((item) => item.state === "ACTIVE").length}개 진행 중`;
     $("#syncHistoryRows").innerHTML = rows.length ? rows.map((run) => {
@@ -584,7 +599,15 @@
       if (requestId !== state.syncRequest) return;
       state.syncRuns = data.runs || [];
       state.syncTargets = data.departments || [];
+      state.syncWorkflowStatus = data.workflowStatus || "READY";
       renderSyncManagement();
+      if (state.syncWorkflowStatus === "NOT_FOUND" && !quiet) {
+        toast(
+          "동기화 워크플로우가 없습니다",
+          data.message || "rag-daily-sync 워크플로우를 먼저 배포해 주세요.",
+          "warn",
+        );
+      }
       if (state.syncRuns.some((item) => item.state === "ACTIVE")) {
         state.syncPollTimer = window.setTimeout(() => loadSyncRuns(true), 2000);
       }
@@ -663,28 +686,53 @@
 
   function renderEnvironment(env) {
     const projectMatch = env.gcloudProject && env.gcloudProject === env.configuredProject;
+    const driveStatus = state.driveSaStatus;
+    const driveDetail = state.driveSaChecking
+      ? "서비스 계정 연결 상태 확인 중…"
+      : driveStatus?.status === "OK"
+        ? "서비스 계정 연결 정상 · 공유 드라이브 연결 가능"
+        : driveStatus?.detail
+          ? `확인 필요 · ${driveStatus.detail}`
+          : "상태 확인 전 · 공유 드라이브 연결에 사용";
+    const driveTone = state.driveSaChecking
+      ? "checking"
+      : driveStatus?.status === "OK" ? "ok" : (driveStatus ? "fail" : "");
     const cards = [
       { icon: "⌂", label: "저장소", value: env.repository, detail: `${env.departmentCount}개 학과 설정` },
       { icon: "G", label: "GCP 프로젝트", value: env.configuredProject || "미설정", detail: env.region },
-      { icon: "SA", label: "Drive 확인 서비스 계정", value: env.serviceAccount || "확인 필요", detail: "공유 드라이브 연결에 사용", copy: env.serviceAccount, check: true },
+      { icon: "SA", label: "Drive 확인 서비스 계정", value: env.serviceAccount || "확인 필요", detail: driveDetail, copy: env.serviceAccount, check: true, tone: driveTone },
       { icon: "›_", label: "gcloud", value: env.gcloudInstalled ? (env.gcloudAuthenticated ? "로그인됨" : "로그인 필요") : "설치되지 않음", detail: env.gcloudAccount || "활성 계정 없음" },
       { icon: "Py", label: "Python", value: env.pythonVersion, detail: "로컬 API 런타임" },
       { icon: "↔", label: "프로젝트 일치", value: projectMatch ? "일치" : "확인 필요", detail: env.gcloudProject || "gcloud 프로젝트 없음" },
       { icon: "●", label: "서버 경계", value: "127.0.0.1", detail: "외부 네트워크 비공개" },
     ];
     $("#environmentGrid").innerHTML = cards.map((card) => `
-      <article class="environment-card">
+      <article class="environment-card${card.tone ? ` status-${escapeHtml(card.tone)}` : ""}">
         <span class="env-icon">${escapeHtml(card.icon)}</span>
         <div>
           <span>${escapeHtml(card.label)}</span>
           <div class="environment-value-row">
             <b>${escapeHtml(card.value)}</b>
             ${card.copy ? `<button type="button" class="copy-value-button" data-copy-value="${escapeHtml(card.copy)}" aria-label="서비스 계정 복사">복사</button>` : ""}
-            ${card.check ? `<button type="button" class="copy-value-button" id="checkDriveSa">상태 확인</button>` : ""}
+            ${card.check ? `<button type="button" class="copy-value-button" id="checkDriveSa" ${state.driveSaChecking ? "disabled" : ""}>${state.driveSaChecking ? "확인 중…" : (driveStatus ? "다시 확인" : "상태 확인")}</button>` : ""}
           </div>
           <small>${escapeHtml(card.detail)}</small>
         </div>
       </article>`).join("");
+  }
+
+  async function refreshDriveSaStatusInline() {
+    if (state.driveSaChecking) return;
+    state.driveSaChecking = true;
+    if (state.environment) renderEnvironment(state.environment);
+    try {
+      state.driveSaStatus = await api("/api/v1/drive-service-account/status");
+    } catch (error) {
+      state.driveSaStatus = { status: "ERROR", detail: error.message, issues: [] };
+    } finally {
+      state.driveSaChecking = false;
+      if (state.environment) renderEnvironment(state.environment);
+    }
   }
 
   const DRIVE_SA_ISSUE_LABELS = {
@@ -693,7 +741,7 @@
     computeApi: "Compute Engine API 가 꺼져 있어 기본 서비스 계정이 없습니다",
     iamCredentialsApi: "IAM Credentials API 가 꺼져 있습니다",
     serviceAccountMissing: "기본 Compute 서비스 계정을 찾지 못했습니다",
-    tokenCreator: "현재 계정에 이 서비스 계정을 가장할 권한이 없습니다",
+    tokenCreator: "현재 계정에 이 서비스 계정으로 연결할 권한이 없습니다",
   };
 
   function openDriveSaModal() {
@@ -755,7 +803,7 @@
       ${verified ? `<h5 class="drive-sa-heading">조치 후 재확인</h5>
         <ul class="setup-provision-list">
           <li data-tone="${verified === "OK" ? "ok" : "fail"}">
-            <b>${escapeHtml(verified === "OK" ? "가장 토큰 발급 확인됨" : "여전히 확인 필요")}</b>
+            <b>${escapeHtml(verified === "OK" ? "서비스 계정 연결 확인됨" : "여전히 확인 필요")}</b>
             <small>${escapeHtml(plan.verification.detail || "")}</small>
           </li>
         </ul>` : ""}`;
@@ -763,14 +811,16 @@
 
   async function checkDriveServiceAccount() {
     const button = $("#checkDriveSa");
+    state.driveSaChecking = true;
     if (button) { button.disabled = true; button.textContent = "확인 중…"; }
     openDriveSaModal();
-    $("#driveSaBody").innerHTML = '<p class="drive-sa-loading">서비스 계정 가장 토큰을 발급해 보는 중입니다…</p>';
+    $("#driveSaBody").innerHTML = '<p class="drive-sa-loading">서비스 계정 연결을 확인하는 중입니다…</p>';
     $("#driveSaError").classList.add("hidden");
     $("#confirmDriveSaRepair").classList.add("hidden");
     try {
       const status = await api("/api/v1/drive-service-account/status");
       state.driveSaStatus = status;
+      if (state.environment) renderEnvironment(state.environment);
       renderDriveSaStatus(status);
       if (status.status !== "OK") {
         // 자동 조치가 가능한 문제일 때만 확인 버튼을 연다.
@@ -783,11 +833,13 @@
         }
       }
     } catch (error) {
+      state.driveSaStatus = { status: "ERROR", detail: error.message, issues: [] };
       const banner = $("#driveSaError");
       banner.textContent = error.message;
       banner.classList.remove("hidden");
     } finally {
-      if (button) { button.disabled = false; button.textContent = "상태 확인"; }
+      state.driveSaChecking = false;
+      if (state.environment) renderEnvironment(state.environment);
     }
   }
 
@@ -831,6 +883,7 @@
         ok ? "ok" : "fail",
       );
       await loadEnvironment();
+      await refreshDriveSaStatusInline();
     } catch (error) {
       const banner = $("#driveSaError");
       banner.textContent = error.message;
@@ -1136,12 +1189,17 @@
   }
 
   function renderCommonProvisionPlan(plan) {
-    const services = (plan.services || []).map((item) => {
+    const serviceItems = plan.services || [];
+    const services = serviceItems.map((item, index) => {
       const label = item.status
         ? { PENDING: "대기 중", RUNNING: "활성화 중", COMPLETE: "활성화 완료", SKIPPED: "이미 켜짐", FAILED: "실패" }[item.status] || item.status
         : (item.known ? (item.enabled ? "이미 켜져 있음" : "켜야 함") : "확인 필요");
       const tone = item.status === "FAILED" ? "fail" : (item.status === "COMPLETE" || item.enabled ? "ok" : "warn");
-      return `<li data-tone="${tone}"><b>${escapeHtml(item.name)}</b><span>${escapeHtml(label)}</span>${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}</li>`;
+      return `<li data-tone="${tone}" data-status="${escapeHtml(item.status || "PLANNED")}" class="setup-service-item">
+        <i class="setup-service-order">${index + 1}</i>
+        <b>${escapeHtml(item.label || item.name)}</b><span>${escapeHtml(label)}</span>
+        <small>${escapeHtml(item.name)}${item.detail ? ` · ${escapeHtml(item.detail)}` : ""}</small>
+      </li>`;
     }).join("");
     const resources = (plan.resources || []).map((item) => {
       const label = item.status
@@ -1150,10 +1208,27 @@
       const tone = item.status === "FAILED" ? "fail" : (item.status === "COMPLETE" || item.exists ? "ok" : "warn");
       return `<li data-tone="${tone}"><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.displayName)} · ${escapeHtml(label)}</span>${item.warning && !item.exists ? `<small class="warn">${escapeHtml(item.warning)}</small>` : ""}${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}</li>`;
     }).join("");
+    const serviceAccount = plan.serviceAccount || {};
+    const saStatus = serviceAccount.status
+      ? { PENDING: "대기 중", RUNNING: "확인·조치 중", COMPLETE: "준비 완료", SKIPPED: "이미 정상", FAILED: "실패" }[serviceAccount.status] || serviceAccount.status
+      : (serviceAccount.ready ? "설정됨" : "설정 필요");
+    const saTone = serviceAccount.status === "FAILED"
+      ? "fail"
+      : (["COMPLETE", "SKIPPED"].includes(serviceAccount.status) || serviceAccount.ready ? "ok" : "warn");
+    const saTarget = serviceAccount.serviceAccount || serviceAccount.role || "Compute 기본 서비스 계정";
+    const saItem = serviceAccount.label ? `<li data-tone="${saTone}" data-status="${escapeHtml(serviceAccount.status || "PLANNED")}">
+      <b>${escapeHtml(serviceAccount.label)}</b><span>${escapeHtml(saStatus)}</span>
+      <small>${escapeHtml(saTarget)}${serviceAccount.account ? ` · ${escapeHtml(serviceAccount.account)}` : ""}</small>
+      ${serviceAccount.detail ? `<small>${escapeHtml(serviceAccount.detail)}</small>` : ""}
+    </li>` : "";
+    const completed = serviceItems.filter((item) => item.status === "COMPLETE" || item.status === "SKIPPED" || (!item.status && item.enabled)).length;
+    const progress = serviceItems.length ? `${completed} / ${serviceItems.length}개 서비스 준비됨` : "서비스 확인 대기 중";
     $("#setupProvisionPlanBody").innerHTML = `
       <p class="setup-provision-scope">${escapeHtml(plan.projectId || "")} · ${escapeHtml(plan.region || "")}</p>
-      <h5>켤 API</h5><ul class="setup-provision-list">${services}</ul>
-      <h5>만들 리소스</h5><ul class="setup-provision-list">${resources}</ul>`;
+      <p class="setup-provision-progress">${escapeHtml(progress)}</p>
+      <h5>필수 API 상태</h5><ul class="setup-provision-list setup-service-list">${services}</ul>
+      <h5>서비스 계정 정책</h5><ul class="setup-provision-list">${saItem}</ul>
+      <h5>공통 리소스 상태</h5><ul class="setup-provision-list">${resources}</ul>`;
   }
 
   async function planCommonResources() {
@@ -1162,6 +1237,7 @@
     button.disabled = true;
     button.textContent = "확인 중…";
     try {
+      $("#setupProvisionTitle").textContent = "다음 작업을 진행합니다";
       const plan = await api("/api/v1/common-config/resource-plans", {
         method: "POST",
         body: {
@@ -1193,12 +1269,17 @@
         state.commonProvisionPollTimer = window.setTimeout(() => pollCommonProvisionRun(runId), 1500);
         return;
       }
-      const failed = (run.resources || []).filter((item) => item.status === "FAILED").length;
+      const failed = [
+        ...(run.services || []),
+        ...(run.resources || []),
+        ...(run.serviceAccount ? [run.serviceAccount] : []),
+      ]
+        .filter((item) => item.status === "FAILED").length;
       $("#confirmCommonProvision").classList.add("hidden");
       $("#cancelCommonProvision").textContent = "닫기";
       $("#cancelCommonProvision").classList.remove("hidden");
       toast(
-        failed ? "일부 공통 리소스 생성 실패" : "공통 리소스를 준비했습니다",
+        failed ? "일부 필수 항목 준비 실패" : "공통 환경을 준비했습니다",
         failed ? "실패 항목을 확인한 뒤 다시 시도해 주세요." : "이제 설정을 저장할 수 있습니다.",
         failed ? "fail" : "ok",
       );
@@ -1365,9 +1446,44 @@
     clearSetupErrors();
     const button = $("#createCommonConfig");
     button.disabled = true;
-    button.textContent = "설정 저장 중…";
+    button.textContent = "필수 API 확인 중…";
     try {
       const payload = commonSetupPayload();
+      const plan = await api("/api/v1/common-config/resource-plans", {
+        method: "POST",
+        body: payload,
+      });
+      state.commonResourcePlan = plan;
+      $("#setupProvisionTitle").textContent = "필수 서비스 준비 상태";
+      renderCommonProvisionPlan(plan);
+      $("#setupProvisionPlan").classList.remove("hidden");
+      $("#setupProvisionCallout").classList.add("hidden");
+      $("#confirmCommonProvision").classList.add("hidden");
+      $("#cancelCommonProvision").classList.add("hidden");
+
+      button.textContent = "필수 API 준비 중…";
+      let run = await api("/api/v1/common-config/resource-provisioning", {
+        method: "POST",
+        body: { planId: plan.planId },
+      });
+      renderCommonProvisionPlan(run);
+      while (run.status === "RUNNING") {
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        run = await api(`/api/v1/common-config/resource-provisioning/${run.runId}`);
+        renderCommonProvisionPlan(run);
+      }
+      const failed = [
+        ...(run.services || []),
+        ...(run.resources || []),
+        ...(run.serviceAccount ? [run.serviceAccount] : []),
+      ]
+        .filter((item) => item.status === "FAILED");
+      if (failed.length) {
+        const first = failed[0];
+        throw new Error(`${first.label || first.name || first.displayName}: ${first.detail || "준비하지 못했습니다."}`);
+      }
+
+      button.textContent = "설정 저장 중…";
       const result = await api("/api/v1/common-config", { method: "POST", body: payload });
       rememberProject(payload.projectId, payload.projectId);
       $("#setupGate").classList.add("hidden");
@@ -1485,7 +1601,7 @@
         return `<section class="check-layer"><h3>${label.toUpperCase()}</h3><div class="check-list">${checks.map((item) => `
           <article class="check-row" data-status="${escapeHtml(item.status)}">
             <span class="check-dot">${item.status === "OK" ? "✓" : item.status === "FAIL" ? "×" : item.status === "WARN" ? "!" : "–"}</span>
-            <div class="check-main"><div><b>${escapeHtml(item.name)}</b><small>${item.latencyMs ? `${item.latencyMs}ms` : statusLabels[item.status]}</small></div><p>${escapeHtml(item.detail)}</p>${item.actionType === "MCP_DEPLOY" ? `<button type="button" class="check-deploy-button" data-deploy-mcp="${escapeHtml(item.departmentCode || code)}">MCP 배포</button>` : item.action ? `<div class="check-action">${escapeHtml(item.action)}</div>` : ""}</div>
+            <div class="check-main"><div><b>${escapeHtml(item.name)}</b><small>${item.latencyMs ? `${item.latencyMs}ms` : statusLabels[item.status]}</small></div><p>${escapeHtml(item.detail)}</p>${item.actionType === "MCP_DEPLOY" ? `<button type="button" class="check-deploy-button" data-deploy-mcp="${escapeHtml(item.departmentCode || code)}">MCP 배포</button>` : item.actionType === "COMMON_RUNTIME_DEPLOY" ? `<button type="button" class="check-deploy-button" data-deploy-common-runtime>공통 런타임 배포</button>` : item.action ? `<div class="check-action">${escapeHtml(item.action)}</div>` : ""}</div>
           </article>`).join("")}</div></section>`;
       }).join("");
     }
@@ -1653,6 +1769,57 @@
     return "○";
   }
 
+  function renderMcpDeploymentFloat(run) {
+    if (!run?.runId) return;
+    const elementId = `mcpDeploymentFloat-${String(run.runId).replace(/[^a-zA-Z0-9_-]/g, "")}`;
+    let floating = document.getElementById(elementId);
+    const running = run?.status === "RUNNING";
+    if (!running) {
+      floating?.remove();
+      return;
+    }
+    if (!floating) {
+      floating = document.createElement("button");
+      floating.type = "button";
+      floating.id = elementId;
+      floating.className = "mcp-deployment-float";
+      floating.dataset.mcpDeploymentRun = run.runId;
+      floating.setAttribute("aria-live", "polite");
+      floating.innerHTML = `<span class="mcp-float-icon" aria-hidden="true"><i></i></span>
+        <span class="mcp-float-copy">
+          <b class="deployment-float-title"></b>
+          <small class="deployment-float-detail"></small>
+          <span class="mcp-float-track"><i class="deployment-float-progress"></i></span>
+        </span>
+        <strong class="deployment-float-percent">0%</strong>`;
+      $("#deploymentFloatStack").append(floating);
+    }
+    const modalOpen = $("#mcpDeploymentModal").classList.contains("open")
+      && state.mcpDeployment?.runId === run.runId;
+    const steps = run?.steps || [];
+    const completeCount = steps.filter((step) => step.status === "COMPLETE").length;
+    const runningStep = steps.find((step) => step.status === "RUNNING");
+    const progress = steps.length
+      ? Math.min(99, Math.round(((completeCount + (runningStep ? 0.35 : 0)) / steps.length) * 100))
+      : 0;
+    floating.classList.toggle("hidden", modalOpen);
+    floating.setAttribute("aria-hidden", String(modalOpen));
+    floating.setAttribute("aria-label", `${run.name || run.code || "학과"} MCP 배포 진행 창 열기`);
+    $(".deployment-float-title", floating).textContent = `${run.name || run.code || "학과"} MCP 배포 중`;
+    $(".deployment-float-detail", floating).textContent = runningStep
+      ? `${runningStep.label} · ${runningStep.detail || "진행 중"}`
+      : `${completeCount} / ${steps.length}단계 완료`;
+    $(".deployment-float-progress", floating).style.width = `${progress}%`;
+    $(".deployment-float-percent", floating).textContent = `${progress}%`;
+  }
+
+  function showMcpDeploymentModal(focusStart = false) {
+    $("#mcpDeploymentModal").classList.add("open");
+    $("#mcpDeploymentModal").setAttribute("aria-hidden", "false");
+    if (state.mcpDeployment?.runId) renderMcpDeploymentFloat(state.mcpDeployment);
+    if (focusStart) window.setTimeout(() => $("#startMcpDeployment").focus(), 180);
+  }
+
   function renderMcpDeployment(run) {
     state.mcpDeployment = run;
     const running = run.status === "RUNNING";
@@ -1681,6 +1848,7 @@
     start.classList.toggle("hidden", running);
     start.textContent = complete ? "동기화 관리로 이동" : failed ? "다시 배포" : "지금 MCP 배포";
     $("#closeMcpDeployment").textContent = running || complete || failed ? "닫기" : "나중에 배포";
+    renderMcpDeploymentFloat(run);
   }
 
   function openMcpDeploymentPrompt(code) {
@@ -1702,25 +1870,26 @@
       ],
       logs: [],
     });
-    $("#mcpDeploymentModal").classList.add("open");
-    $("#mcpDeploymentModal").setAttribute("aria-hidden", "false");
-    window.setTimeout(() => $("#startMcpDeployment").focus(), 180);
+    showMcpDeploymentModal(true);
   }
 
   function closeMcpDeployment() {
     $("#mcpDeploymentModal").classList.remove("open");
     $("#mcpDeploymentModal").setAttribute("aria-hidden", "true");
+    renderMcpDeploymentFloat(state.mcpDeployment);
   }
 
   async function pollMcpDeployment(runId) {
-    window.clearTimeout(state.mcpDeploymentPollTimer);
+    window.clearTimeout(state.mcpDeploymentPollTimers.get(runId));
     try {
       const run = await api(`/api/v1/mcp-deployments/${runId}`);
-      renderMcpDeployment(run);
+      if (state.mcpDeployment?.runId === runId) renderMcpDeployment(run);
+      else renderMcpDeploymentFloat(run);
       if (run.status === "RUNNING") {
-        state.mcpDeploymentPollTimer = window.setTimeout(() => pollMcpDeployment(runId), 1100);
+        state.mcpDeploymentPollTimers.set(runId, window.setTimeout(() => pollMcpDeployment(runId), 1100));
         return;
       }
+      state.mcpDeploymentPollTimers.delete(runId);
       state.mcpServers.delete(run.code);
       await loadDepartments();
       if (state.selectedCode === run.code) {
@@ -1728,9 +1897,12 @@
       }
       toast(run.status === "COMPLETED" ? "MCP 배포를 완료했습니다" : "MCP 배포를 완료하지 못했습니다", run.status === "COMPLETED" ? `${run.serviceNames.length}개 서비스가 준비되었습니다.` : run.error, run.status === "COMPLETED" ? "ok" : "fail");
     } catch (error) {
-      const banner = $("#mcpDeploymentError");
-      banner.textContent = error.message;
-      banner.classList.remove("hidden");
+      state.mcpDeploymentPollTimers.delete(runId);
+      if (state.mcpDeployment?.runId === runId) {
+        const banner = $("#mcpDeploymentError");
+        banner.textContent = error.message;
+        banner.classList.remove("hidden");
+      }
     }
   }
 
@@ -1744,6 +1916,9 @@
     } catch (error) {
       const runningId = error.data?.error?.runId;
       if (runningId) {
+        const run = await api(`/api/v1/mcp-deployments/${runningId}`);
+        renderMcpDeployment(run);
+        showMcpDeploymentModal();
         pollMcpDeployment(runningId);
         return;
       }
@@ -1761,8 +1936,7 @@
       if (existing) {
         state.mcpDeploymentCode = code;
         renderMcpDeployment(existing);
-        $("#mcpDeploymentModal").classList.add("open");
-        $("#mcpDeploymentModal").setAttribute("aria-hidden", "false");
+        showMcpDeploymentModal();
         pollMcpDeployment(existing.runId);
         return;
       }
@@ -1770,6 +1944,136 @@
       beginMcpDeployment(code);
     } catch (error) {
       toast("MCP 배포를 열지 못했습니다", error.message, "fail");
+    }
+  }
+
+  function renderCommonRuntimeDeploymentFloat(run) {
+    const floating = $("#commonRuntimeDeploymentFloat");
+    const modalOpen = $("#commonRuntimeDeploymentModal").classList.contains("open");
+    const running = run?.status === "RUNNING";
+    const steps = run?.steps || [];
+    const completeCount = steps.filter((step) => step.status === "COMPLETE").length;
+    const runningStep = steps.find((step) => step.status === "RUNNING");
+    const progress = steps.length
+      ? Math.min(99, Math.round(((completeCount + (runningStep ? 0.35 : 0)) / steps.length) * 100))
+      : 0;
+    floating.classList.toggle("hidden", !running || modalOpen);
+    floating.setAttribute("aria-hidden", String(!running || modalOpen));
+    if (!running) return;
+    $("#commonRuntimeDeploymentFloatTitle").textContent = "공통 런타임 배포 중";
+    $("#commonRuntimeDeploymentFloatDetail").textContent = runningStep
+      ? `${runningStep.label} · ${runningStep.detail || "진행 중"}`
+      : `${completeCount} / ${steps.length}단계 완료`;
+    $("#commonRuntimeDeploymentFloatProgress").style.width = `${progress}%`;
+    $("#commonRuntimeDeploymentFloatPercent").textContent = `${progress}%`;
+  }
+
+  function showCommonRuntimeDeploymentModal() {
+    $("#commonRuntimeDeploymentModal").classList.add("open");
+    $("#commonRuntimeDeploymentModal").setAttribute("aria-hidden", "false");
+    $("#commonRuntimeDeploymentFloat").classList.add("hidden");
+    $("#commonRuntimeDeploymentFloat").setAttribute("aria-hidden", "true");
+  }
+
+  function renderCommonRuntimeDeployment(run) {
+    state.commonRuntimeDeployment = run;
+    const running = run.status === "RUNNING";
+    const complete = run.status === "COMPLETED";
+    const failed = run.status === "FAILED";
+    $("#commonRuntimeDeploymentProject").textContent = run.project || state.environment?.project || "—";
+    $("#commonRuntimeDeploymentRegion").textContent = run.region || state.environment?.region || "—";
+    $("#commonRuntimeDeploymentSteps").innerHTML = (run.steps || []).map((step) => `<article class="deployment-step" data-status="${escapeHtml(step.status)}">
+      <span class="deployment-step-mark">${deploymentStepIcon(step.status)}</span>
+      <div class="deployment-step-copy"><b>${escapeHtml(step.label)}</b><p>${escapeHtml(step.detail || "대기 중")}</p></div>
+      <span class="deployment-step-state">${escapeHtml(({ PENDING: "대기", RUNNING: "진행 중", COMPLETE: "완료", FAILED: "실패" })[step.status] || step.status)}</span>
+    </article>`).join("");
+    const logs = run.logs || [];
+    $("#commonRuntimeDeploymentLogWrap").classList.toggle("hidden", logs.length === 0);
+    $("#commonRuntimeDeploymentLog").textContent = logs.join("\n");
+    $("#commonRuntimeDeploymentLog").scrollTop = $("#commonRuntimeDeploymentLog").scrollHeight;
+    const error = $("#commonRuntimeDeploymentError");
+    error.textContent = run.error || "";
+    error.classList.toggle("hidden", !run.error);
+    $("#commonRuntimeDeploymentTitle").textContent = complete ? "공통 런타임 배포 완료" : failed ? "공통 런타임 배포 확인 필요" : "공통 런타임을 배포하고 있습니다";
+    $("#commonRuntimeDeploymentDescription").textContent = complete
+      ? "Parser, Sync, Workflow, Scheduler 배포와 Ready 확인을 완료했습니다."
+      : failed ? "실패한 단계와 배포 로그를 확인한 뒤 다시 배포할 수 있습니다."
+        : "창을 닫아도 배포는 백그라운드에서 계속됩니다.";
+    $("#retryCommonRuntimeDeployment").classList.toggle("hidden", !failed);
+    renderCommonRuntimeDeploymentFloat(run);
+  }
+
+  function closeCommonRuntimeDeployment() {
+    $("#commonRuntimeDeploymentModal").classList.remove("open");
+    $("#commonRuntimeDeploymentModal").setAttribute("aria-hidden", "true");
+    renderCommonRuntimeDeploymentFloat(state.commonRuntimeDeployment);
+  }
+
+  async function pollCommonRuntimeDeployment(runId) {
+    window.clearTimeout(state.commonRuntimeDeploymentPollTimer);
+    try {
+      const run = await api(`/api/v1/common-runtime-deployments/${runId}`);
+      renderCommonRuntimeDeployment(run);
+      if (run.status === "RUNNING") {
+        state.commonRuntimeDeploymentPollTimer = window.setTimeout(() => pollCommonRuntimeDeployment(runId), 1100);
+        return;
+      }
+      await loadDepartments();
+      if (state.selectedCode) startStatus([state.selectedCode]);
+      const succeeded = run.status === "COMPLETED";
+      toast(succeeded ? "공통 런타임 배포를 완료했습니다" : "공통 런타임을 배포하지 못했습니다", succeeded ? "Parser, Sync, Workflow, Scheduler가 준비되었습니다." : run.error, succeeded ? "ok" : "fail");
+      if (succeeded && run.followUpDepartmentCode) {
+        closeCommonRuntimeDeployment();
+        openMcpDeploymentPrompt(run.followUpDepartmentCode);
+      }
+    } catch (error) {
+      const banner = $("#commonRuntimeDeploymentError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+    }
+  }
+
+  async function beginCommonRuntimeDeployment(followUpDepartmentCode = "") {
+    const query = followUpDepartmentCode
+      ? `?followUpDepartmentCode=${encodeURIComponent(followUpDepartmentCode)}`
+      : "";
+    try {
+      const run = await api(`/api/v1/common-runtime-deployments${query}`, { method: "POST" });
+      renderCommonRuntimeDeployment(run);
+      showCommonRuntimeDeploymentModal();
+      pollCommonRuntimeDeployment(run.runId);
+    } catch (error) {
+      const runningId = error.data?.error?.runId;
+      if (runningId) {
+        showCommonRuntimeDeploymentModal();
+        pollCommonRuntimeDeployment(runningId);
+        return;
+      }
+      const banner = $("#commonRuntimeDeploymentError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+      showCommonRuntimeDeploymentModal();
+    }
+  }
+
+  async function openOrStartCommonRuntimeDeployment(followUpDepartmentCode = "") {
+    closeDrawer();
+    try {
+      const data = await api("/api/v1/common-runtime-deployments?status=RUNNING");
+      const existing = data.runs?.[0];
+      if (existing) {
+        if (followUpDepartmentCode) {
+          await beginCommonRuntimeDeployment(followUpDepartmentCode);
+          return;
+        }
+        renderCommonRuntimeDeployment(existing);
+        showCommonRuntimeDeploymentModal();
+        pollCommonRuntimeDeployment(existing.runId);
+        return;
+      }
+      await beginCommonRuntimeDeployment(followUpDepartmentCode);
+    } catch (error) {
+      toast("공통 런타임 배포를 열지 못했습니다", error.message, "fail");
     }
   }
 
@@ -2422,7 +2726,7 @@
       resetWizard();
       await loadDepartments();
       switchView("dashboard");
-      if (!wasEditing) openMcpDeploymentPrompt(result.code);
+      if (!wasEditing) await openOrStartCommonRuntimeDeployment(result.code);
       startStatus([result.code]);
     } catch (error) {
       if (error.data?.error?.code === "DRIVE_ID_CONFLICT") {
@@ -2555,6 +2859,22 @@
     $("#confirmResourceProvision").addEventListener("click", startResourceProvision);
     $$('[data-close-resource-modal]').forEach((item) => item.addEventListener("click", closeResourceModal));
     $$('[data-close-mcp-deployment]').forEach((item) => item.addEventListener("click", closeMcpDeployment));
+    $("#deploymentFloatStack").addEventListener("click", async (event) => {
+      const card = event.target.closest("[data-mcp-deployment-run]");
+      if (!card) return;
+      try {
+        const run = await api(`/api/v1/mcp-deployments/${encodeURIComponent(card.dataset.mcpDeploymentRun)}`);
+        state.mcpDeploymentCode = run.code;
+        renderMcpDeployment(run);
+        showMcpDeploymentModal();
+        pollMcpDeployment(run.runId);
+      } catch (error) {
+        toast("MCP 배포를 열지 못했습니다", error.message, "fail");
+      }
+    });
+    $$('[data-close-common-runtime-deployment]').forEach((item) => item.addEventListener("click", closeCommonRuntimeDeployment));
+    $("#commonRuntimeDeploymentFloat").addEventListener("click", showCommonRuntimeDeploymentModal);
+    $("#retryCommonRuntimeDeployment").addEventListener("click", () => beginCommonRuntimeDeployment(state.commonRuntimeDeployment?.followUpDepartmentCode || ""));
     $("#startMcpDeployment").addEventListener("click", () => {
       if (state.mcpDeployment?.status === "COMPLETED") {
         const code = state.mcpDeployment.code;
@@ -2584,6 +2904,11 @@
     });
     $("#drawerMcpServers").addEventListener("click", copySingleMcpServer);
     $("#drawerContent").addEventListener("click", (event) => {
+      const commonButton = event.target.closest("[data-deploy-common-runtime]");
+      if (commonButton) {
+        openOrStartCommonRuntimeDeployment();
+        return;
+      }
       const button = event.target.closest("[data-deploy-mcp]");
       if (button) openOrStartMcpDeployment(button.dataset.deployMcp);
     });
@@ -2613,6 +2938,7 @@
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
       if ($("#syncConfirmModal").classList.contains("open")) closeSyncConfirmModal();
+      else if ($("#commonRuntimeDeploymentModal").classList.contains("open")) closeCommonRuntimeDeployment();
       else if ($("#mcpDeploymentModal").classList.contains("open")) closeMcpDeployment();
       else if ($("#resourceProvisionModal").classList.contains("open")) closeResourceModal();
       else if ($("#detailDrawer").classList.contains("open")) closeDrawer();
@@ -2634,6 +2960,30 @@
     }
   }
 
+  async function reconnectMcpDeployment() {
+    try {
+      const data = await api("/api/v1/mcp-deployments?status=RUNNING");
+      (data.runs || []).forEach((run) => {
+        renderMcpDeploymentFloat(run);
+        pollMcpDeployment(run.runId);
+      });
+    } catch (_) {
+      // 재연결 실패가 새 배포나 다른 콘솔 기능을 막으면 안 된다.
+    }
+  }
+
+  async function reconnectCommonRuntimeDeployment() {
+    try {
+      const data = await api("/api/v1/common-runtime-deployments?status=RUNNING");
+      const run = data.runs?.[0];
+      if (!run) return;
+      renderCommonRuntimeDeployment(run);
+      pollCommonRuntimeDeployment(run.runId);
+    } catch (_) {
+      // 재연결 실패가 새 배포나 다른 콘솔 기능을 막으면 안 된다.
+    }
+  }
+
   async function init() {
     bindEvents();
     try {
@@ -2644,7 +2994,7 @@
       if (session.commonExists === false) showCommonSetupShell();
       const [, env] = await Promise.all([loadDepartments(), loadEnvironment()]);
       if (env && !env.commonExists) showCommonSetup(env);
-      else if (env?.commonValid) await reconnectRun();
+      else if (env?.commonValid) await Promise.all([reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
     } catch (error) {
       toast("콘솔을 초기화하지 못했습니다", error.message, "fail");
     }

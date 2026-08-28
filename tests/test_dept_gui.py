@@ -67,6 +67,7 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dept_gui._SA_REPAIR_PLANS.clear()
     dept_gui._SA_REPAIR_RUNS.clear()
     dept_gui._MCP_DEPLOY_RUNS.clear()
+    dept_gui._COMMON_RUNTIME_DEPLOY_RUNS.clear()
     dept_gui._SYNC_AUTH_TOKEN = ""
     dept_gui._SYNC_AUTH_TOKEN_EXPIRES = 0.0
     return dept_dir
@@ -352,6 +353,93 @@ def test_mcp_deployment_tracks_steps_and_redacts_key(
     assert "***" in "\n".join(result["logs"])
 
 
+def test_common_runtime_deployment_tracks_steps_and_follow_up_department(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+
+    class DeferredThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+    class DeferredThreading:
+        Thread = DeferredThread
+
+    monkeypatch.setattr(dept_gui, "threading", DeferredThreading)
+    run = dept_gui.start_common_runtime_deployment("ee")
+
+    def fake_deploy(*, on_line) -> int:
+        for line in (
+            "== Build & push images ==",
+            "== Deploy Cloud Run ==",
+            "== Deploy Workflow ==",
+            "== Ensure Scheduler SA / App Engine ==",
+            "== Cloud Scheduler (00:00 Asia/Seoul) ==",
+        ):
+            on_line(line)
+        return 0
+
+    monkeypatch.setattr(dept_gui, "_run_common_runtime_deploy_script", fake_deploy)
+    monkeypatch.setattr(
+        dept_gui,
+        "_verify_common_runtime_deployment",
+        lambda: [
+            {"serviceName": "rag-parser", "url": "https://parser.example"},
+            {"serviceName": "rag-sync", "url": "https://sync.example"},
+        ],
+    )
+
+    dept_gui._execute_common_runtime_deployment(run["runId"])
+    result = dept_gui._COMMON_RUNTIME_DEPLOY_RUNS[run["runId"]]
+
+    assert result["status"] == "COMPLETED"
+    assert result["followUpDepartmentCode"] == "ee"
+    assert all(step["status"] == "COMPLETE" for step in result["steps"])
+    assert [item["serviceName"] for item in result["services"]] == ["rag-parser", "rag-sync"]
+
+
+def test_missing_common_runtime_status_offers_deployment_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
+
+    def fake_gcloud(args: list[str], timeout: int = 12):
+        service = args[3] if args[:3] == ["run", "services", "describe"] else ""
+        if service in {"rag-parser", "rag-sync"}:
+            return False, "NOT_FOUND: service does not exist"
+        return (
+            True,
+            {
+                "status": {
+                    "url": f"https://{service}.example.run.app",
+                    "latestReadyRevisionName": f"{service}-00001",
+                    "latestCreatedRevisionName": f"{service}-00001",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                }
+            },
+        )
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+    monkeypatch.setattr(dept_gui, "_run_command", lambda *args, **kwargs: (True, "token"))
+    monkeypatch.setattr(dept_gui, "_http_json", lambda *args, **kwargs: (200, {"ok": True}, 5))
+
+    checks = dept_gui._deploy_and_runtime_status(
+        "it",
+        {"GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3"},
+        {"corpora": {"staff": "corpus"}},
+    )
+    parser = next(item for item in checks if item["name"] == "parser")
+    sync = next(item for item in checks if item["name"] == "sync")
+
+    assert parser["status"] == "WARN"
+    assert parser["actionType"] == "COMMON_RUNTIME_DEPLOY"
+    assert sync["actionType"] == "COMMON_RUNTIME_DEPLOY"
+
+
 def test_missing_mcp_status_offers_deployment_action(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
 
@@ -401,6 +489,28 @@ def test_mcp_deployment_api_starts_and_returns_run(
     monkeypatch.setattr(dept_gui, "start_mcp_deployment", lambda code: expected)
 
     response = client.post("/api/v1/departments/ee/mcp-deployments", headers=headers)
+
+    assert response.status_code == 202
+    assert response.json() == expected
+
+
+def test_common_runtime_deployment_api_starts_and_returns_run(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    expected = {
+        "runId": "runtime-123",
+        "status": "RUNNING",
+        "followUpDepartmentCode": "ee",
+        "steps": [],
+        "logs": [],
+    }
+    monkeypatch.setattr(dept_gui, "start_common_runtime_deployment", lambda code: expected)
+
+    response = client.post(
+        "/api/v1/common-runtime-deployments?followUpDepartmentCode=ee",
+        headers=headers,
+    )
 
     assert response.status_code == 202
     assert response.json() == expected
@@ -1464,6 +1574,56 @@ def test_start_sync_run_endpoint_returns_conflict(
     assert response.json()["error"]["code"] == "SYNC_ALREADY_RUNNING"
 
 
+def test_sync_history_reports_missing_workflow_as_empty_state(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _headers = _client()
+    monkeypatch.setattr(
+        dept_gui,
+        "_common",
+        lambda: {"GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3"},
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_list_sync_execution_rows",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            dept_gui.WorkflowNotFoundError("rag-daily-sync 워크플로우가 아직 배포되지 않았습니다.")
+        ),
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_sync_department_targets",
+        lambda: ({"ee": {"code": "ee", "name": "전자공학과"}}, {}),
+    )
+
+    response = client.get("/api/v1/sync-runs")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workflowStatus"] == "NOT_FOUND"
+    assert body["runs"] == []
+    assert body["departments"][0]["code"] == "ee"
+
+
+def test_workflow_not_found_is_distinguished_from_lookup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_json",
+        lambda args, timeout=12: (
+            False,
+            (
+                'ERROR: NOT_FOUND: workflow "projects/1/locations/r/workflows/rag-daily-sync" '
+                "does not exist"
+            ),
+        ),
+    )
+
+    with pytest.raises(dept_gui.WorkflowNotFoundError):
+        dept_gui._list_sync_execution_rows("project-test", "asia-northeast3")
+
+
 def _bootstrap(monkeypatch: pytest.MonkeyPatch, project: str = "project-test") -> None:
     monkeypatch.setattr(
         dept_gui,
@@ -1498,6 +1658,21 @@ def _await_run(client: TestClient, run: dict) -> dict:
     return run
 
 
+def _common_sa_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        dept_gui,
+        "drive_service_account_status",
+        lambda project: {
+            "projectId": project,
+            "serviceAccount": "42-compute@developer.gserviceaccount.com",
+            "account": "tester@example.com",
+            "status": "OK",
+            "detail": "서비스 계정 연결 확인됨",
+            "issues": [],
+        },
+    )
+
+
 def test_common_resource_plan_reports_missing_apis_without_touching_gcp(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1506,6 +1681,18 @@ def test_common_resource_plan_reports_missing_apis_without_touching_gcp(
     _bootstrap(monkeypatch)
     monkeypatch.setattr(dept_gui, "_gcloud_project_resources", _no_resources)
     monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda project: (True, set()))
+    monkeypatch.setattr(
+        dept_gui,
+        "drive_service_account_status",
+        lambda project: {
+            "projectId": project,
+            "serviceAccount": "42-compute@developer.gserviceaccount.com",
+            "account": "tester@example.com",
+            "status": "FAIL",
+            "detail": "서비스 계정 임시 접근 토큰 HTTP 403",
+            "issues": ["tokenCreator"],
+        },
+    )
     # 계획 단계에서 변경 계열 호출이 일어나면 즉시 실패시킨다.
     monkeypatch.setattr(
         dept_gui,
@@ -1522,10 +1709,13 @@ def test_common_resource_plan_reports_missing_apis_without_touching_gcp(
     assert response.status_code == 200
     body = response.json()
     assert {item["name"] for item in body["services"]} == {
-        "artifactregistry.googleapis.com",
-        "firestore.googleapis.com",
+        item["name"] for item in dept_gui.COMMON_REQUIRED_SERVICES
     }
+    assert "workflowexecutions.googleapis.com" in {item["name"] for item in body["services"]}
     assert all(item["enabled"] is False for item in body["services"])
+    assert body["serviceAccount"]["ready"] is False
+    assert body["serviceAccount"]["issues"] == ["tokenCreator"]
+    assert body["serviceAccount"]["account"] == "tester@example.com"
     resources = {item["key"]: item for item in body["resources"]}
     assert resources["artifactRepo"]["displayName"] == "rag-mcp"
     assert resources["firestoreDatabase"]["displayName"] == "rag-sync-state"
@@ -1539,6 +1729,7 @@ def test_common_resource_plan_marks_existing_resources_as_skipped(
 ) -> None:
     client, headers = _client()
     _bootstrap(monkeypatch)
+    _common_sa_ready(monkeypatch)
     monkeypatch.setattr(
         dept_gui,
         "_gcloud_project_resources",
@@ -1596,6 +1787,7 @@ def test_common_provisioning_enables_apis_before_creating(
     """API 를 먼저 켜야 생성이 된다. 순서가 뒤집히면 새 프로젝트에서 그냥 실패한다."""
     client, headers = _client()
     _bootstrap(monkeypatch)
+    _common_sa_ready(monkeypatch)
     monkeypatch.setattr(dept_gui, "_gcloud_project_resources", _no_resources)
     monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda project: (True, set()))
     calls: list[str] = []
@@ -1635,12 +1827,139 @@ def test_common_provisioning_enables_apis_before_creating(
     assert {item["status"] for item in run["resources"]} == {"COMPLETE"}
 
 
+def test_common_provisioning_runs_required_apis_in_declared_order(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    _bootstrap(monkeypatch)
+    _common_sa_ready(monkeypatch)
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_project_resources",
+        lambda project, region: {
+            "artifactRepositories": [{"id": "rag-mcp", "format": "DOCKER"}],
+            "firestoreDatabases": [
+                {"id": "rag-sync-state", "location": region, "type": "FIRESTORE_NATIVE"}
+            ],
+            "artifactError": "",
+            "firestoreError": "",
+        },
+    )
+    monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda project: (True, set()))
+    enabled: list[str] = []
+    monkeypatch.setattr(
+        dept_gui, "_enable_gcloud_service", lambda service, project: enabled.append(service)
+    )
+
+    plan = client.post(
+        "/api/v1/common-config/resource-plans",
+        headers=headers,
+        json={"projectId": "project-test", "region": "asia-northeast3"},
+    ).json()
+    run = _await_run(
+        client,
+        client.post(
+            "/api/v1/common-config/resource-provisioning",
+            headers=headers,
+            json={"planId": plan["planId"]},
+        ).json(),
+    )
+
+    assert run["status"] == "COMPLETED"
+    assert enabled == [item["name"] for item in dept_gui.COMMON_REQUIRED_SERVICES]
+
+
+def test_common_provisioning_grants_and_verifies_token_creator(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    _bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_project_resources",
+        lambda project, region: {
+            "artifactRepositories": [{"id": "rag-mcp", "format": "DOCKER"}],
+            "firestoreDatabases": [
+                {"id": "rag-sync-state", "location": region, "type": "FIRESTORE_NATIVE"}
+            ],
+            "artifactError": "",
+            "firestoreError": "",
+        },
+    )
+    all_services = {item["name"] for item in dept_gui.COMMON_REQUIRED_SERVICES}
+    monkeypatch.setattr(
+        dept_gui, "_gcloud_enabled_services", lambda project: (True, all_services)
+    )
+    checks = [
+        {
+            "projectId": "project-test",
+            "serviceAccount": "42-compute@developer.gserviceaccount.com",
+            "account": "tester@example.com",
+            "status": "FAIL",
+            "detail": "서비스 계정 임시 접근 토큰 HTTP 403",
+            "issues": ["tokenCreator"],
+        },
+        {
+            "projectId": "project-test",
+            "serviceAccount": "42-compute@developer.gserviceaccount.com",
+            "account": "tester@example.com",
+            "status": "FAIL",
+            "detail": "서비스 계정 임시 접근 토큰 HTTP 403",
+            "issues": ["tokenCreator"],
+        },
+        {
+            "projectId": "project-test",
+            "serviceAccount": "42-compute@developer.gserviceaccount.com",
+            "account": "tester@example.com",
+            "status": "OK",
+            "detail": "서비스 계정 연결 확인됨",
+            "issues": [],
+        },
+    ]
+    monkeypatch.setattr(
+        dept_gui, "drive_service_account_status", lambda project: checks.pop(0)
+    )
+    grants: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(
+        dept_gui,
+        "_grant_service_account_role",
+        lambda service_account, member, role, project: grants.append(
+            (service_account, member, role)
+        ),
+    )
+
+    plan = client.post(
+        "/api/v1/common-config/resource-plans",
+        headers=headers,
+        json={"projectId": "project-test", "region": "asia-northeast3"},
+    ).json()
+    run = _await_run(
+        client,
+        client.post(
+            "/api/v1/common-config/resource-provisioning",
+            headers=headers,
+            json={"planId": plan["planId"]},
+        ).json(),
+    )
+
+    assert run["status"] == "COMPLETED"
+    assert run["serviceAccount"]["status"] == "COMPLETE"
+    assert grants == [
+        (
+            "42-compute@developer.gserviceaccount.com",
+            "user:tester@example.com",
+            "roles/iam.serviceAccountTokenCreator",
+        )
+    ]
+
+
 def test_common_provisioning_skips_creation_when_api_enable_fails(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """API 를 못 켰으면 생성을 시도하지 않는다 — 실패 원인이 뒤에서 뭉개진다."""
     client, headers = _client()
     _bootstrap(monkeypatch)
+    _common_sa_ready(monkeypatch)
     monkeypatch.setattr(dept_gui, "_gcloud_project_resources", _no_resources)
     monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda project: (True, set()))
 
@@ -1683,6 +2002,7 @@ def test_common_provisioning_plan_is_single_use(
 ) -> None:
     client, headers = _client()
     _bootstrap(monkeypatch)
+    _common_sa_ready(monkeypatch)
     monkeypatch.setattr(
         dept_gui,
         "_gcloud_project_resources",
@@ -1700,6 +2020,7 @@ def test_common_provisioning_plan_is_single_use(
         "_gcloud_enabled_services",
         lambda project: (True, {"artifactregistry.googleapis.com", "firestore.googleapis.com"}),
     )
+    monkeypatch.setattr(dept_gui, "_enable_gcloud_service", lambda service, project: None)
 
     plan = client.post(
         "/api/v1/common-config/resource-plans",
@@ -1712,6 +2033,8 @@ def test_common_provisioning_plan_is_single_use(
         json={"planId": plan["planId"]},
     )
     assert first.status_code == 202
+    assert {item["status"] for item in first.json()["resources"]} == {"SKIPPED"}
+    assert all("이미 존재" in item["detail"] for item in first.json()["resources"])
     run = _await_run(client, first.json())
     # 이미 있는 것만이면 아무것도 만들지 않고 끝난다.
     assert {item["status"] for item in run["resources"]} == {"SKIPPED"}
@@ -1780,7 +2103,12 @@ def test_drive_sa_status_flags_token_creator_when_impersonation_404(
     monkeypatch.setattr(
         dept_gui,
         "_service_account_access_token",
-        lambda project, token, scopes, **kw: ("", "42-compute@x", 30, "서비스 계정 가장 토큰 HTTP 404"),
+        lambda project, token, scopes, **kw: (
+            "",
+            "42-compute@x",
+            30,
+            "서비스 계정 임시 접근 토큰 HTTP 404",
+        ),
     )
 
     body = client.get("/api/v1/drive-service-account/status").json()
@@ -1917,6 +2245,7 @@ def test_drive_sa_repair_plan_is_single_use(
         "_service_account_access_token",
         lambda project, token, scopes, **kw: ("", "42-compute@x", 10, "HTTP 404"),
     )
+    monkeypatch.setattr(dept_gui.time, "sleep", lambda seconds: None)
 
     plan = client.post("/api/v1/drive-service-account/repair-plans", headers=headers).json()
     run = client.post(

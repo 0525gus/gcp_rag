@@ -28,6 +28,14 @@ PWSH = _find_pwsh()
 pytestmark = pytest.mark.skipif(not PWSH, reason="PowerShell 없음")
 
 LOADER = ROOT / "scripts" / "_load_env.ps1"
+
+
+def test_loader_forces_utf8_for_gui_deploy_logs() -> None:
+    source = LOADER.read_text(encoding="utf-8")
+    assert "[Console]::OutputEncoding = $Utf8NoBom" in source
+    assert '$env:PYTHONIOENCODING = "utf-8"' in source
+
+
 PREFLIGHT = ROOT / "scripts" / "preflight.ps1"
 
 VALID = {
@@ -67,6 +75,8 @@ def _run(
         cwd=str(ROOT),
         env=env,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )

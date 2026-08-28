@@ -96,6 +96,7 @@ gcloud services enable `
   run.googleapis.com `
   compute.googleapis.com `
   workflows.googleapis.com `
+  workflowexecutions.googleapis.com `
   cloudscheduler.googleapis.com `
   appengine.googleapis.com `
   drive.googleapis.com `

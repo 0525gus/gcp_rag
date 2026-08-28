@@ -9,6 +9,16 @@
 #
 # 규칙 변경 시 tests/test_deploy_env_ps1.py 도 맞출 것.
 
+# GUI 배포 화면은 이 스크립트들의 stdout을 UTF-8로 읽는다. Windows의 기본
+# 코드페이지(CP949)가 섞이면 한글 진행/실패 로그가 ���로 깨지므로 PowerShell과
+# 하위 gcloud/Python 프로세스의 텍스트 출력을 한 인코딩으로 고정한다.
+$Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $Utf8NoBom
+[Console]::OutputEncoding = $Utf8NoBom
+$OutputEncoding = $Utf8NoBom
+$env:PYTHONUTF8 = "1"
+$env:PYTHONIOENCODING = "utf-8"
+
 function Get-PythonExe {
   $venv = Join-Path (Split-Path -Parent $PSScriptRoot) ".venv\Scripts\python.exe"
   if (Test-Path -LiteralPath $venv) { return $venv }

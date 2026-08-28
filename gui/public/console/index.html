@@ -68,7 +68,7 @@
             <button type="button" class="button primary compact" id="planCommonResources">공통 리소스 만들기</button>
           </div>
           <div class="setup-provision-plan hidden" id="setupProvisionPlan" aria-live="polite">
-            <h4>다음 작업을 진행합니다</h4>
+            <h4 id="setupProvisionTitle">다음 작업을 진행합니다</h4>
             <div id="setupProvisionPlanBody"></div>
             <div class="setup-provision-actions">
               <button type="button" class="button secondary compact" id="cancelCommonProvision">취소</button>
@@ -629,6 +629,32 @@
       </div>
     </aside>
 
+    <aside class="resource-modal" id="commonRuntimeDeploymentModal" aria-hidden="true" aria-labelledby="commonRuntimeDeploymentTitle">
+      <div class="resource-modal-backdrop" data-close-common-runtime-deployment></div>
+      <div class="resource-modal-panel deployment-modal-panel" role="dialog" aria-modal="true">
+        <header>
+          <div><span class="eyebrow">COMMON RUNTIME</span><h2 id="commonRuntimeDeploymentTitle">공통 런타임 배포</h2><p id="commonRuntimeDeploymentDescription">Parser, Sync, Workflow, Scheduler를 배포합니다.</p></div>
+          <button type="button" class="icon-button" data-close-common-runtime-deployment aria-label="공통 런타임 배포 창 닫기">×</button>
+        </header>
+        <div class="resource-modal-body">
+          <div class="resource-plan-context">
+            <div><span>PROJECT</span><b id="commonRuntimeDeploymentProject">—</b></div>
+            <div><span>REGION</span><b id="commonRuntimeDeploymentRegion">—</b></div>
+          </div>
+          <div class="deployment-step-list" id="commonRuntimeDeploymentSteps"></div>
+          <div class="deployment-log-wrap hidden" id="commonRuntimeDeploymentLogWrap">
+            <div><span>DEPLOY LOG</span><small>토큰은 표시하지 않습니다</small></div>
+            <pre id="commonRuntimeDeploymentLog"></pre>
+          </div>
+          <div class="validation-banner hidden" id="commonRuntimeDeploymentError"></div>
+        </div>
+        <footer>
+          <button type="button" class="button ghost" data-close-common-runtime-deployment id="closeCommonRuntimeDeployment">닫기</button>
+          <button type="button" class="button primary hidden" id="retryCommonRuntimeDeployment">다시 배포</button>
+        </footer>
+      </div>
+    </aside>
+
     <aside class="resource-modal" id="driveConflictModal" aria-hidden="true" aria-labelledby="driveConflictTitle">
       <div class="resource-modal-backdrop" data-close-drive-conflict></div>
       <div class="resource-modal-panel sync-confirm-panel" role="dialog" aria-modal="true">
@@ -666,10 +692,22 @@
       </div>
     </aside>
 
-    <div class="run-strip hidden" id="runStrip" role="status" aria-live="polite">
-      <span class="loader-ring"></span>
-      <div><b>상태를 확인하고 있습니다</b><small id="runProgress">준비 중</small></div>
-      <button id="cancelRun">취소</button>
+    <div class="deployment-float-stack" id="deploymentFloatStack" aria-label="진행 중인 배포">
+      <div class="run-strip hidden" id="runStrip" role="status" aria-live="polite">
+        <span class="loader-ring"></span>
+        <div><b>상태를 확인하고 있습니다</b><small id="runProgress">준비 중</small></div>
+        <button id="cancelRun">취소</button>
+      </div>
+
+      <button type="button" class="mcp-deployment-float common-runtime-deployment-float hidden" id="commonRuntimeDeploymentFloat" aria-label="공통 런타임 배포 진행 창 열기" aria-live="polite">
+        <span class="mcp-float-icon" aria-hidden="true"><i></i></span>
+        <span class="mcp-float-copy">
+          <b id="commonRuntimeDeploymentFloatTitle">공통 런타임 배포 중</b>
+          <small id="commonRuntimeDeploymentFloatDetail">진행 상태를 확인하고 있습니다.</small>
+          <span class="mcp-float-track"><i id="commonRuntimeDeploymentFloatProgress"></i></span>
+        </span>
+        <strong id="commonRuntimeDeploymentFloatPercent">0%</strong>
+      </button>
     </div>
 
     <div class="toast-region" id="toastRegion" aria-live="polite"></div>
