@@ -845,28 +845,45 @@ def _gcloud_bootstrap_state(*, include_projects: bool = True) -> dict[str, Any]:
     if not gcloud:
         return state
 
-    auth_ok, accounts = _gcloud_json(["auth", "list", "--filter=status:ACTIVE"])
+    # 넷은 서로를 필요로 하지 않는다. gcloud 한 번이 1초 이상이라 순차로 돌면
+    # 그대로 부팅 지연이 된다. projects list 가 제일 느리므로 인증 확인을
+    # 기다리지 않고 같이 띄운다 — 미인증이면 결과를 그냥 버린다.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        auth_future = pool.submit(_gcloud_json, ["auth", "list", "--filter=status:ACTIVE"])
+        token_future = pool.submit(
+            _run_command, [gcloud, "auth", "print-access-token", "--quiet"]
+        )
+        current_future = pool.submit(
+            _run_command, [gcloud, "config", "get-value", "project", "--quiet"]
+        )
+        projects_future: Future[tuple[bool, Any]] | None = (
+            pool.submit(
+                _gcloud_json,
+                ["projects", "list", "--filter=lifecycleState:ACTIVE"],
+                20,
+            )
+            if include_projects
+            else None
+        )
+        auth_ok, accounts = auth_future.result()
+        token_ok, _ = token_future.result()
+        current_ok, current = current_future.result()
+        projects_result = projects_future.result() if projects_future else (False, None)
+
     if not auth_ok or not isinstance(accounts, list) or not accounts:
         return state
     account = str(accounts[0].get("account") or "")
-    token_ok, _ = _run_command([gcloud, "auth", "print-access-token", "--quiet"])
     state["authenticated"] = bool(account and token_ok)
     if not state["authenticated"]:
         return state
     if "@" in account:
         local, domain = account.split("@", 1)
         state["account"] = (local[:2] + "***@" + domain) if local else "***@" + domain
-
-    current_ok, current = _run_command(
-        [gcloud, "config", "get-value", "project", "--quiet"]
-    )
     if current_ok:
         state["currentProject"] = current.strip()
 
     if include_projects and state["authenticated"]:
-        projects_ok, projects = _gcloud_json(
-            ["projects", "list", "--filter=lifecycleState:ACTIVE"], timeout=20
-        )
+        projects_ok, projects = projects_result
         if projects_ok and isinstance(projects, list):
             state["projects"] = sorted(
                 [
@@ -3333,8 +3350,13 @@ async def security_headers(request: Request, call_next):  # type: ignore[no-unty
 
 
 @app.get("/api/v1/session")
-def session() -> dict[str, str]:
-    return {"nonce": _SESSION_NONCE}
+def session() -> dict[str, Any]:
+    """부팅 첫 호출. gcloud 를 타지 않아야 한다 — 여기서 막히면 화면이 통째로 늦다.
+
+    `commonExists` 는 파일 존재 확인뿐이므로 즉시 답한다. 콘솔은 이 값만 보고
+    공통 설정 화면을 먼저 띄우고, 느린 gcloud 상태는 뒤에서 채운다.
+    """
+    return {"nonce": _SESSION_NONCE, "commonExists": (CONFIG_DIR / "common.yaml").exists()}
 
 
 @app.get("/api/v1/departments")
@@ -3497,13 +3519,21 @@ def environment() -> dict[str, Any]:
                 common_error = "GCP_PROJECT_ID가 없습니다."
         except (OSError, TypeError, UnicodeError, yaml.YAMLError) as exc:
             common_error = str(exc)[:200]
-    bootstrap = _gcloud_bootstrap_state(include_projects=not common_exists)
     configured_project = str(common.get("GCP_PROJECT_ID") or "")
-    service_account = (
-        _default_compute_service_account(configured_project)
-        if bootstrap["authenticated"] and configured_project
-        else ""
-    )
+    # bootstrap 과 SA 조회는 서로 독립이다. 순차로 돌면 gcloud 왕복이 그대로 더해진다.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        bootstrap_future = pool.submit(
+            _gcloud_bootstrap_state, include_projects=not common_exists
+        )
+        sa_future = (
+            pool.submit(_default_compute_service_account, configured_project)
+            if configured_project
+            else None
+        )
+        bootstrap = bootstrap_future.result()
+        service_account = (
+            sa_future.result() if sa_future and bootstrap["authenticated"] else ""
+        )
     return {
         "repository": str(ROOT),
         "pythonVersion": sys.version.split()[0],

@@ -1126,6 +1126,19 @@
     }
   }
 
+  function showCommonSetupShell() {
+    // gcloud 응답 전 껍데기. 여기서 보이는 값은 전부 "확인 중" 이어야 한다 —
+    // 비어 있는 채로 두면 로그인이 안 된 것처럼 읽힌다.
+    const gate = $("#setupGate");
+    if (!gate.classList.contains("hidden")) return;
+    gate.classList.remove("hidden");
+    $("#setupAuth").dataset.status = "checking";
+    $("#setupAuthTitle").textContent = "gcloud 로그인 확인 중";
+    $("#setupAuthDetail").textContent = "활성 계정과 접근 가능한 프로젝트를 확인합니다.";
+    $("#refreshGcloudAuth").disabled = true;
+    $("#createCommonConfig").disabled = true;
+  }
+
   function showCommonSetup(env) {
     const ready = renderCommonBootstrap(env);
     $("#setupGate").classList.remove("hidden");
@@ -2460,6 +2473,9 @@
     try {
       const session = await fetch("/api/v1/session").then((response) => response.json());
       state.nonce = session.nonce;
+      // 공통 설정 화면을 띄울지는 파일 존재 하나로 정해진다. gcloud 왕복(수 초)을
+      // 기다릴 이유가 없어 먼저 띄우고, 계정·프로젝트는 뒤에서 채운다.
+      if (session.commonExists === false) showCommonSetupShell();
       const [, env] = await Promise.all([loadDepartments(), loadEnvironment()]);
       if (env && !env.commonExists) showCommonSetup(env);
       else if (env?.commonValid) await reconnectRun();

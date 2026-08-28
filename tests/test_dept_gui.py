@@ -1934,3 +1934,83 @@ def test_drive_sa_repair_requires_local_session(isolated_config: Path) -> None:
     client, _ = _client()
     response = client.post("/api/v1/drive-service-account/repair-plans")
     assert response.status_code in {401, 403}
+
+
+def test_session_reports_common_existence_without_touching_gcloud(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """부팅 첫 호출은 gcloud 를 타면 안 된다 — 여기서 막히면 화면이 통째로 늦다.
+
+    공통 설정 화면을 띄울지는 파일 존재 하나로 정해진다. 이 경로에 gcloud 왕복이
+    끼어들면 수 초짜리 흰 화면이 된다(실측 9.1s -> 0.01s 로 고친 지점).
+    """
+    monkeypatch.setattr(
+        dept_gui, "_run_command", lambda *a, **k: pytest.fail("세션 응답에 gcloud 가 끼면 안 된다")
+    )
+    monkeypatch.setattr(
+        dept_gui, "_gcloud_json", lambda *a, **k: pytest.fail("세션 응답에 gcloud 가 끼면 안 된다")
+    )
+    client, _ = _client()
+
+    body = client.get("/api/v1/session").json()
+
+    assert body["commonExists"] is True
+    assert body["nonce"]
+
+    (dept_gui.CONFIG_DIR / "common.yaml").unlink()
+    assert client.get("/api/v1/session").json()["commonExists"] is False
+
+
+def test_bootstrap_state_runs_independent_gcloud_calls_concurrently(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """독립 호출은 동시에 돌아야 한다. 순차면 gcloud 왕복이 그대로 더해진다."""
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud.cmd")
+    overlap = {"peak": 0, "live": 0}
+    lock = threading.Lock()
+
+    def slow(fn_result):
+        def run(*args, **kwargs):
+            with lock:
+                overlap["live"] += 1
+                overlap["peak"] = max(overlap["peak"], overlap["live"])
+            time.sleep(0.15)
+            with lock:
+                overlap["live"] -= 1
+            return fn_result
+
+        return run
+
+    monkeypatch.setattr(
+        dept_gui, "_gcloud_json", slow((True, [{"account": "tester@example.com"}]))
+    )
+    monkeypatch.setattr(dept_gui, "_run_command", slow((True, "proj-a")))
+
+    started = time.time()
+    state = dept_gui._gcloud_bootstrap_state(include_projects=False)
+    elapsed = time.time() - started
+
+    assert state["authenticated"] is True
+    # 3건이 순차면 0.45s 이상 걸린다. 동시에 돌면 0.15s 언저리다.
+    assert overlap["peak"] >= 2, "독립 호출이 순차로 돌고 있다"
+    assert elapsed < 0.4, f"병렬이 아니다: {elapsed:.2f}s"
+
+
+def test_bootstrap_state_discards_project_list_when_unauthenticated(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """projects list 를 인증 확인 전에 띄우더라도, 미인증이면 결과를 쓰면 안 된다."""
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud.cmd")
+
+    def fake_json(args, timeout=12):
+        if args[:2] == ["auth", "list"]:
+            return True, []
+        return True, [{"projectId": "leaked", "name": "leaked"}]
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_json)
+    monkeypatch.setattr(dept_gui, "_run_command", lambda *a, **k: (False, ""))
+
+    state = dept_gui._gcloud_bootstrap_state(include_projects=True)
+
+    assert state["authenticated"] is False
+    assert state["projects"] == []
