@@ -1029,12 +1029,12 @@
     } else if (!env?.gcloudAuthenticated) {
       $("#setupAuthTitle").textContent = "gcloud 로그인이 필요합니다";
       $("#setupAuthDetail").textContent = "터미널에서 gcloud auth login 실행 후 ‘다시 확인’을 눌러 주세요.";
-    } else if (!projects.length) {
-      $("#setupAuthTitle").textContent = "접근 가능한 프로젝트가 없습니다";
-      $("#setupAuthDetail").textContent = `${env.gcloudAccount || "현재 계정"}의 프로젝트 권한을 확인해 주세요.`;
     } else {
+      // 프로젝트 개수는 더 이상 세지 않는다 — 전량 조회를 없앴다.
       $("#setupAuthTitle").textContent = "gcloud 로그인 확인됨";
-      $("#setupAuthDetail").textContent = `${env.gcloudAccount} · 접근 가능한 프로젝트 ${projects.length}개`;
+      $("#setupAuthDetail").textContent = env.gcloudProject
+        ? `${env.gcloudAccount} · 현재 프로젝트 ${env.gcloudProject}`
+        : `${env.gcloudAccount} · 프로젝트를 검색해 선택하세요`;
     }
 
     const search = $("#projectSearch");
