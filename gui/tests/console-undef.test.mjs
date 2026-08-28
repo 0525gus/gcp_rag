@@ -29,3 +29,19 @@ test("console app.js has no undefined references", async () => {
     [],
   );
 });
+
+test("every $(\"#id\") in app.js resolves to markup that declares it", async () => {
+  // index.html 과 app.js 는 서로 다른 파일이라 ID 가 어긋나도 아무도 안 알려준다.
+  // $("#없는것") 은 null 을 돌려주고, 그 다음 줄에서야 터진다.
+  const [js, html] = await Promise.all([
+    readFile(new URL("../public/console/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/console/index.html", import.meta.url), "utf8"),
+  ]);
+  const referenced = new Set([...js.matchAll(/\$\("#([A-Za-z0-9_-]+)"\)/g)].map((m) => m[1]));
+  // JS 템플릿이 만들어 넣는 ID 도 선언으로 친다(예: 환경 카드의 상태 확인 버튼).
+  const declared = new Set(
+    [...html.matchAll(/id="([A-Za-z0-9_-]+)"/g), ...js.matchAll(/id="([A-Za-z0-9_-]+)"/g)]
+      .map((m) => m[1]),
+  );
+  assert.deepEqual([...referenced].filter((id) => !declared.has(id)), []);
+});

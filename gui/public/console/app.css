@@ -80,8 +80,14 @@ button, select { cursor: pointer; }
 .setup-provision-actions { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }
 .drive-sa-heading { margin: 13px 0 6px; color: #7b8799; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
 .drive-sa-loading { margin: 0; color: #8793a4; font-size: 9px; }
-.project-search { margin-bottom: 6px; }
 .project-search-hint { color: #8793a4; }
+.combo { position: relative; }
+.combo-list { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; right: 0; margin: 0; padding: 4px; list-style: none; max-height: 232px; overflow-y: auto; border: 1px solid #dce2ea; border-radius: 11px; background: white; box-shadow: 0 16px 40px rgba(7,20,42,.16); }
+.combo-list li { display: flex; align-items: baseline; gap: 7px; padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 11px; }
+.combo-list li b { font-weight: 600; color: var(--ink); }
+.combo-list li span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #8793a4; font-size: 9px; }
+.combo-list li em { margin-left: auto; flex: none; padding: 2px 7px; border-radius: 999px; background: #eef3ff; color: #4b62b8; font-size: 8px; font-style: normal; font-weight: 600; }
+.combo-list li:hover, .combo-list li.active { background: #f2f6ff; }
 .setup-divider { position: relative; margin: 4px 0 18px; color: #8c98a9; font-size: 8px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
 .setup-divider::before { content: ""; position: absolute; inset: 50% 0 auto; height: 1px; background: var(--line); }
 .setup-divider span { position: relative; padding-right: 10px; background: white; }

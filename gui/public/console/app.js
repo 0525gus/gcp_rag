@@ -32,6 +32,8 @@
     commonProvisionPollTimer: null,
     projectSearchTimer: null,
     projectSearchRequest: 0,
+    projectComboRows: [],
+    projectComboActive: -1,
     driveSaStatus: null,
     driveSaPlan: null,
     driveSaPollTimer: null,
@@ -950,41 +952,78 @@
     }
   }
 
-  function renderProjectOptions(found = [], { keepSelection = true } = {}) {
-    const select = $("#commonSetupForm").elements.projectId;
-    const previous = keepSelection ? select.value : "";
-    const current = state.environment?.gcloudProject || "";
-    const groups = [];
-    const seen = new Set();
-    const push = (label, items) => {
-      const fresh = items.filter((item) => item.id && !seen.has(item.id));
-      fresh.forEach((item) => seen.add(item.id));
-      if (fresh.length) groups.push({ label, items: fresh });
-    };
+  function projectSuggestions(found = []) {
     // 현재 -> 최근 -> 검색 결과 순. 사람이 실제로 고를 확률 순서다.
-    push("현재 gcloud 프로젝트", current ? [{ id: current, name: current }] : []);
-    push("최근 사용", recentProjects());
-    push("검색 결과", found);
+    const current = state.environment?.gcloudProject || "";
+    const rows = [];
+    const seen = new Set();
+    const push = (badge, items) => {
+      items.forEach((item) => {
+        if (!item.id || seen.has(item.id)) return;
+        seen.add(item.id);
+        rows.push({ id: item.id, name: item.name || item.id, badge });
+      });
+    };
+    push("현재", current ? [{ id: current, name: current }] : []);
+    push("최근", recentProjects());
+    push("", found);
+    return rows;
+  }
 
-    select.innerHTML = groups.length
-      ? groups
-          .map((group) => `<optgroup label="${escapeHtml(group.label)}">${group.items
-            .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name && item.name !== item.id ? `${item.name} · ${item.id}` : item.id)}</option>`)
-            .join("")}</optgroup>`)
-          .join("")
-      : '<option value="">검색어를 입력해 프로젝트를 찾으세요</option>';
-    select.disabled = !groups.length;
-    if (previous && seen.has(previous)) select.value = previous;
-    return groups.length;
+  function closeProjectCombo() {
+    state.projectComboRows = [];
+    state.projectComboActive = -1;
+    $("#projectComboList").classList.add("hidden");
+    $("#projectInput").setAttribute("aria-expanded", "false");
+  }
+
+  function renderProjectCombo(rows) {
+    const list = $("#projectComboList");
+    state.projectComboRows = rows;
+    if (!rows.length) {
+      closeProjectCombo();
+      return;
+    }
+    list.innerHTML = rows
+      .map((row, index) => `<li role="option" id="projectComboOption${index}" data-index="${index}"
+        aria-selected="${index === state.projectComboActive}"
+        class="${index === state.projectComboActive ? "active" : ""}">
+        <b>${escapeHtml(row.id)}</b>
+        ${row.name && row.name !== row.id ? `<span>${escapeHtml(row.name)}</span>` : ""}
+        ${row.badge ? `<em>${escapeHtml(row.badge)}</em>` : ""}
+      </li>`)
+      .join("");
+    list.classList.remove("hidden");
+    $("#projectInput").setAttribute("aria-expanded", "true");
+  }
+
+  function pickProject(index) {
+    const row = state.projectComboRows[index];
+    if (!row) return;
+    const input = $("#projectInput");
+    input.value = row.id;
+    closeProjectCombo();
+    input.classList.remove("invalid");
+    $("#projectSearchHint").textContent = `${row.id} 선택됨`;
+    loadSetupResources();
+  }
+
+  function moveProjectComboActive(delta) {
+    const total = state.projectComboRows.length;
+    if (!total) return;
+    const next = (state.projectComboActive + delta + total) % total;
+    state.projectComboActive = next;
+    renderProjectCombo(state.projectComboRows);
+    $("#projectComboList").children[next]?.scrollIntoView({ block: "nearest" });
   }
 
   async function searchProjects(term) {
     const hint = $("#projectSearchHint");
     const trimmed = String(term || "").trim();
+    state.projectComboActive = -1;
     if (!trimmed) {
-      renderProjectOptions([]);
-      hint.textContent = "현재 gcloud 프로젝트를 먼저 보여줍니다. 다른 프로젝트는 위에서 검색하세요.";
-      loadSetupResources();
+      renderProjectCombo(projectSuggestions([]));
+      hint.textContent = "입력하면 프로젝트를 검색합니다. 현재·최근 프로젝트가 먼저 보입니다.";
       return;
     }
     hint.textContent = "검색 중…";
@@ -993,26 +1032,53 @@
       const result = await api(`/api/v1/projects/search?q=${encodeURIComponent(trimmed)}`);
       if (requestId !== state.projectSearchRequest) return;
       const found = result.projects || [];
-      renderProjectOptions(found, { keepSelection: false });
-      if (found.length) {
-        // 검색해서 고르는 흐름이므로 첫 결과를 바로 선택해 준다.
-        $("#commonSetupForm").elements.projectId.value = found[0].id;
+      // 입력값과 정확히 같은 항목이 있으면 이미 고른 셈이라 목록을 닫는다.
+      if (found.length === 1 && found[0].id === trimmed) {
+        closeProjectCombo();
+        hint.textContent = `${trimmed} 선택됨`;
         loadSetupResources();
+        return;
       }
-      hint.textContent = result.error
-        ? result.error
-        : (found.length ? `${found.length}개 찾음` : "일치하는 프로젝트가 없습니다");
+      renderProjectCombo(projectSuggestions(found));
+      hint.textContent = result.error || (found.length ? `${found.length}개 찾음` : "일치하는 프로젝트가 없습니다");
     } catch (error) {
       if (requestId !== state.projectSearchRequest) return;
       hint.textContent = `검색하지 못했습니다: ${error.message}`;
     }
   }
 
-  function onProjectSearchInput(event) {
+  function onProjectInput(event) {
     window.clearTimeout(state.projectSearchTimer);
     const term = event.target.value;
     // 글자마다 왕복시키지 않는다 — 서버 호출은 ~0.4초짜리다.
     state.projectSearchTimer = window.setTimeout(() => searchProjects(term), 280);
+  }
+
+  function onProjectKeydown(event) {
+    if (event.key === "ArrowDown") { event.preventDefault(); moveProjectComboActive(1); }
+    else if (event.key === "ArrowUp") { event.preventDefault(); moveProjectComboActive(-1); }
+    else if (event.key === "Enter") {
+      if (state.projectComboActive >= 0) { event.preventDefault(); pickProject(state.projectComboActive); }
+    } else if (event.key === "Escape") closeProjectCombo();
+  }
+
+  function bindProjectCombo() {
+    const input = $("#projectInput");
+    input.addEventListener("input", onProjectInput);
+    input.addEventListener("keydown", onProjectKeydown);
+    input.addEventListener("focus", () => {
+      if (!input.disabled && !input.value.trim()) renderProjectCombo(projectSuggestions([]));
+    });
+    // blur 즉시 닫으면 목록 클릭이 먹지 않는다 — mousedown 으로 먼저 고른다.
+    $("#projectComboList").addEventListener("mousedown", (event) => {
+      const row = event.target.closest("[data-index]");
+      if (!row) return;
+      event.preventDefault();
+      pickProject(Number(row.dataset.index));
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest("#projectCombo")) closeProjectCombo();
+    });
   }
 
   function renderCommonBootstrap(env) {
@@ -1037,14 +1103,15 @@
         : `${env.gcloudAccount} · 프로젝트를 검색해 선택하세요`;
     }
 
-    const search = $("#projectSearch");
-    search.disabled = !ready;
+    const projectInput = $("#projectInput");
+    projectInput.disabled = !ready;
+    closeProjectCombo();
     if (ready) {
-      renderProjectOptions([]);
-      if (env.gcloudProject) form.elements.projectId.value = env.gcloudProject;
+      projectInput.placeholder = "프로젝트 ID 또는 이름으로 검색";
+      if (!projectInput.value && env.gcloudProject) projectInput.value = env.gcloudProject;
     } else {
-      form.elements.projectId.innerHTML = '<option value="">로그인 후 프로젝트를 선택할 수 있습니다</option>';
-      form.elements.projectId.disabled = true;
+      projectInput.placeholder = "로그인 후 프로젝트를 선택할 수 있습니다";
+      projectInput.value = "";
     }
 
     const regions = env?.availableRegions || [];
@@ -2472,7 +2539,7 @@
     $("#planCommonResources").addEventListener("click", planCommonResources);
     $("#confirmCommonProvision").addEventListener("click", confirmCommonProvision);
     $("#cancelCommonProvision").addEventListener("click", cancelCommonProvision);
-    $("#projectSearch").addEventListener("input", onProjectSearchInput);
+    bindProjectCombo();
     $("#commonSetupForm").elements.projectId.addEventListener("change", loadSetupResources);
     $("#commonSetupForm").elements.region.addEventListener("change", loadSetupResources);
     $("#refreshDepartmentResources").addEventListener("click", () => loadDepartmentResources());
