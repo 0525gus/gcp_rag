@@ -201,7 +201,7 @@ gs://{source 버킷}/{fileId}{.pdf|…}
   순간에만 로컬 세션 검증 POST 응답으로 전달하며 목록·설정 API에는 포함하지 않는다.
   클립보드에는 FactChat 인증 헤더에 바로 쓸 수 있는 `Bearer {key}` 형식으로 기록한다
 - `코퍼스 확인` 탭은 기본이 Vertex RAG 검색 근거 조회다. `Gemini 답변`을 켜면
-  같은 gcloud 계정으로 `gemini-2.5-flash`(Vertex global endpoint) 답을 붙이며
+  같은 gcloud 계정으로 `gemini-2.5-flash-lite`(Vertex global endpoint) 답을 붙이며
   별도 API 키가 필요 없다. 토큰은 서버 밖으로 노출하지 않는다
 - 공유드라이브 ID는 저장 전에 현재 프로젝트의 기본 Compute SA
   (`{projectNumber}-compute@developer.gserviceaccount.com`)로 실제 접근 및 변경 토큰을 확인

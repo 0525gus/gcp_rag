@@ -489,7 +489,7 @@ def test_corpus_query_generate_uses_gcloud_token_and_returns_answer(
                 12,
             )
         assert url.endswith(":generateContent")
-        assert "locations/global/publishers/google/models/gemini-2.5-flash" in url
+        assert "locations/global/publishers/google/models/gemini-2.5-flash-lite" in url
         assert "asia-northeast3" not in url
         assert "수강신청" in payload["contents"][0]["parts"][0]["text"]
         return (
@@ -508,7 +508,7 @@ def test_corpus_query_generate_uses_gcloud_token_and_returns_answer(
     assert response.status_code == 200
     body = response.json()
     assert body["answer"] == "수강신청은 2월입니다. [1]"
-    assert body["answerModel"] == "gemini-2.5-flash"
+    assert body["answerModel"] == "gemini-2.5-flash-lite"
     assert body["answerError"] == ""
     assert len(urls) == 2
 
