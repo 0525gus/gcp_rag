@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -690,8 +691,15 @@ def test_gcloud_login_restarts_stale_waiting_process(monkeypatch: pytest.MonkeyP
     class FakeProcess:
         def __init__(self, pid: int) -> None:
             self.pid = pid
+            self.terminated = False
 
         def poll(self):
+            return None
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def wait(self, timeout: float | None = None) -> None:
             return None
 
     old_process = FakeProcess(1234)
@@ -711,7 +719,10 @@ def test_gcloud_login_restarts_stale_waiting_process(monkeypatch: pytest.MonkeyP
     )
 
     assert dept_gui._start_gcloud_login() is True
-    assert killed[0][:3] == ["taskkill.exe", "/PID", "1234"]
+    if os.name == "nt":
+        assert killed[0][:3] == ["taskkill.exe", "/PID", "1234"]
+    else:
+        assert old_process.terminated is True
     assert dept_gui._AUTH_PROCESS is new_process
 
 
