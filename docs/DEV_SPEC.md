@@ -162,6 +162,14 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 - 주소: `http://127.0.0.1:8765` (외부 인터페이스 bind 금지)
 - 공통 설정이 없으면 gcloud 로그인 → 프로젝트·리전 → 기존 Artifact Registry·Native
   Firestore 선택 순서로 `config/common.yaml`을 생성
+- 공통 설정 화면은 `config/common.yaml` 존재 여부만 보고 **즉시** 뜬다. gcloud 상태는
+  뒤에서 채운다 — 이 경로에 gcloud 왕복을 넣으면 수 초짜리 빈 화면이 된다
+- 프로젝트는 **전량을 받지 않는다**. 접근 가능한 프로젝트가 수천 개인 계정에서
+  `gcloud projects list`가 6초 넘게 걸리고, 그 목록은 드롭다운으로 쓸 수도 없다.
+  현재 gcloud 프로젝트와 최근 선택(브라우저 로컬 저장)을 먼저 보여주고, 나머지는
+  검색으로 찾는다. 검색은 gcloud CLI가 아니라 Resource Manager REST를 쓴다
+  (CLI는 기동만 1.4초라 대화형 검색에 못 쓴다)
+- 프로젝트 접근 권한은 전량 목록 멤버십이 아니라 단건 조회로 확인한다
 - 신규 프로젝트라 둘 중 하나라도 없으면 같은 화면에서 만들 수 있다. **계획 →
   확인 → 실행** 2단계이며, 계획 단계는 외부를 바꾸지 않고 켤 API와 만들 리소스만
   보여준다. 실행 단계에서 필요한 API(`artifactregistry`, `firestore`)를 먼저 켜고
@@ -268,6 +276,7 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 |---|---|
 | `GET /api/v1/environment` | common 설정, gcloud 로그인·프로젝트, Drive 확인용 SA 표시 |
 | `POST /api/v1/gcloud-auth/login` | 시스템 브라우저에서 gcloud 사용자 로그인 유도 |
+| `GET /api/v1/projects/search` | 프로젝트 부분 일치 검색(Resource Manager REST). 전량 조회를 대체한다 |
 | `GET /api/v1/common-config/resources` | 선택 프로젝트의 Artifact Registry·Firestore 조회 |
 | `GET /api/v1/drive-service-account/status` | Drive 확인 SA 를 실제 가장 토큰까지 받아보고 판정 |
 | `POST /api/v1/drive-service-account/repair-plans` | 켤 API·부여할 역할만 계산(외부 변경 없음) |

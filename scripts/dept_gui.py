@@ -856,19 +856,9 @@ def _gcloud_bootstrap_state(*, include_projects: bool = True) -> dict[str, Any]:
         current_future = pool.submit(
             _run_command, [gcloud, "config", "get-value", "project", "--quiet"]
         )
-        projects_future: Future[tuple[bool, Any]] | None = (
-            pool.submit(
-                _gcloud_json,
-                ["projects", "list", "--filter=lifecycleState:ACTIVE"],
-                20,
-            )
-            if include_projects
-            else None
-        )
         auth_ok, accounts = auth_future.result()
         token_ok, _ = token_future.result()
         current_ok, current = current_future.result()
-        projects_result = projects_future.result() if projects_future else (False, None)
 
     if not auth_ok or not isinstance(accounts, list) or not accounts:
         return state
@@ -882,20 +872,13 @@ def _gcloud_bootstrap_state(*, include_projects: bool = True) -> dict[str, Any]:
     if current_ok:
         state["currentProject"] = current.strip()
 
-    if include_projects and state["authenticated"]:
-        projects_ok, projects = projects_result
-        if projects_ok and isinstance(projects, list):
-            state["projects"] = sorted(
-                [
-                    {
-                        "id": str(item.get("projectId") or ""),
-                        "name": str(item.get("name") or item.get("projectId") or ""),
-                    }
-                    for item in projects
-                    if item.get("projectId")
-                ],
-                key=lambda item: (item["name"].lower(), item["id"]),
-            )
+    # 프로젝트 **전량**은 싣지 않는다. 접근 가능한 프로젝트가 수천 개인 계정에서
+    # 이 한 번이 6초를 먹었고, 그 목록을 그대로 드롭다운에 부으면 고를 수도 없다.
+    # 화면은 현재 프로젝트로 시작하고 나머지는 /api/v1/projects/search 로 찾는다.
+    if include_projects and state["authenticated"] and state["currentProject"]:
+        state["projects"] = [
+            {"id": state["currentProject"], "name": state["currentProject"]}
+        ]
     return state
 
 
@@ -2210,6 +2193,80 @@ def start_sa_repair_run(plan_id: str) -> dict[str, Any]:
         daemon=True,
     ).start()
     return copy.deepcopy(run)
+
+
+# Resource Manager REST. gcloud CLI 는 기동만 1.4초라 대화형 검색에 못 쓴다
+# (실측: CLI 6.3s / REST 0.35s, 접근 가능 프로젝트 2,676개 기준).
+_CRM_PROJECTS = "https://cloudresourcemanager.googleapis.com/v1/projects"
+PROJECT_SEARCH_LIMIT = 20
+
+
+def _crm_projects(filter_expr: str, limit: int, token: str) -> list[dict[str, str]]:
+    params = {"pageSize": max(1, min(limit, 50))}
+    if filter_expr:
+        params["filter"] = filter_expr
+    status, body, _ = _http_json(f"{_CRM_PROJECTS}?{urlencode(params)}", token, timeout=20)
+    if status != 200 or not isinstance(body, dict):
+        return []
+    found: list[dict[str, str]] = []
+    for item in body.get("projects") or []:
+        project_id = str(item.get("projectId") or "")
+        if project_id and str(item.get("lifecycleState") or "ACTIVE") == "ACTIVE":
+            found.append({"id": project_id, "name": str(item.get("name") or project_id)})
+    return found
+
+
+def search_projects(term: str, limit: int = PROJECT_SEARCH_LIMIT) -> dict[str, Any]:
+    """프로젝트를 부분 일치로 찾는다. 전량(수천 건)을 받지 않는다.
+
+    ID 와 표시 이름 중 어디에 맞을지 모르므로 둘 다 묻는다 — REST 필터가 OR 를
+    지원하지 않아 두 번 물어 합친다. 동시에 던지면 왕복은 한 번 값이다.
+    """
+    term = str(term or "").strip().lower()[:64]
+    try:
+        token = _sync_access_token()
+    except RuntimeError as exc:
+        return {"projects": [], "term": term, "error": str(exc)[:200]}
+
+    if not term:
+        # 검색어가 없으면 무작위 상위 20개는 의미가 없다(sys-* 가 앞을 채운다).
+        # 화면은 현재·최근 프로젝트를 대신 보여준다.
+        return {"projects": [], "term": "", "error": ""}
+
+    escaped = term.replace("*", "")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        by_id = pool.submit(_crm_projects, f"id:*{escaped}*", limit, token)
+        by_name = pool.submit(_crm_projects, f"name:*{escaped}*", limit, token)
+        merged = by_id.result() + by_name.result()
+
+    seen: set[str] = set()
+    projects: list[dict[str, str]] = []
+    for item in merged:
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
+        projects.append(item)
+    # 접두어 일치를 위로 — 사람은 보통 앞부터 친다.
+    projects.sort(key=lambda item: (not item["id"].startswith(escaped), item["id"]))
+    return {"projects": projects[:limit], "term": term, "error": ""}
+
+
+def _project_accessible(project_id: str) -> bool:
+    """이 프로젝트 하나만 확인한다. 전량 목록을 받아 멤버십을 보던 것을 대체한다.
+
+    전량 조회는 프로젝트가 많은 계정에서 수 초가 걸리는 데다, 목록에 없다는
+    이유로 실제로는 접근 가능한 프로젝트를 막는 오탐도 났다.
+    """
+    if not PROJECT_RE.fullmatch(project_id or ""):
+        return False
+    try:
+        token = _sync_access_token()
+    except RuntimeError:
+        return False
+    status, body, _ = _http_json(f"{_CRM_PROJECTS}/{quote(project_id, safe='')}", token, timeout=20)
+    if status != 200 or not isinstance(body, dict):
+        return False
+    return str(body.get("lifecycleState") or "ACTIVE") == "ACTIVE"
 
 
 def _cleanup_mcp_deployments() -> None:
@@ -3566,8 +3623,7 @@ def common_config_resources(project: str, region: str) -> JSONResponse:
             {"error": {"code": "GCLOUD_AUTH_REQUIRED", "message": "gcloud 로그인이 필요합니다."}},
             status_code=412,
         )
-    accessible_projects = {item["id"] for item in bootstrap["projects"]}
-    if project not in accessible_projects:
+    if not _project_accessible(project):
         return JSONResponse(
             {"error": {"code": "PROJECT_FORBIDDEN", "message": "접근할 수 없는 프로젝트입니다."}},
             status_code=403,
@@ -3591,8 +3647,7 @@ async def common_config_resource_plan(request: Request) -> JSONResponse:
             {"error": {"code": "GCLOUD_AUTH_REQUIRED", "message": "gcloud 로그인이 필요합니다."}},
             status_code=412,
         )
-    accessible_projects = {item["id"] for item in bootstrap["projects"]}
-    if str(payload.get("projectId") or "") not in accessible_projects:
+    if not _project_accessible(str(payload.get("projectId") or "")):
         return JSONResponse(
             {"error": {"code": "PROJECT_FORBIDDEN", "message": "접근할 수 없는 프로젝트입니다."}},
             status_code=403,
@@ -3653,6 +3708,12 @@ def common_config_provision_run(run_id: str) -> JSONResponse:
                 status_code=404,
             )
         return JSONResponse(copy.deepcopy(run))
+
+
+@app.get("/api/v1/projects/search")
+def project_search(q: str = "", limit: int = PROJECT_SEARCH_LIMIT) -> JSONResponse:
+    """프로젝트 부분 일치 검색. 전량을 받지 않으므로 타이핑 중에도 쓸 수 있다."""
+    return JSONResponse(search_projects(q, limit))
 
 
 @app.get("/api/v1/drive-service-account/status")
@@ -3778,8 +3839,7 @@ async def create_common(request: Request) -> JSONResponse:
             status_code=412,
         )
     candidate, result = validate_common_candidate(payload)
-    accessible_projects = {item["id"] for item in bootstrap["projects"]}
-    if candidate["GCP_PROJECT_ID"] not in accessible_projects:
+    if not _project_accessible(candidate["GCP_PROJECT_ID"]):
         _field_error(
             result["fieldErrors"],
             "projectId",

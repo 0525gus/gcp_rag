@@ -608,6 +608,7 @@ def test_missing_common_config_can_be_bootstrapped(
             "regions": dept_gui.SETUP_REGIONS,
         },
     )
+    monkeypatch.setattr(dept_gui, "_project_accessible", lambda pid: pid == "project-test")
     monkeypatch.setattr(
         dept_gui,
         "_gcloud_project_resources",
@@ -1475,6 +1476,8 @@ def _bootstrap(monkeypatch: pytest.MonkeyPatch, project: str = "project-test") -
             "projects": [{"id": project, "name": project}],
         },
     )
+    # 접근 확인은 전량 목록 멤버십이 아니라 단건 조회다.
+    monkeypatch.setattr(dept_gui, "_project_accessible", lambda pid: pid == project)
 
 
 def _no_resources(project: str, region: str) -> dict:
@@ -2014,3 +2017,132 @@ def test_bootstrap_state_discards_project_list_when_unauthenticated(
 
     assert state["authenticated"] is False
     assert state["projects"] == []
+
+
+def test_bootstrap_state_does_not_enumerate_every_project(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """프로젝트 전량 조회를 하면 안 된다 — 수천 개 계정에서 6초를 먹던 지점이다."""
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud.cmd")
+
+    def fake_json(args, timeout=12):
+        if args[:2] == ["projects", "list"]:
+            pytest.fail("프로젝트 전량 조회가 되살아났다")
+        return True, [{"account": "tester@example.com"}]
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_json)
+    monkeypatch.setattr(dept_gui, "_run_command", lambda *a, **k: (True, "proj-current"))
+
+    state = dept_gui._gcloud_bootstrap_state(include_projects=True)
+
+    assert state["authenticated"] is True
+    # 현재 프로젝트 하나만 싣는다. 나머지는 검색으로 찾는다.
+    assert state["projects"] == [{"id": "proj-current", "name": "proj-current"}]
+
+
+def test_project_search_merges_id_and_name_matches(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ID 와 표시 이름 중 어디에 맞을지 모르므로 둘 다 묻고 합친다."""
+    monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "token")
+    seen: list[str] = []
+
+    def fake_http(url, token, timeout=15):
+        seen.append(url)
+        if "id%3A" in url or "id:" in url:
+            return 200, {"projects": [{"projectId": "tuk-mcp-rag", "name": "RAG"}]}, 10
+        return 200, {"projects": [{"projectId": "other-rag", "name": "rag-thing"}]}, 10
+
+    monkeypatch.setattr(dept_gui, "_http_json", fake_http)
+
+    result = dept_gui.search_projects("rag")
+
+    ids = [item["id"] for item in result["projects"]]
+    assert ids == ["other-rag", "tuk-mcp-rag"] or ids == ["tuk-mcp-rag", "other-rag"]
+    assert len(seen) == 2, "ID 와 이름을 둘 다 물어야 한다"
+
+
+def test_project_search_dedupes_and_prefers_prefix_match(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "token")
+    monkeypatch.setattr(
+        dept_gui,
+        "_http_json",
+        lambda url, token, timeout=15: (
+            200,
+            {
+                "projects": [
+                    {"projectId": "zzz-tuk-old", "name": "old"},
+                    {"projectId": "tuk-mcp-rag", "name": "RAG"},
+                ]
+            },
+            10,
+        ),
+    )
+
+    result = dept_gui.search_projects("tuk")
+
+    ids = [item["id"] for item in result["projects"]]
+    assert ids == ["tuk-mcp-rag", "zzz-tuk-old"], "접두어 일치가 위로 와야 한다"
+
+
+def test_project_search_skips_inactive_projects(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "token")
+    monkeypatch.setattr(
+        dept_gui,
+        "_http_json",
+        lambda url, token, timeout=15: (
+            200,
+            {
+                "projects": [
+                    {"projectId": "gone", "name": "gone", "lifecycleState": "DELETE_REQUESTED"},
+                    {"projectId": "live", "name": "live", "lifecycleState": "ACTIVE"},
+                ]
+            },
+            10,
+        ),
+    )
+
+    result = dept_gui.search_projects("l")
+
+    assert [item["id"] for item in result["projects"]] == ["live"]
+
+
+def test_project_search_without_term_does_not_call_gcp(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """검색어 없이 상위 N개를 뿌리면 sys-* 가 앞을 채워 쓸모가 없다."""
+    monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "token")
+    monkeypatch.setattr(
+        dept_gui, "_http_json", lambda *a, **k: pytest.fail("빈 검색어로 GCP 를 부르면 안 된다")
+    )
+    client, _ = _client()
+
+    body = client.get("/api/v1/projects/search?q=").json()
+
+    assert body["projects"] == []
+
+
+def test_project_accessible_checks_one_project_not_the_whole_list(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """전량 목록 멤버십 대신 단건 확인 — 빠르고, 목록 누락으로 인한 오탐이 없다."""
+    monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "token")
+    calls: list[str] = []
+
+    def fake_http(url, token, timeout=15):
+        calls.append(url)
+        if url.endswith("/project-ok"):
+            return 200, {"projectId": "project-ok", "lifecycleState": "ACTIVE"}, 10
+        return 403, {}, 10
+
+    monkeypatch.setattr(dept_gui, "_http_json", fake_http)
+
+    assert dept_gui._project_accessible("project-ok") is True
+    assert dept_gui._project_accessible("project-no") is False
+    # 형식이 틀리면 왕복조차 하지 않는다.
+    assert dept_gui._project_accessible("BAD ID") is False
+    assert len(calls) == 2

@@ -30,6 +30,8 @@
     provisionPollTimer: null,
     commonResourcePlan: null,
     commonProvisionPollTimer: null,
+    projectSearchTimer: null,
+    projectSearchRequest: 0,
     driveSaStatus: null,
     driveSaPlan: null,
     driveSaPollTimer: null,
@@ -924,11 +926,101 @@
     first?.focus();
   }
 
+  const RECENT_PROJECTS_KEY = "gcpRagConsole.recentProjects";
+  const RECENT_PROJECTS_MAX = 5;
+
+  function recentProjects() {
+    // 저장소는 브라우저 설정에 따라 통째로 던질 수 있다. 못 읽어도 화면은 떠야 한다.
+    try {
+      const raw = window.localStorage.getItem(RECENT_PROJECTS_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed.filter((item) => item && item.id) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function rememberProject(id, name) {
+    if (!id) return;
+    try {
+      const next = [{ id, name: name || id }, ...recentProjects().filter((item) => item.id !== id)];
+      window.localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(next.slice(0, RECENT_PROJECTS_MAX)));
+    } catch {
+      /* 기억 못 해도 기능은 그대로 — 검색으로 찾으면 된다 */
+    }
+  }
+
+  function renderProjectOptions(found = [], { keepSelection = true } = {}) {
+    const select = $("#commonSetupForm").elements.projectId;
+    const previous = keepSelection ? select.value : "";
+    const current = state.environment?.gcloudProject || "";
+    const groups = [];
+    const seen = new Set();
+    const push = (label, items) => {
+      const fresh = items.filter((item) => item.id && !seen.has(item.id));
+      fresh.forEach((item) => seen.add(item.id));
+      if (fresh.length) groups.push({ label, items: fresh });
+    };
+    // 현재 -> 최근 -> 검색 결과 순. 사람이 실제로 고를 확률 순서다.
+    push("현재 gcloud 프로젝트", current ? [{ id: current, name: current }] : []);
+    push("최근 사용", recentProjects());
+    push("검색 결과", found);
+
+    select.innerHTML = groups.length
+      ? groups
+          .map((group) => `<optgroup label="${escapeHtml(group.label)}">${group.items
+            .map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name && item.name !== item.id ? `${item.name} · ${item.id}` : item.id)}</option>`)
+            .join("")}</optgroup>`)
+          .join("")
+      : '<option value="">검색어를 입력해 프로젝트를 찾으세요</option>';
+    select.disabled = !groups.length;
+    if (previous && seen.has(previous)) select.value = previous;
+    return groups.length;
+  }
+
+  async function searchProjects(term) {
+    const hint = $("#projectSearchHint");
+    const trimmed = String(term || "").trim();
+    if (!trimmed) {
+      renderProjectOptions([]);
+      hint.textContent = "현재 gcloud 프로젝트를 먼저 보여줍니다. 다른 프로젝트는 위에서 검색하세요.";
+      loadSetupResources();
+      return;
+    }
+    hint.textContent = "검색 중…";
+    const requestId = ++state.projectSearchRequest;
+    try {
+      const result = await api(`/api/v1/projects/search?q=${encodeURIComponent(trimmed)}`);
+      if (requestId !== state.projectSearchRequest) return;
+      const found = result.projects || [];
+      renderProjectOptions(found, { keepSelection: false });
+      if (found.length) {
+        // 검색해서 고르는 흐름이므로 첫 결과를 바로 선택해 준다.
+        $("#commonSetupForm").elements.projectId.value = found[0].id;
+        loadSetupResources();
+      }
+      hint.textContent = result.error
+        ? result.error
+        : (found.length ? `${found.length}개 찾음` : "일치하는 프로젝트가 없습니다");
+    } catch (error) {
+      if (requestId !== state.projectSearchRequest) return;
+      hint.textContent = `검색하지 못했습니다: ${error.message}`;
+    }
+  }
+
+  function onProjectSearchInput(event) {
+    window.clearTimeout(state.projectSearchTimer);
+    const term = event.target.value;
+    // 글자마다 왕복시키지 않는다 — 서버 호출은 ~0.4초짜리다.
+    state.projectSearchTimer = window.setTimeout(() => searchProjects(term), 280);
+  }
+
   function renderCommonBootstrap(env) {
     const form = $("#commonSetupForm");
     const authBox = $("#setupAuth");
-    const projects = env?.gcloudProjects || [];
-    const ready = Boolean(env?.gcloudInstalled && env?.gcloudAuthenticated && projects.length);
+    // 프로젝트 목록 유무로 준비 상태를 판단하지 않는다 — 전량 조회를 없앴고,
+    // 기본 프로젝트가 없는 계정도 검색해서 고르면 되기 때문이다.
+    const ready = Boolean(env?.gcloudInstalled && env?.gcloudAuthenticated);
     authBox.dataset.status = ready ? "ready" : "required";
 
     if (!env?.gcloudInstalled) {
@@ -945,11 +1037,15 @@
       $("#setupAuthDetail").textContent = `${env.gcloudAccount} · 접근 가능한 프로젝트 ${projects.length}개`;
     }
 
-    form.elements.projectId.innerHTML = projects.length
-      ? projects.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(item.id)}</option>`).join("")
-      : '<option value="">로그인 후 프로젝트를 선택할 수 있습니다</option>';
-    form.elements.projectId.disabled = !ready;
-    if (ready && projects.some((item) => item.id === env.gcloudProject)) form.elements.projectId.value = env.gcloudProject;
+    const search = $("#projectSearch");
+    search.disabled = !ready;
+    if (ready) {
+      renderProjectOptions([]);
+      if (env.gcloudProject) form.elements.projectId.value = env.gcloudProject;
+    } else {
+      form.elements.projectId.innerHTML = '<option value="">로그인 후 프로젝트를 선택할 수 있습니다</option>';
+      form.elements.projectId.disabled = true;
+    }
 
     const regions = env?.availableRegions || [];
     form.elements.region.innerHTML = regions.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)} · ${escapeHtml(item.id)}</option>`).join("");
@@ -1204,7 +1300,9 @@
     button.disabled = true;
     button.textContent = "설정 저장 중…";
     try {
-      const result = await api("/api/v1/common-config", { method: "POST", body: commonSetupPayload() });
+      const payload = commonSetupPayload();
+      const result = await api("/api/v1/common-config", { method: "POST", body: payload });
+      rememberProject(payload.projectId, payload.projectId);
       $("#setupGate").classList.add("hidden");
       toast("공통 설정을 생성했습니다", result.path, "ok");
       await Promise.all([loadEnvironment(), loadDepartments()]);
@@ -2374,6 +2472,7 @@
     $("#planCommonResources").addEventListener("click", planCommonResources);
     $("#confirmCommonProvision").addEventListener("click", confirmCommonProvision);
     $("#cancelCommonProvision").addEventListener("click", cancelCommonProvision);
+    $("#projectSearch").addEventListener("input", onProjectSearchInput);
     $("#commonSetupForm").elements.projectId.addEventListener("change", loadSetupResources);
     $("#commonSetupForm").elements.region.addEventListener("change", loadSetupResources);
     $("#refreshDepartmentResources").addEventListener("click", () => loadDepartmentResources());

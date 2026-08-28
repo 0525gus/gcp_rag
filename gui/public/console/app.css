@@ -80,6 +80,8 @@ button, select { cursor: pointer; }
 .setup-provision-actions { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }
 .drive-sa-heading { margin: 13px 0 6px; color: #7b8799; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
 .drive-sa-loading { margin: 0; color: #8793a4; font-size: 9px; }
+.project-search { margin-bottom: 6px; }
+.project-search-hint { color: #8793a4; }
 .setup-divider { position: relative; margin: 4px 0 18px; color: #8c98a9; font-size: 8px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
 .setup-divider::before { content: ""; position: absolute; inset: 50% 0 auto; height: 1px; background: var(--line); }
 .setup-divider span { position: relative; padding-right: 10px; background: white; }

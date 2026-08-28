@@ -34,7 +34,9 @@
           <div class="form-grid two-columns">
             <label class="field">
               <span>GCP 프로젝트 ID <em>필수</em></span>
+              <input type="search" id="projectSearch" class="project-search" placeholder="프로젝트 ID 또는 이름으로 검색" autocomplete="off" spellcheck="false" disabled />
               <select name="projectId" disabled><option value="">gcloud 로그인 확인 중…</option></select>
+              <small class="project-search-hint" id="projectSearchHint">현재 gcloud 프로젝트를 먼저 보여줍니다. 다른 프로젝트는 위에서 검색하세요.</small>
               <span class="field-error" data-setup-error="projectId"></span>
             </label>
             <label class="field">
