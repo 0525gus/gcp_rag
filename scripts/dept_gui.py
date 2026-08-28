@@ -92,6 +92,9 @@ _RESOURCE_PLANS: dict[str, dict[str, Any]] = {}
 _PROVISION_RUNS: dict[str, dict[str, Any]] = {}
 _PROVISION_LOCK = threading.Lock()
 _PROVISION_TTL_SECONDS = 30 * 60
+_COMMON_RESOURCE_PLANS: dict[str, dict[str, Any]] = {}
+_COMMON_PROVISION_RUNS: dict[str, dict[str, Any]] = {}
+_COMMON_PROVISION_LOCK = threading.Lock()
 _MCP_DEPLOY_RUNS: dict[str, dict[str, Any]] = {}
 _MCP_DEPLOY_LOCK = threading.Lock()
 _MCP_DEPLOY_TTL_SECONDS = 60 * 60
@@ -106,6 +109,29 @@ PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, str]] = {
     "corpusStaff": {"kind": "corpus", "label": "교직원 코퍼스"},
     "corpusStudent": {"kind": "corpus", "label": "학생 코퍼스"},
 }
+
+# 공통(프로젝트 1회) 리소스. 학과별이 아니라 전 학과가 공유한다.
+# 켤 API 를 같이 적는다 — 새 프로젝트는 전부 꺼져 있어 생성이 그냥 실패한다.
+COMMON_PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
+    "artifactRepo": {
+        "kind": "artifactRepo",
+        "label": "Artifact Registry (Docker)",
+        "service": "artifactregistry.googleapis.com",
+        "defaultName": "rag-mcp",
+    },
+    "firestoreDatabase": {
+        "kind": "firestoreDatabase",
+        "label": "Firestore (Native)",
+        "service": "firestore.googleapis.com",
+        "defaultName": "rag-sync-state",
+    },
+}
+# Firestore 는 위치를 나중에 못 바꾼다. 만들기 전에 화면에서 반드시 알린다.
+COMMON_PROVISION_WARNINGS: dict[str, str] = {
+    "firestoreDatabase": "생성 후 위치를 변경할 수 없습니다. 리전을 확인해 주세요.",
+}
+ARTIFACT_REPO_RE = re.compile(r"[a-z][a-z0-9._-]{1,62}")
+FIRESTORE_DB_RE = re.compile(r"[a-z][a-z0-9-]{1,61}[a-z0-9]")
 RAG_EMBEDDING_MODEL = "text-multilingual-embedding-002"
 CORPUS_CHAT_MODEL = "gemini-2.5-flash-lite"
 CORPUS_CHAT_LOCATION = "global"
@@ -1311,6 +1337,199 @@ def _create_corpus_resource(display_name: str, project: str, region: str, token:
     raise RuntimeError("코퍼스 생성 작업이 오래 걸리고 있습니다. 리소스를 새로 만들기 전에 목록을 확인해 주세요.")
 
 
+def _gcloud_enabled_services(project: str) -> tuple[bool, set[str]]:
+    """프로젝트에 켜져 있는 API 목록. 조회 실패와 '하나도 없음' 을 구분한다."""
+    ok, raw = _gcloud_json(
+        ["services", "list", "--enabled", f"--project={project}"], timeout=30
+    )
+    if not ok or not isinstance(raw, list):
+        return False, set()
+    names: set[str] = set()
+    for item in raw:
+        if isinstance(item, dict):
+            name = str(item.get("config", {}).get("name") or item.get("name") or "")
+            names.add(name.rsplit("/services/", 1)[-1] if "/services/" in name else name)
+    return True, {name for name in names if name}
+
+
+def create_common_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
+    """외부 리소스를 **바꾸지 않고** 무엇을 켜고 무엇을 만들지만 계산한다.
+
+    API 활성화가 계획에 드러나야 사용자가 모르고 켜는 일이 없다. 실제 변경은
+    확인 뒤 start_common_provision_run 에서만 일어난다.
+    """
+    project = str(payload.get("projectId") or "").strip()
+    region = str(payload.get("region") or "").strip()
+    if not PROJECT_RE.fullmatch(project):
+        raise ValueError("GCP 프로젝트를 먼저 선택해 주세요.")
+    if not REGION_RE.fullmatch(region):
+        raise ValueError("리전을 먼저 선택해 주세요.")
+
+    names = {
+        "artifactRepo": str(payload.get("artifactRepo") or "").strip()
+        or COMMON_PROVISION_RESOURCE_DEFINITIONS["artifactRepo"]["defaultName"],
+        "firestoreDatabase": str(payload.get("firestoreDatabase") or "").strip()
+        or COMMON_PROVISION_RESOURCE_DEFINITIONS["firestoreDatabase"]["defaultName"],
+    }
+    if not ARTIFACT_REPO_RE.fullmatch(names["artifactRepo"]):
+        raise ValueError("유효한 Artifact Registry 저장소 이름이 필요합니다.")
+    if not FIRESTORE_DB_RE.fullmatch(names["firestoreDatabase"]):
+        raise ValueError("유효한 Firestore 데이터베이스 ID가 필요합니다.")
+    # (default) 는 Datastore 모드로 굳으면 되돌릴 수 없다 — preflight 가 금지하는 값이다.
+    if names["firestoreDatabase"] == "(default)":
+        raise ValueError("(default) 데이터베이스는 사용하지 않습니다. 다른 ID를 입력해 주세요.")
+
+    existing = _gcloud_project_resources(project, region)
+    existing_ids = {
+        "artifactRepo": {item["id"] for item in existing["artifactRepositories"]},
+        "firestoreDatabase": {item["id"] for item in existing["firestoreDatabases"]},
+    }
+    services_ok, enabled = _gcloud_enabled_services(project)
+
+    resources: list[dict[str, Any]] = []
+    services: list[dict[str, Any]] = []
+    for key, definition in COMMON_PROVISION_RESOURCE_DEFINITIONS.items():
+        already = names[key] in existing_ids[key]
+        resources.append(
+            {
+                "key": key,
+                "kind": definition["kind"],
+                "label": definition["label"],
+                "displayName": names[key],
+                "value": names[key] if already else "",
+                "exists": already,
+                "warning": COMMON_PROVISION_WARNINGS.get(key, ""),
+            }
+        )
+        service = str(definition["service"])
+        if not any(item["name"] == service for item in services):
+            services.append(
+                {
+                    "name": service,
+                    # 조회 실패 시엔 '켜져 있다' 고 단정하지 않는다 — 화면에 확인 필요로 뜬다.
+                    "enabled": bool(services_ok and service in enabled),
+                    "known": services_ok,
+                }
+            )
+
+    plan_id = uuid.uuid4().hex
+    plan = {
+        "planId": plan_id,
+        "projectId": project,
+        "region": region,
+        "resources": resources,
+        "services": services,
+        "createdEpoch": time.time(),
+        "started": False,
+    }
+    with _COMMON_PROVISION_LOCK:
+        _cleanup_common_provision_state()
+        _COMMON_RESOURCE_PLANS[plan_id] = plan
+    return copy.deepcopy(plan)
+
+
+def _cleanup_common_provision_state() -> None:
+    cutoff = time.time() - _PROVISION_TTL_SECONDS
+    for plan_id in [
+        key for key, item in _COMMON_RESOURCE_PLANS.items() if item.get("createdEpoch", 0) < cutoff
+    ]:
+        _COMMON_RESOURCE_PLANS.pop(plan_id, None)
+    for run_id in [
+        key
+        for key, item in _COMMON_PROVISION_RUNS.items()
+        if item.get("finishedEpoch", item.get("createdEpoch", time.time())) < cutoff
+    ]:
+        _COMMON_PROVISION_RUNS.pop(run_id, None)
+
+
+def _enable_gcloud_service(service: str, project: str) -> None:
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        raise RuntimeError("gcloud를 찾을 수 없습니다.")
+    ok, output = _run_command(
+        [gcloud, "services", "enable", service, f"--project={project}", "--quiet"],
+        timeout=180,
+    )
+    if not ok:
+        raise RuntimeError((output or f"{service} 활성화에 실패했습니다.")[-400:])
+
+
+def _create_artifact_repo_resource(name: str, project: str, region: str) -> str:
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        raise RuntimeError("gcloud를 찾을 수 없습니다.")
+    ok, output = _run_command(
+        [
+            gcloud,
+            "artifacts",
+            "repositories",
+            "create",
+            name,
+            "--repository-format=docker",
+            f"--location={region}",
+            f"--project={project}",
+            "--quiet",
+        ],
+        timeout=180,
+    )
+    if not ok:
+        raise RuntimeError((output or "Artifact Registry 저장소 생성에 실패했습니다.")[-400:])
+    described, metadata = _gcloud_json(
+        [
+            "artifacts",
+            "repositories",
+            "describe",
+            name,
+            f"--location={region}",
+            f"--project={project}",
+        ],
+        timeout=30,
+    )
+    if not described or not isinstance(metadata, dict):
+        raise RuntimeError("저장소는 생성됐지만 형식을 다시 확인하지 못했습니다.")
+    if str(metadata.get("format") or "").upper() != "DOCKER":
+        raise RuntimeError("저장소가 Docker 형식으로 생성되지 않았습니다.")
+    return name
+
+
+def _create_firestore_database_resource(name: str, project: str, region: str) -> str:
+    """Native 모드로만 만든다. Datastore 모드로 굳으면 되돌릴 수 없다."""
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        raise RuntimeError("gcloud를 찾을 수 없습니다.")
+    ok, output = _run_command(
+        [
+            gcloud,
+            "firestore",
+            "databases",
+            "create",
+            f"--database={name}",
+            f"--location={region}",
+            "--type=firestore-native",
+            f"--project={project}",
+            "--quiet",
+        ],
+        timeout=300,
+    )
+    if not ok:
+        raise RuntimeError((output or "Firestore 데이터베이스 생성에 실패했습니다.")[-400:])
+    described, metadata = _gcloud_json(
+        [
+            "firestore",
+            "databases",
+            "describe",
+            f"--database={name}",
+            f"--project={project}",
+        ],
+        timeout=30,
+    )
+    if not described or not isinstance(metadata, dict):
+        raise RuntimeError("데이터베이스는 생성됐지만 모드를 다시 확인하지 못했습니다.")
+    if str(metadata.get("type") or "") != "FIRESTORE_NATIVE":
+        raise RuntimeError("데이터베이스가 Native 모드로 생성되지 않았습니다.")
+    return name
+
+
 def retrieve_department_corpus(
     code: str, audience: str, query: str, top_k: int = 5, *, generate: bool = False
 ) -> dict[str, Any]:
@@ -1572,6 +1791,131 @@ def start_provision_run(
         target=_execute_provision_run,
         args=(run_id,),
         name=f"resource-provision-{run_id[:8]}",
+        daemon=True,
+    ).start()
+    return copy.deepcopy(run)
+
+
+def _set_common_provision_step(run_id: str, key: str, **changes: Any) -> None:
+    with _COMMON_PROVISION_LOCK:
+        run = _COMMON_PROVISION_RUNS.get(run_id)
+        if not run:
+            return
+        for item in run["resources"]:
+            if item["key"] == key:
+                item.update(changes)
+                return
+
+
+def _set_common_provision_service(run_id: str, name: str, **changes: Any) -> None:
+    with _COMMON_PROVISION_LOCK:
+        run = _COMMON_PROVISION_RUNS.get(run_id)
+        if not run:
+            return
+        for item in run["services"]:
+            if item["name"] == name:
+                item.update(changes)
+                return
+
+
+def _execute_common_provision_run(run_id: str) -> None:
+    """API 를 먼저 켜고 리소스를 만든다. API 가 꺼진 채로는 생성이 그냥 실패한다."""
+    with _COMMON_PROVISION_LOCK:
+        run = copy.deepcopy(_COMMON_PROVISION_RUNS[run_id])
+    project = run["projectId"]
+    region = run["region"]
+
+    failed_services: set[str] = set()
+    for service in run["services"]:
+        name = service["name"]
+        if service.get("enabled") and service.get("known"):
+            _set_common_provision_service(run_id, name, status="SKIPPED", detail="이미 활성화됨")
+            continue
+        _set_common_provision_service(run_id, name, status="RUNNING", detail="활성화 중")
+        try:
+            _enable_gcloud_service(name, project)
+        except (OSError, RuntimeError) as exc:
+            failed_services.add(name)
+            _set_common_provision_service(run_id, name, status="FAILED", detail=str(exc)[:400])
+        else:
+            _set_common_provision_service(run_id, name, status="COMPLETE", detail="활성화 완료")
+
+    for resource in run["resources"]:
+        key = resource["key"]
+        if resource.get("exists"):
+            _set_common_provision_step(
+                run_id, key, status="SKIPPED", detail="이미 존재해 건너뜀"
+            )
+            continue
+        service = str(COMMON_PROVISION_RESOURCE_DEFINITIONS[key]["service"])
+        if service in failed_services:
+            _set_common_provision_step(
+                run_id, key, status="FAILED", detail=f"{service} 활성화 실패로 생성하지 않았습니다."
+            )
+            continue
+        _set_common_provision_step(run_id, key, status="RUNNING", detail="생성 요청 중")
+        try:
+            if resource["kind"] == "artifactRepo":
+                value = _create_artifact_repo_resource(resource["displayName"], project, region)
+            else:
+                value = _create_firestore_database_resource(
+                    resource["displayName"], project, region
+                )
+            _set_common_provision_step(
+                run_id, key, status="COMPLETE", value=value, detail="생성 및 확인 완료"
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            _set_common_provision_step(run_id, key, status="FAILED", detail=str(exc)[:400])
+
+    with _COMMON_PROVISION_LOCK:
+        current = _COMMON_PROVISION_RUNS[run_id]
+        statuses = [item["status"] for item in current["resources"]]
+        settled = [item for item in statuses if item in {"COMPLETE", "SKIPPED"}]
+        if len(settled) == len(statuses):
+            current["status"] = "COMPLETED"
+        elif settled:
+            current["status"] = "PARTIAL"
+        else:
+            current["status"] = "FAILED"
+        current["finishedEpoch"] = time.time()
+
+
+def start_common_provision_run(plan_id: str) -> dict[str, Any]:
+    with _COMMON_PROVISION_LOCK:
+        _cleanup_common_provision_state()
+        plan = _COMMON_RESOURCE_PLANS.get(plan_id)
+        if not plan:
+            raise FileNotFoundError(plan_id)
+        if plan["started"]:
+            raise FileExistsError("이미 실행한 생성 계획입니다.")
+        for active in _COMMON_PROVISION_RUNS.values():
+            if active["status"] == "RUNNING":
+                raise FileExistsError("공통 리소스 생성이 이미 진행 중입니다.")
+
+        run_id = uuid.uuid4().hex
+        resources = copy.deepcopy(plan["resources"])
+        for item in resources:
+            item.update(status="PENDING", detail="대기 중")
+        services = copy.deepcopy(plan["services"])
+        for item in services:
+            item.update(status="PENDING", detail="대기 중")
+        run = {
+            "runId": run_id,
+            "planId": plan_id,
+            "projectId": plan["projectId"],
+            "region": plan["region"],
+            "status": "RUNNING",
+            "resources": resources,
+            "services": services,
+            "createdEpoch": time.time(),
+        }
+        plan["started"] = True
+        _COMMON_PROVISION_RUNS[run_id] = run
+
+    threading.Thread(
+        target=_execute_common_provision_run,
+        args=(run_id,),
+        name=f"common-provision-{run_id[:8]}",
         daemon=True,
     ).start()
     return copy.deepcopy(run)
@@ -2925,6 +3269,86 @@ def common_config_resources(project: str, region: str) -> JSONResponse:
             status_code=403,
         )
     return JSONResponse(_gcloud_project_resources(project, region))
+
+
+@app.post("/api/v1/common-config/resource-plans")
+async def common_config_resource_plan(request: Request) -> JSONResponse:
+    """무엇을 켜고 무엇을 만들지만 돌려준다. 여기서는 아무것도 바꾸지 않는다."""
+    _require_local_session(request)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        return JSONResponse(
+            {"error": {"code": "INVALID_PAYLOAD", "message": "요청 본문을 확인해 주세요."}},
+            status_code=422,
+        )
+    bootstrap = _gcloud_bootstrap_state()
+    if not bootstrap["installed"] or not bootstrap["authenticated"]:
+        return JSONResponse(
+            {"error": {"code": "GCLOUD_AUTH_REQUIRED", "message": "gcloud 로그인이 필요합니다."}},
+            status_code=412,
+        )
+    accessible_projects = {item["id"] for item in bootstrap["projects"]}
+    if str(payload.get("projectId") or "") not in accessible_projects:
+        return JSONResponse(
+            {"error": {"code": "PROJECT_FORBIDDEN", "message": "접근할 수 없는 프로젝트입니다."}},
+            status_code=403,
+        )
+    try:
+        plan = create_common_resource_plan(payload)
+    except (TypeError, ValueError) as exc:
+        return JSONResponse(
+            {"error": {"code": "INVALID_RESOURCE_NAME", "message": str(exc)}},
+            status_code=422,
+        )
+    return JSONResponse(plan, status_code=200)
+
+
+@app.post("/api/v1/common-config/resource-provisioning")
+async def common_config_provision(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    plan_id = str(payload.get("planId") or "") if isinstance(payload, dict) else ""
+    if not re.fullmatch(r"[0-9a-f]{32}", plan_id):
+        return JSONResponse(
+            {"error": {"code": "INVALID_RESOURCE_PLAN", "message": "생성 계획을 다시 열어 주세요."}},
+            status_code=422,
+        )
+    try:
+        run = start_common_provision_run(plan_id)
+    except FileNotFoundError:
+        return JSONResponse(
+            {
+                "error": {
+                    "code": "RESOURCE_PLAN_EXPIRED",
+                    "message": "생성 계획이 만료되었습니다. 다시 확인해 주세요.",
+                }
+            },
+            status_code=404,
+        )
+    except FileExistsError as exc:
+        return JSONResponse(
+            {"error": {"code": "RESOURCE_PROVISION_CONFLICT", "message": str(exc)}},
+            status_code=409,
+        )
+    return JSONResponse(run, status_code=202)
+
+
+@app.get("/api/v1/common-config/resource-provisioning/{run_id}")
+def common_config_provision_run(run_id: str) -> JSONResponse:
+    with _COMMON_PROVISION_LOCK:
+        _cleanup_common_provision_state()
+        run = _COMMON_PROVISION_RUNS.get(run_id)
+        if not run:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "PROVISION_RUN_NOT_FOUND",
+                        "message": "리소스 생성 실행을 찾을 수 없습니다.",
+                    }
+                },
+                status_code=404,
+            )
+        return JSONResponse(copy.deepcopy(run))
 
 
 @app.post("/api/v1/gcloud-auth/login")

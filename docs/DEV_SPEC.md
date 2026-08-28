@@ -140,7 +140,7 @@ GCS 버킷 2개와 기본 RAG 코퍼스·MCP 서비스는 학과별로 분리한
 |---|---|
 | 학과별 GCS `hwp-original` (`buckets.hwpOriginal`) | HWP/HWPX **만** 들어간다. parser 전달·재파싱용. 파싱 성공 뒤에도 지우지 않는다. 객체 키 = `{fileId}{확장자}` |
 | 학과별 GCS `source` (`buckets.source`) | RAG import 산출물(MD, 사이드카, 통과 PDF 등). PDF·DOCX 등 HWP 외 포맷은 parser·hwp-original을 안 거치고 여기로 직행. 객체 키 = `{fileId}{확장자}` |
-| 공통 Firestore DB (`FIRESTORE_DATABASE`, 현행 `rag-sync-state`) | Native 모드. Datastore 모드는 사용 불가. **사전 생성 필수** — 아래 컬렉션 5종을 담는 그릇(컬렉션은 첫 쓰기 때 자동 생성) |
+| 공통 Firestore DB (`FIRESTORE_DATABASE`, 현행 `rag-sync-state`) | Native 모드. Datastore 모드는 사용 불가. 첫 실행 GUI에서 생성 가능 — 아래 컬렉션 5종을 담는 그릇(컬렉션은 첫 쓰기 때 자동 생성) |
 | 컬렉션 `doc_state` (`DOC_STATE_COLLECTION`) | 파일별 상태·경로·해시·`audience`. |
 | 컬렉션 `doc_dlq` | 처리 실패 |
 | 컬렉션 `doc_split_queue` | 크기 초과 대기. 소비 코드 없음 |
@@ -162,6 +162,13 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 - 주소: `http://127.0.0.1:8765` (외부 인터페이스 bind 금지)
 - 공통 설정이 없으면 gcloud 로그인 → 프로젝트·리전 → 기존 Artifact Registry·Native
   Firestore 선택 순서로 `config/common.yaml`을 생성
+- 신규 프로젝트라 둘 중 하나라도 없으면 같은 화면에서 만들 수 있다. **계획 →
+  확인 → 실행** 2단계이며, 계획 단계는 외부를 바꾸지 않고 켤 API와 만들 리소스만
+  보여준다. 실행 단계에서 필요한 API(`artifactregistry`, `firestore`)를 먼저 켜고
+  생성한다 — API가 꺼진 채로는 생성이 실패하기 때문이다
+- Firestore는 Native 모드로만 만들며 위치는 `GCP_REGION`을 그대로 쓴다(생성 후
+  변경 불가). `(default)` 데이터베이스는 Datastore 모드로 굳으면 되돌릴 수 없어
+  이름으로 거부한다. 삭제는 GUI에서 제공하지 않는다
 - 학과 추가·수정 시 실제 Vertex RAG 코퍼스와 같은 리전의 보호된 GCS 버킷을
   목록에서 선택하거나 웹 콘솔에서 새로 생성한다
 - 신규 학과 코드는 기존 `config/departments/{code}.yaml`과 중복될 수 없으며 입력 중
@@ -255,6 +262,9 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 | `GET /api/v1/environment` | common 설정, gcloud 로그인·프로젝트, Drive 확인용 SA 표시 |
 | `POST /api/v1/gcloud-auth/login` | 시스템 브라우저에서 gcloud 사용자 로그인 유도 |
 | `GET /api/v1/common-config/resources` | 선택 프로젝트의 Artifact Registry·Firestore 조회 |
+| `POST /api/v1/common-config/resource-plans` | 켤 API와 만들 공통 리소스를 계산만 한다(외부 변경 없음) |
+| `POST /api/v1/common-config/resource-provisioning` | 확인된 계획으로 API 활성화 후 공통 리소스 생성(계획 1회용) |
+| `GET /api/v1/common-config/resource-provisioning/{runId}` | 공통 리소스 생성 진행 상태 |
 | `POST /api/v1/common-config` | 최초 공통 설정 생성(기존 파일 덮어쓰기 금지) |
 | `GET /api/v1/departments/resource-options` | 표시 이름이 포함된 코퍼스와 보호된 리전 버킷 조회 |
 | `POST /api/v1/departments/drive-preflight` | 입력한 공유드라이브 ID의 Compute SA 실접근 확인. 다른 학과와 겹치면 `driveConflicts`를 함께 반환 |

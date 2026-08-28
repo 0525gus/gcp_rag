@@ -64,6 +64,20 @@ button, select { cursor: pointer; }
 .setup-auth[data-status="required"] { border-color: #f0d8aa; background: #fffaf0; }.setup-auth[data-status="required"] .setup-auth-dot { color: var(--warn); background: var(--warn-bg); }
 .setup-resource-status { min-height: 16px; margin: -7px 0 14px; color: #8793a4; font-size: 9px; }
 .setup-resource-status[data-status="ready"] { color: var(--ok); }.setup-resource-status[data-status="error"] { color: var(--warn); }
+.setup-provision-plan { margin: 0 0 16px; padding: 14px 15px; border: 1px solid #ccdafd; border-radius: 13px; background: #f8faff; }
+.setup-provision-plan h4 { margin: 0 0 4px; font-size: 10px; }
+.setup-provision-plan h5 { margin: 11px 0 5px; color: #7b8799; font-size: 9px; text-transform: uppercase; letter-spacing: .05em; }
+.setup-provision-scope { margin: 0; color: #8793a4; font-size: 9px; }
+.setup-provision-list { margin: 0; padding: 0; list-style: none; display: grid; gap: 5px; }
+.setup-provision-list li { display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr); align-items: baseline; gap: 4px 8px; padding: 6px 9px; border-radius: 8px; background: #fff; border: 1px solid #e6ecf7; font-size: 9px; }
+.setup-provision-list li b { font-size: 9px; }
+.setup-provision-list li span { color: #7b8799; }
+.setup-provision-list li small { grid-column: 1 / -1; color: #8793a4; line-height: 1.45; }
+.setup-provision-list li small.warn { color: var(--warn); }
+.setup-provision-list li[data-tone="ok"] { border-color: #cfe9d8; }
+.setup-provision-list li[data-tone="warn"] { border-color: #f5e2c0; }
+.setup-provision-list li[data-tone="fail"] { border-color: #f3cccc; }
+.setup-provision-actions { margin-top: 12px; display: flex; justify-content: flex-end; gap: 8px; }
 .setup-divider { position: relative; margin: 4px 0 18px; color: #8c98a9; font-size: 8px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
 .setup-divider::before { content: ""; position: absolute; inset: 50% 0 auto; height: 1px; background: var(--line); }
 .setup-divider span { position: relative; padding-right: 10px; background: white; }

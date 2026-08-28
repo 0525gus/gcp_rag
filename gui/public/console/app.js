@@ -28,6 +28,8 @@
     resourcePlan: null,
     provisionRun: null,
     provisionPollTimer: null,
+    commonResourcePlan: null,
+    commonProvisionPollTimer: null,
     mcpDeployment: null,
     mcpDeploymentCode: "",
     mcpDeploymentPollTimer: null,
@@ -775,6 +777,8 @@
     form.elements.firestoreDatabase.disabled = true;
     form.elements.artifactRepo.innerHTML = '<option value="">기존 리소스 조회 대기 중</option>';
     form.elements.firestoreDatabase.innerHTML = '<option value="">기존 리소스 조회 대기 중</option>';
+    $("#setupProvisionCallout").classList.add("hidden");
+    $("#setupProvisionPlan").classList.add("hidden");
     $("#setupResourceStatus").textContent = ready ? "기존 리소스를 불러오는 중입니다." : "gcloud 로그인 후 기존 리소스를 불러옵니다.";
     $("#setupResourceStatus").dataset.status = "";
     $("#createCommonConfig").disabled = true;
@@ -784,6 +788,115 @@
       ? "로그인 다시 열기"
       : (env?.gcloudAuthenticated ? "다시 확인" : "gcloud 로그인");
     return ready;
+  }
+
+  function renderCommonProvisionPlan(plan) {
+    const services = (plan.services || []).map((item) => {
+      const label = item.status
+        ? { PENDING: "대기 중", RUNNING: "활성화 중", COMPLETE: "활성화 완료", SKIPPED: "이미 켜짐", FAILED: "실패" }[item.status] || item.status
+        : (item.known ? (item.enabled ? "이미 켜져 있음" : "켜야 함") : "확인 필요");
+      const tone = item.status === "FAILED" ? "fail" : (item.status === "COMPLETE" || item.enabled ? "ok" : "warn");
+      return `<li data-tone="${tone}"><b>${escapeHtml(item.name)}</b><span>${escapeHtml(label)}</span>${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}</li>`;
+    }).join("");
+    const resources = (plan.resources || []).map((item) => {
+      const label = item.status
+        ? { PENDING: "대기 중", RUNNING: "생성 중", COMPLETE: "생성 완료", SKIPPED: "이미 있음", FAILED: "실패" }[item.status] || item.status
+        : (item.exists ? "이미 있음 · 건너뜀" : "새로 만듦");
+      const tone = item.status === "FAILED" ? "fail" : (item.status === "COMPLETE" || item.exists ? "ok" : "warn");
+      return `<li data-tone="${tone}"><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.displayName)} · ${escapeHtml(label)}</span>${item.warning && !item.exists ? `<small class="warn">${escapeHtml(item.warning)}</small>` : ""}${item.detail ? `<small>${escapeHtml(item.detail)}</small>` : ""}</li>`;
+    }).join("");
+    $("#setupProvisionPlanBody").innerHTML = `
+      <p class="setup-provision-scope">${escapeHtml(plan.projectId || "")} · ${escapeHtml(plan.region || "")}</p>
+      <h5>켤 API</h5><ul class="setup-provision-list">${services}</ul>
+      <h5>만들 리소스</h5><ul class="setup-provision-list">${resources}</ul>`;
+  }
+
+  async function planCommonResources() {
+    const button = $("#planCommonResources");
+    const form = $("#commonSetupForm");
+    button.disabled = true;
+    button.textContent = "확인 중…";
+    try {
+      const plan = await api("/api/v1/common-config/resource-plans", {
+        method: "POST",
+        body: {
+          projectId: form.elements.projectId.value,
+          region: form.elements.region.value,
+        },
+      });
+      state.commonResourcePlan = plan;
+      renderCommonProvisionPlan(plan);
+      $("#setupProvisionPlan").classList.remove("hidden");
+      $("#setupProvisionCallout").classList.add("hidden");
+      $("#confirmCommonProvision").disabled = false;
+      $("#confirmCommonProvision").textContent = "확인하고 진행";
+      $("#cancelCommonProvision").classList.remove("hidden");
+    } catch (error) {
+      toast("생성 계획을 만들지 못했습니다", error.message, "fail");
+    } finally {
+      button.disabled = false;
+      button.textContent = "공통 리소스 만들기";
+    }
+  }
+
+  async function pollCommonProvisionRun(runId) {
+    window.clearTimeout(state.commonProvisionPollTimer);
+    try {
+      const run = await api(`/api/v1/common-config/resource-provisioning/${runId}`);
+      renderCommonProvisionPlan(run);
+      if (run.status === "RUNNING") {
+        state.commonProvisionPollTimer = window.setTimeout(() => pollCommonProvisionRun(runId), 1500);
+        return;
+      }
+      const failed = (run.resources || []).filter((item) => item.status === "FAILED").length;
+      $("#confirmCommonProvision").classList.add("hidden");
+      $("#cancelCommonProvision").textContent = "닫기";
+      $("#cancelCommonProvision").classList.remove("hidden");
+      toast(
+        failed ? "일부 공통 리소스 생성 실패" : "공통 리소스를 준비했습니다",
+        failed ? "실패 항목을 확인한 뒤 다시 시도해 주세요." : "이제 설정을 저장할 수 있습니다.",
+        failed ? "fail" : "ok",
+      );
+      await loadSetupResources();
+    } catch (error) {
+      toast("생성 상태를 읽지 못했습니다", error.message, "fail");
+      $("#confirmCommonProvision").disabled = false;
+      $("#confirmCommonProvision").textContent = "다시 확인";
+    }
+  }
+
+  async function confirmCommonProvision() {
+    if (!state.commonResourcePlan) return;
+    const button = $("#confirmCommonProvision");
+    button.disabled = true;
+    button.textContent = "진행 중…";
+    try {
+      const run = await api("/api/v1/common-config/resource-provisioning", {
+        method: "POST",
+        body: { planId: state.commonResourcePlan.planId },
+      });
+      renderCommonProvisionPlan(run);
+      pollCommonProvisionRun(run.runId);
+    } catch (error) {
+      toast("리소스 생성을 시작하지 못했습니다", error.message, "fail");
+      button.disabled = false;
+      button.textContent = "확인하고 진행";
+      // 계획은 1회용이라 실패하면 다시 떠야 한다.
+      state.commonResourcePlan = null;
+      $("#setupProvisionPlan").classList.add("hidden");
+      $("#setupProvisionCallout").classList.remove("hidden");
+    }
+  }
+
+  function cancelCommonProvision() {
+    window.clearTimeout(state.commonProvisionPollTimer);
+    state.commonResourcePlan = null;
+    $("#setupProvisionPlan").classList.add("hidden");
+    $("#confirmCommonProvision").classList.remove("hidden");
+    $("#confirmCommonProvision").disabled = false;
+    $("#confirmCommonProvision").textContent = "확인하고 진행";
+    $("#cancelCommonProvision").textContent = "취소";
+    loadSetupResources();
   }
 
   async function loadSetupResources() {
@@ -820,8 +933,10 @@
       status.dataset.status = ready ? "ready" : "error";
       status.textContent = ready
         ? `Docker 저장소 ${repositories.length}개 · Firestore DB ${databases.length}개 확인됨`
-        : "필요한 리소스가 없습니다. Artifact Registry와 Native Firestore DB를 먼저 생성해 주세요.";
+        : "필요한 리소스가 없습니다. 아래에서 바로 만들 수 있습니다.";
       $("#createCommonConfig").disabled = !ready;
+      // 없을 때만 생성 안내를 띄운다 — 있으면 굳이 또 만들 이유가 없다.
+      $("#setupProvisionCallout").classList.toggle("hidden", ready);
     } catch (error) {
       if (requestId !== state.setupResourceRequest) return;
       status.dataset.status = "error";
@@ -2059,6 +2174,9 @@
     $("#departmentForm").addEventListener("submit", submitDepartment);
     $("#commonSetupForm").addEventListener("submit", submitCommonSetup);
     $("#refreshGcloudAuth").addEventListener("click", refreshGcloudSetup);
+    $("#planCommonResources").addEventListener("click", planCommonResources);
+    $("#confirmCommonProvision").addEventListener("click", confirmCommonProvision);
+    $("#cancelCommonProvision").addEventListener("click", cancelCommonProvision);
     $("#commonSetupForm").elements.projectId.addEventListener("change", loadSetupResources);
     $("#commonSetupForm").elements.region.addEventListener("change", loadSetupResources);
     $("#refreshDepartmentResources").addEventListener("click", () => loadDepartmentResources());

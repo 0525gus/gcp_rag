@@ -62,6 +62,8 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dept_gui._RUNS.clear()
     dept_gui._RESOURCE_PLANS.clear()
     dept_gui._PROVISION_RUNS.clear()
+    dept_gui._COMMON_RESOURCE_PLANS.clear()
+    dept_gui._COMMON_PROVISION_RUNS.clear()
     dept_gui._MCP_DEPLOY_RUNS.clear()
     dept_gui._SYNC_AUTH_TOKEN = ""
     dept_gui._SYNC_AUTH_TOKEN_EXPIRES = 0.0
@@ -1456,3 +1458,270 @@ def test_start_sync_run_endpoint_returns_conflict(
 
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "SYNC_ALREADY_RUNNING"
+
+
+def _bootstrap(monkeypatch: pytest.MonkeyPatch, project: str = "project-test") -> None:
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_bootstrap_state",
+        lambda include_projects=True: {
+            "installed": True,
+            "authenticated": True,
+            "account": "tester@example.com",
+            "project": project,
+            "projects": [{"id": project, "name": project}],
+        },
+    )
+
+
+def _no_resources(project: str, region: str) -> dict:
+    return {
+        "artifactRepositories": [],
+        "firestoreDatabases": [],
+        "artifactError": "",
+        "firestoreError": "",
+    }
+
+
+def _await_run(client: TestClient, run: dict) -> dict:
+    deadline = time.time() + 10
+    while time.time() < deadline and run["status"] == "RUNNING":
+        time.sleep(0.05)
+        run_id = run["runId"]
+        run = client.get(f"/api/v1/common-config/resource-provisioning/{run_id}").json()
+    return run
+
+
+def test_common_resource_plan_reports_missing_apis_without_touching_gcp(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """계획 단계는 **아무것도 바꾸지 않는다** — 켤 API 와 만들 리소스만 알려준다."""
+    client, headers = _client()
+    _bootstrap(monkeypatch)
+    monkeypatch.setattr(dept_gui, "_gcloud_project_resources", _no_resources)
+    monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda project: (True, set()))
+    # 계획 단계에서 변경 계열 호출이 일어나면 즉시 실패시킨다.
+    monkeypatch.setattr(
+        dept_gui,
+        "_run_command",
+        lambda *args, **kwargs: pytest.fail("계획 단계는 gcloud 를 변경 호출하면 안 된다"),
+    )
+
+    response = client.post(
+        "/api/v1/common-config/resource-plans",
+        headers=headers,
+        json={"projectId": "project-test", "region": "asia-northeast3"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {item["name"] for item in body["services"]} == {
+        "artifactregistry.googleapis.com",
+        "firestore.googleapis.com",
+    }
+    assert all(item["enabled"] is False for item in body["services"])
+    resources = {item["key"]: item for item in body["resources"]}
+    assert resources["artifactRepo"]["displayName"] == "rag-mcp"
+    assert resources["firestoreDatabase"]["displayName"] == "rag-sync-state"
+    assert all(item["exists"] is False for item in resources.values())
+    # 위치 불가역 경고가 화면까지 전달돼야 한다.
+    assert "변경할 수 없습니다" in resources["firestoreDatabase"]["warning"]
+
+
+def test_common_resource_plan_marks_existing_resources_as_skipped(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    _bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_project_resources",
+        lambda project, region: {
+            "artifactRepositories": [{"id": "rag-mcp", "format": "DOCKER"}],
+            "firestoreDatabases": [],
+            "artifactError": "",
+            "firestoreError": "",
+        },
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_enabled_services",
+        lambda project: (True, {"artifactregistry.googleapis.com"}),
+    )
+
+    body = client.post(
+        "/api/v1/common-config/resource-plans",
+        headers=headers,
+        json={"projectId": "project-test", "region": "asia-northeast3"},
+    ).json()
+
+    resources = {item["key"]: item for item in body["resources"]}
+    assert resources["artifactRepo"]["exists"] is True
+    assert resources["firestoreDatabase"]["exists"] is False
+    services = {item["name"]: item for item in body["services"]}
+    assert services["artifactregistry.googleapis.com"]["enabled"] is True
+    assert services["firestore.googleapis.com"]["enabled"] is False
+
+
+def test_common_resource_plan_rejects_default_firestore_database(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(default) 는 Datastore 모드로 굳으면 못 되돌린다 — 계획 단계에서 막는다."""
+    client, headers = _client()
+    _bootstrap(monkeypatch)
+
+    response = client.post(
+        "/api/v1/common-config/resource-plans",
+        headers=headers,
+        json={
+            "projectId": "project-test",
+            "region": "asia-northeast3",
+            "firestoreDatabase": "(default)",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "INVALID_RESOURCE_NAME"
+
+
+def test_common_provisioning_enables_apis_before_creating(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """API 를 먼저 켜야 생성이 된다. 순서가 뒤집히면 새 프로젝트에서 그냥 실패한다."""
+    client, headers = _client()
+    _bootstrap(monkeypatch)
+    monkeypatch.setattr(dept_gui, "_gcloud_project_resources", _no_resources)
+    monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda project: (True, set()))
+    calls: list[str] = []
+    monkeypatch.setattr(
+        dept_gui,
+        "_enable_gcloud_service",
+        lambda service, project: calls.append(f"enable:{service}"),
+    )
+
+    def fake_repo(name: str, project: str, region: str) -> str:
+        calls.append(f"repo:{name}")
+        return name
+
+    def fake_db(name: str, project: str, region: str) -> str:
+        calls.append(f"db:{name}")
+        return name
+
+    monkeypatch.setattr(dept_gui, "_create_artifact_repo_resource", fake_repo)
+    monkeypatch.setattr(dept_gui, "_create_firestore_database_resource", fake_db)
+
+    plan = client.post(
+        "/api/v1/common-config/resource-plans",
+        headers=headers,
+        json={"projectId": "project-test", "region": "asia-northeast3"},
+    ).json()
+    started = client.post(
+        "/api/v1/common-config/resource-provisioning",
+        headers=headers,
+        json={"planId": plan["planId"]},
+    )
+    assert started.status_code == 202
+    run = _await_run(client, started.json())
+
+    assert run["status"] == "COMPLETED"
+    assert calls.index("enable:artifactregistry.googleapis.com") < calls.index("repo:rag-mcp")
+    assert calls.index("enable:firestore.googleapis.com") < calls.index("db:rag-sync-state")
+    assert {item["status"] for item in run["resources"]} == {"COMPLETE"}
+
+
+def test_common_provisioning_skips_creation_when_api_enable_fails(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """API 를 못 켰으면 생성을 시도하지 않는다 — 실패 원인이 뒤에서 뭉개진다."""
+    client, headers = _client()
+    _bootstrap(monkeypatch)
+    monkeypatch.setattr(dept_gui, "_gcloud_project_resources", _no_resources)
+    monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda project: (True, set()))
+
+    def fake_enable(service: str, project: str) -> None:
+        if service == "firestore.googleapis.com":
+            raise RuntimeError("PERMISSION_DENIED")
+
+    def fail_db(name: str, project: str, region: str) -> str:
+        pytest.fail("API 활성화 실패 후에는 생성하면 안 된다")
+
+    monkeypatch.setattr(dept_gui, "_enable_gcloud_service", fake_enable)
+    monkeypatch.setattr(
+        dept_gui, "_create_artifact_repo_resource", lambda name, project, region: name
+    )
+    monkeypatch.setattr(dept_gui, "_create_firestore_database_resource", fail_db)
+
+    plan = client.post(
+        "/api/v1/common-config/resource-plans",
+        headers=headers,
+        json={"projectId": "project-test", "region": "asia-northeast3"},
+    ).json()
+    run = _await_run(
+        client,
+        client.post(
+            "/api/v1/common-config/resource-provisioning",
+            headers=headers,
+            json={"planId": plan["planId"]},
+        ).json(),
+    )
+
+    assert run["status"] == "PARTIAL"
+    resources = {item["key"]: item for item in run["resources"]}
+    assert resources["artifactRepo"]["status"] == "COMPLETE"
+    assert resources["firestoreDatabase"]["status"] == "FAILED"
+    assert "firestore.googleapis.com" in resources["firestoreDatabase"]["detail"]
+
+
+def test_common_provisioning_plan_is_single_use(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    _bootstrap(monkeypatch)
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_project_resources",
+        lambda project, region: {
+            "artifactRepositories": [{"id": "rag-mcp", "format": "DOCKER"}],
+            "firestoreDatabases": [
+                {"id": "rag-sync-state", "location": "asia-northeast3", "type": "FIRESTORE_NATIVE"}
+            ],
+            "artifactError": "",
+            "firestoreError": "",
+        },
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_gcloud_enabled_services",
+        lambda project: (True, {"artifactregistry.googleapis.com", "firestore.googleapis.com"}),
+    )
+
+    plan = client.post(
+        "/api/v1/common-config/resource-plans",
+        headers=headers,
+        json={"projectId": "project-test", "region": "asia-northeast3"},
+    ).json()
+    first = client.post(
+        "/api/v1/common-config/resource-provisioning",
+        headers=headers,
+        json={"planId": plan["planId"]},
+    )
+    assert first.status_code == 202
+    run = _await_run(client, first.json())
+    # 이미 있는 것만이면 아무것도 만들지 않고 끝난다.
+    assert {item["status"] for item in run["resources"]} == {"SKIPPED"}
+
+    repeated = client.post(
+        "/api/v1/common-config/resource-provisioning",
+        headers=headers,
+        json={"planId": plan["planId"]},
+    )
+    assert repeated.status_code == 409
+
+
+def test_common_resource_plan_requires_local_session(isolated_config: Path) -> None:
+    client, _ = _client()
+    response = client.post(
+        "/api/v1/common-config/resource-plans",
+        json={"projectId": "project-test", "region": "asia-northeast3"},
+    )
+    assert response.status_code in {401, 403}
