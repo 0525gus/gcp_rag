@@ -145,6 +145,14 @@ def test_ps1_scripts_parse() -> None:
         assert p.returncode == 0, f"{name}: {p.stdout}{p.stderr}"
 
 
+def test_mcp_deploy_attaches_cloud_management_metadata() -> None:
+    source = (ROOT / "scripts" / "deploy_mcp.ps1").read_text(encoding="utf-8")
+    assert "gcp-rag.dev/department-metadata" in source
+    assert "--update-labels=$managementLabels" in source
+    assert "--update-annotations=$managementAnnotation" in source
+    assert "$env:DEPLOYMENT_METADATA_B64" in source
+
+
 def test_full_deploy_accepts_real_values() -> None:
     p = _run(VALID, "Require-FullDeployEnv")
     assert p.returncode == 0, p.stderr or p.stdout
@@ -415,3 +423,284 @@ def test_deploy_passes_switches_to_deploy_mcp_by_name() -> None:
     out = p.stdout.strip()
     # $Dept 가 비어 있어야 한다 — 여기 "-All" 이 들어가면 그게 그 버그다.
     assert out == "dept=[] aud=[staff] all=True skip=True show=True", out
+
+
+def test_reuse_images_skips_build_only_for_existing_image() -> None:
+    """-ReuseExisting: 레지스트리에 있는 이미지는 빌드를 건너뛰고, 없으면 빈다.
+
+    GUI 공통 런타임 배포가 이 스위치로 돈다. 여기가 뒤집히면 (a) 매번 몇 분씩
+    다시 굽거나 (b) 이미지가 없는데도 빌드를 건너뛰어 Cloud Run 배포가 죽는다.
+
+    표기가 아니라 **동작**으로 잡는다 — deploy.ps1 의 Ensure-Image 를 그대로
+    떼어다 가짜 gcloud 로 돌린다.
+    """
+    text = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+    start = text.index("function Ensure-Image {")
+    end = text.index("Ensure-Image -Name", start)
+    body = text[start:end]
+
+    script = (
+        # Write-Host 에 한글이 있다. 콘솔 코드페이지를 UTF-8 로 고정하지 않으면
+        # 파이썬 쪽 디코딩이 cp949 로 죽는다.
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
+        "$ErrorActionPreference = 'Stop'; "
+        "$IMAGE_BASE = 'reg/base'; $ReuseExisting = $true; $script:calls = @(); "
+        # parser 는 digest 가 있고(재사용), sync 는 조회 실패(빌드).
+        "function gcloud { $script:calls += ($args -join ' '); "
+        "  if ($args[0] -eq 'artifacts') { "
+        "    if ($args -like '*parser*') { $global:LASTEXITCODE = 0; 'sha256:abc' } "
+        "    else { $global:LASTEXITCODE = 1; '' } "
+        "  } else { $global:LASTEXITCODE = 0 } }; "
+        "function Assert-LastExit { if ($LASTEXITCODE -ne 0) { throw \"gcloud exit\" } }; "
+        + body
+        + "; Ensure-Image -Name 'parser' -Config 'cloudbuild.parser.yaml'"
+        "; Ensure-Image -Name 'sync' -Config 'cloudbuild.sync.yaml'"
+        "; $script:calls | ForEach-Object { Write-Output \"CALL $_\" }"
+    )
+    p = subprocess.run(
+        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        cwd=str(ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    builds = [
+        ln for ln in p.stdout.splitlines() if ln.startswith("CALL ") and "builds submit" in ln
+    ]
+    assert len(builds) == 1, p.stdout
+    assert "cloudbuild.sync.yaml" in builds[0], builds[0]
+    assert "reg/base/sync:latest" in builds[0], builds[0]
+
+
+def test_deploy_ps1_builds_everything_without_reuse_switch() -> None:
+    """스위치 없이 돌리면 조회 없이 그냥 빌드한다(코드 변경 반영 경로)."""
+    text = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+    start = text.index("function Ensure-Image {")
+    end = text.index("Ensure-Image -Name", start)
+    body = text[start:end]
+
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$IMAGE_BASE = 'reg/base'; $script:calls = @(); "
+        "function gcloud { $script:calls += ($args -join ' '); $global:LASTEXITCODE = 0 }; "
+        "function Assert-LastExit { if ($LASTEXITCODE -ne 0) { throw \"gcloud exit\" } }; "
+        + body
+        + "; Ensure-Image -Name 'parser' -Config 'cloudbuild.parser.yaml'"
+        "; $script:calls | ForEach-Object { Write-Output \"CALL $_\" }"
+    )
+    p = subprocess.run(
+        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        cwd=str(ROOT),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    calls = [ln for ln in p.stdout.splitlines() if ln.startswith("CALL ")]
+    assert len(calls) == 1, p.stdout
+    assert "builds submit" in calls[0], calls[0]
+
+
+@pytest.mark.parametrize(
+    ("exists", "expected"),
+    [(True, "True"), (False, "False")],
+)
+def test_reuse_existing_skips_only_already_deployed_services(exists: bool, expected: str) -> None:
+    """-ReuseExisting: 이미 떠 있는 Cloud Run 서비스는 다시 배포하지 않는다.
+
+    뒤집히면 (a) 매번 리비전을 새로 만들거나 (b) 서비스가 없는데도 건너뛰어
+    Workflow·Scheduler 가 없는 URL 을 부르게 된다.
+    """
+    text = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+    start = text.index("function Test-SkipService {")
+    end = text.index('if (-not (Test-SkipService', start)
+    body = text[start:end]
+
+    script = (
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
+        "$ErrorActionPreference = 'Stop'; "
+        "$REGION = 'asia-northeast3'; $PROJECT_ID = 'p'; $ReuseExisting = $true; "
+        f"function gcloud {{ $global:LASTEXITCODE = {0 if exists else 1}; 'https://x' }}; "
+        + body
+        + "; Write-Output \"SKIP=$(Test-SkipService -Name 'rag-parser')\""
+    )
+    p = subprocess.run(
+        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        cwd=str(ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    assert f"SKIP={expected}" in p.stdout, p.stdout
+
+
+def test_without_reuse_switch_services_always_deploy() -> None:
+    """스위치가 없으면 조회조차 하지 않는다 — 코드·설정 변경 반영 경로."""
+    text = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+    start = text.index("function Test-SkipService {")
+    end = text.index('if (-not (Test-SkipService', start)
+    body = text[start:end]
+
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$REGION = 'r'; $PROJECT_ID = 'p'; $script:calls = 0; "
+        "function gcloud { $script:calls++; $global:LASTEXITCODE = 0 }; "
+        + body
+        + "; Write-Output \"SKIP=$(Test-SkipService -Name 'rag-sync') CALLS=$script:calls\""
+    )
+    p = subprocess.run(
+        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        cwd=str(ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    assert "SKIP=False CALLS=0" in p.stdout, p.stdout
+
+
+def test_wait_for_gcloud_success_retries_until_propagation() -> None:
+    """만든 직후를 GCP 가 모르는 구간을 넘기는 재시도 프리미티브.
+
+    신규 프로젝트 첫 배포에서 두 번 터졌다 — Workflows 서비스 에이전트,
+    Scheduler SA IAM 바인딩. 한 번에 성공하면 재시도하지 않고, 계속 실패하면
+    거짓 성공을 내지 않아야 한다.
+    """
+    text = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+    start = text.index("function Wait-ForGcloudSuccess {")
+    end = text.index("$PROJECT_ID = $env:GCP_PROJECT_ID", start)
+    body = text[start:end]
+
+    script = (
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
+        "$ErrorActionPreference = 'Stop'; "
+        + body
+        + "; $script:n = 0; "
+        # 3번째 호출에서야 성공하는 명령.
+        "$flaky = { $script:n++; $global:LASTEXITCODE = $(if ($script:n -ge 3) { 0 } else { 1 }) }; "
+        "$ok = Wait-ForGcloudSuccess -Label 'x' -Waits @(0,0,0,0) -Action $flaky; "
+        "Write-Output \"FLAKY ok=$ok tries=$script:n\"; "
+        "$script:m = 0; "
+        "$always = { $script:m++; $global:LASTEXITCODE = 1 }; "
+        "$bad = Wait-ForGcloudSuccess -Label 'y' -Waits @(0,0) -Action $always; "
+        "Write-Output \"ALWAYS ok=$bad tries=$script:m\"; "
+        "$script:k = 0; "
+        "$good = { $script:k++; $global:LASTEXITCODE = 0 }; "
+        "$fast = Wait-ForGcloudSuccess -Label 'z' -Waits @(0,0,0) -Action $good; "
+        "Write-Output \"GOOD ok=$fast tries=$script:k\""
+    )
+    p = subprocess.run(
+        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        cwd=str(ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    assert "FLAKY ok=True tries=3" in p.stdout, p.stdout
+    assert "ALWAYS ok=False tries=2" in p.stdout, p.stdout
+    # 첫 번에 되면 더 부르지 않는다 — 재시도가 배포를 늘리면 안 된다.
+    assert "GOOD ok=True tries=1" in p.stdout, p.stdout
+
+
+def test_scheduler_sa_binding_is_retried_not_asserted_once() -> None:
+    """SA 생성 직후의 바인딩은 단발 Assert-LastExit 이면 안 된다.
+
+    create 성공 → 바로 add-iam-policy-binding → "does not exist" 로 죽었다.
+    """
+    text = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
+    start = text.index("== Ensure Scheduler SA / App Engine ==")
+    section = text[start:text.index("# ---- 10.", start)]
+    assert "Wait-ForGcloudSuccess -Label \"Scheduler SA\"" in section
+    assert "Wait-ForGcloudSuccess -Label \"Scheduler SA IAM 바인딩\"" in section
+    binding = section[section.index("add-iam-policy-binding"):]
+    assert "Assert-LastExit" not in binding.split("if (-not $saBound)")[0]
+
+
+def _deploy_targets_script(call: str) -> str:
+    """deploy_mcp.ps1 의 대상 선택 함수만 떼어내 가짜 설정으로 돌린다."""
+    text = (ROOT / "scripts" / "deploy_mcp.ps1").read_text(encoding="utf-8")
+    start = text.index("function Get-DeployTargets {")
+    end = text.index("$targets = @(Get-DeployTargets", start)
+    return (
+        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
+        "$ErrorActionPreference = 'Stop'; "
+        "function Get-DepartmentCodes { @('cs', 'ee') }; "
+        # cs 는 학생 분리, ee 는 교직원만.
+        "function Get-DepartmentAudiences { param([string]$DeptCode) "
+        "  if ($DeptCode -eq 'cs') { @('staff', 'student') } else { @('staff') } }; "
+        + text[start:end]
+        + "; " + call
+    )
+
+
+def _run_targets(call: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", _deploy_targets_script(call)],
+        cwd=str(ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_dept_without_audience_deploys_every_configured_scope() -> None:
+    """-Dept 만 주면 그 학과의 MCP 를 전부 올려야 한다.
+
+    staff 하나만 올리던 때, 콘솔은 학생 서비스를 기대해 Ready 확인에서 걸렸고
+    ("Ready 상태가 아닌 서비스: rag-mcp-cs-student") 손으로 돌린 사람은 학생
+    서비스가 낡은 채 도는 것을 몰랐다.
+    """
+    p = _run_targets(
+        "(Get-DeployTargets -Dept 'cs' -Audience 'staff' -All $false -AudienceExplicit $false)"
+        " | ForEach-Object { Write-Output \"T $($_.Dept)/$($_.Audience)\" }"
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    assert [ln for ln in p.stdout.splitlines() if ln.startswith("T ")] == [
+        "T cs/staff",
+        "T cs/student",
+    ], p.stdout
+
+
+def test_explicit_audience_deploys_only_that_one() -> None:
+    p = _run_targets(
+        "(Get-DeployTargets -Dept 'cs' -Audience 'student' -All $false -AudienceExplicit $true)"
+        " | ForEach-Object { Write-Output \"T $($_.Dept)/$($_.Audience)\" }"
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    assert [ln for ln in p.stdout.splitlines() if ln.startswith("T ")] == ["T cs/student"], p.stdout
+
+
+def test_all_covers_every_department_and_scope() -> None:
+    p = _run_targets(
+        "(Get-DeployTargets -Dept '' -Audience 'staff' -All $true -AudienceExplicit $false)"
+        " | ForEach-Object { Write-Output \"T $($_.Dept)/$($_.Audience)\" }"
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    assert [ln for ln in p.stdout.splitlines() if ln.startswith("T ")] == [
+        "T cs/staff",
+        "T cs/student",
+        "T ee/staff",
+    ], p.stdout
+
+
+def test_no_target_argument_is_rejected() -> None:
+    p = _run_targets(
+        "try { Get-DeployTargets -Dept '' -Audience 'staff' -All $false -AudienceExplicit $false }"
+        " catch { Write-Output 'THROWN' }"
+    )
+    assert p.returncode == 0, p.stderr or p.stdout
+    assert "THROWN" in p.stdout, p.stdout
+

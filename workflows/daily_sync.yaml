@@ -27,7 +27,7 @@ main:
           - sync_url: ${default(map.get(args, "syncUrl"), "https://SYNC_SERVICE_URL")}
           - parser_url: ${default(map.get(args, "parserUrl"), "https://PARSER_SERVICE_URL")}
           - drive_ids: ${default(map.get(args, "driveIds"), [])}
-          - index_batch_size: ${default(map.get(args, "indexBatchSize"), 10)}
+          - index_batch_size: ${default(map.get(args, "indexBatchSize"), 50)}
           - do_backfill: ${default(map.get(args, "backfill"), false)}
           - run_id: ${default(map.get(args, "runId"), "")}
           - department_code: ${default(map.get(args, "departmentCode"), "")}

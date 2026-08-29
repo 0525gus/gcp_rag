@@ -16,6 +16,7 @@ PyYAML 을 의존(requirements.txt)하므로, 파싱은 파이썬이 하고 결�
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -85,6 +86,53 @@ def _load_yaml(path: Path) -> dict:
     if not isinstance(data, dict):
         raise SystemExit(f"최상위가 매핑이 아니다: {path}")
     return data
+
+
+def _id_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        values = value.replace("\r", "\n").replace(",", "\n").split("\n")
+    elif isinstance(value, (list, tuple)):
+        values = value
+    else:
+        values = []
+    return list(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))
+
+
+def _deployment_metadata_b64(
+    dept: str,
+    audience: str,
+    dept_cfg: dict,
+    env: dict[str, str],
+    *,
+    staff_corpus: str,
+    student_corpus: str,
+) -> str:
+    """다른 운영 환경이 YAML 없이 복원할 수 있는 비밀값 없는 배포 메타데이터."""
+    drive = dept_cfg.get("drive") or {}
+    metadata = {
+        "schemaVersion": 1,
+        "managedBy": "gcp-rag",
+        "code": dept,
+        "name": str(dept_cfg.get("name") or dept),
+        "audience": audience,
+        "corpusMode": "split" if student_corpus else "single",
+        "corpora": {"staff": staff_corpus, "student": student_corpus},
+        "buckets": {
+            "hwpOriginal": env.get("GCS_HWP_ORIGINAL_BUCKET", ""),
+            "source": env.get("GCS_SOURCE_BUCKET", ""),
+        },
+        "drive": {
+            "driveIds": _id_list(drive.get("driveIds")),
+            "syncFolderIds": _id_list(drive.get("syncFolderIds")),
+            "studentFolderIds": _id_list(drive.get("studentFolderIds")),
+        },
+        "minInstances": {
+            key: int((dept_cfg.get("minInstances") or {}).get(key, 0) or 0)
+            for key in AUDIENCES
+        },
+    }
+    raw = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
 
 
 def build_env(dept: str, audience: str) -> dict[str, str]:
@@ -187,6 +235,14 @@ def build_env(dept: str, audience: str) -> dict[str, str]:
     env["DEPT_CODE"] = dept
     if dept_cfg.get("name"):
         env["DEPT_NAME"] = _fmt(dept_cfg["name"])
+    env["DEPLOYMENT_METADATA_B64"] = _deployment_metadata_b64(
+        dept,
+        audience,
+        dept_cfg,
+        env,
+        staff_corpus=staff_corpus,
+        student_corpus=student_corpus,
+    )
 
     return env
 

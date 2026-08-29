@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import io
+import json
+from datetime import UTC, datetime, timedelta
 import os
 import threading
 import time
@@ -68,6 +72,7 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dept_gui._SA_REPAIR_RUNS.clear()
     dept_gui._MCP_DEPLOY_RUNS.clear()
     dept_gui._COMMON_RUNTIME_DEPLOY_RUNS.clear()
+    dept_gui._TEARDOWN_RUNS.clear()
     dept_gui._SYNC_AUTH_TOKEN = ""
     dept_gui._SYNC_AUTH_TOKEN_EXPIRES = 0.0
     return dept_dir
@@ -102,6 +107,92 @@ def _client() -> tuple[TestClient, dict[str, str]]:
     client = TestClient(dept_gui.app)
     nonce = client.get("/api/v1/session").json()["nonce"]
     return client, {"X-Local-Session": nonce, "Origin": "http://testserver"}
+
+
+def _cloud_metadata(code: str, audience: str) -> str:
+    payload = {
+        "schemaVersion": 1,
+        "managedBy": "gcp-rag",
+        "code": code,
+        "name": "전자공학과",
+        "audience": audience,
+        "corpusMode": "split",
+        "corpora": {"staff": "corpus-staff", "student": "corpus-student"},
+        "buckets": {"hwpOriginal": "bucket-hwp", "source": "bucket-source"},
+        "drive": {
+            "driveIds": ["drive-1"],
+            "syncFolderIds": ["folder-1"],
+            "studentFolderIds": ["folder-student"],
+        },
+        "minInstances": {"staff": 1, "student": 0},
+    }
+    raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+
+def test_cloud_mcp_endpoint_restores_department_without_local_yaml(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_gcloud(args, timeout=12):
+        if args[:3] == ["run", "services", "list"]:
+            return True, [
+                {"metadata": {"name": "rag-mcp-ee-staff"}},
+                {"metadata": {"name": "rag-mcp-ee-student"}},
+                {"metadata": {"name": "unmanaged-service"}},
+            ]
+        name = args[3]
+        audience = name.rsplit("-", 1)[-1]
+        return True, {
+            "metadata": {"name": name},
+            "spec": {
+                "template": {
+                    "metadata": {
+                        "annotations": {
+                            dept_gui.DEPLOYMENT_METADATA_ANNOTATION: _cloud_metadata(
+                                "ee", audience
+                            )
+                        }
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "env": [
+                                    {"name": "MCP_API_KEY", "value": "must-not-leak"},
+                                    {"name": "RAG_CORPUS_NAME", "value": "legacy"},
+                                ]
+                            }
+                        ]
+                    },
+                }
+            },
+            "status": {
+                "url": f"https://{name}.example.run",
+                "latestReadyRevisionName": f"{name}-00001",
+                "conditions": [{"type": "Ready", "status": "True"}],
+            },
+        }
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+    client, _ = _client()
+    response = client.get("/api/v1/cloud-mcp-services")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["departments"]) == 1
+    record = body["departments"][0]
+    assert record["code"] == "ee"
+    assert record["name"] == "전자공학과"
+    assert record["cloudOnly"] is True
+    assert record["metadataComplete"] is True
+    assert record["lastStatus"] == "OK"
+    assert record["metadata"]["corpora"]["student"] == "corpus-student"
+    assert record["metadata"]["drive"]["driveIds"] == ["drive-1"]
+    assert {item["audience"] for item in record["cloudServices"]} == {
+        "staff",
+        "student",
+    }
+    assert all(item["status"] == "READY" for item in record["cloudServices"])
+    assert "must-not-leak" not in json.dumps(body, ensure_ascii=False)
 
 
 def test_preview_normalises_ids_and_never_returns_secret(isolated_config: Path) -> None:
@@ -372,7 +463,7 @@ def test_common_runtime_deployment_tracks_steps_and_follow_up_department(
     monkeypatch.setattr(dept_gui, "threading", DeferredThreading)
     run = dept_gui.start_common_runtime_deployment("ee")
 
-    def fake_deploy(*, on_line) -> int:
+    def fake_deploy(*, on_line, env_only=False) -> int:
         for line in (
             "== Build & push images ==",
             "== Deploy Cloud Run ==",
@@ -400,6 +491,35 @@ def test_common_runtime_deployment_tracks_steps_and_follow_up_department(
     assert result["followUpDepartmentCode"] == "ee"
     assert all(step["status"] == "COMPLETE" for step in result["steps"])
     assert [item["serviceName"] for item in result["services"]] == ["rag-parser", "rag-sync"]
+
+
+def test_common_runtime_deploy_script_reuses_existing_images(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """공통 런타임 배포는 이미 있는 이미지·서비스를 다시 만들지 않는다.
+
+    없는 런타임을 세우는 흐름이라 코드는 그대로다. -ReuseExisting 이 빠지면
+    매번 이미지 두 벌을 다시 굽고 Cloud Run 두 개를 다시 올린다(수 분).
+    """
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        stdout = io.StringIO("")
+        returncode = 0
+
+        def wait(self) -> int:
+            return 0
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+        return FakeProcess()
+
+    monkeypatch.setattr(dept_gui.shutil, "which", lambda name: "pwsh.exe")
+    monkeypatch.setattr(dept_gui.subprocess, "Popen", fake_popen)
+    dept_gui._run_common_runtime_deploy_script(on_line=lambda line: None)
+
+    assert "-SkipMcp" in captured["args"]
+    assert "-ReuseExisting" in captured["args"]
 
 
 def test_missing_common_runtime_status_offers_deployment_action(
@@ -505,7 +625,9 @@ def test_common_runtime_deployment_api_starts_and_returns_run(
         "steps": [],
         "logs": [],
     }
-    monkeypatch.setattr(dept_gui, "start_common_runtime_deployment", lambda code: expected)
+    monkeypatch.setattr(
+        dept_gui, "start_common_runtime_deployment", lambda code, env_only=False: expected
+    )
 
     response = client.post(
         "/api/v1/common-runtime-deployments?followUpDepartmentCode=ee",
@@ -1432,6 +1554,80 @@ def test_drive_folder_lookup_requires_valid_ids(isolated_config: Path) -> None:
     assert response.json()["error"]["code"] == "INVALID_FOLDER_IDS"
 
 
+def test_drive_folder_children_lists_one_level(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_http(url: str, token: str = "", timeout: int = 10):
+        captured.update(url=url, token=token)
+        return 200, {
+            "files": [
+                {
+                    "id": "FOLDER_CHILD_123",
+                    "name": "교직원 자료",
+                    "driveId": "DRIVE_123456",
+                    "parents": ["FOLDER_PARENT_123"],
+                    "mimeType": dept_gui.DRIVE_FOLDER_MIME_TYPE,
+                }
+            ]
+        }, 8
+
+    monkeypatch.setattr(dept_gui, "_http_json", fake_http)
+    result = dept_gui._drive_folder_children(
+        "DRIVE_123456", "FOLDER_PARENT_123", "sa-token"
+    )
+
+    assert result["folders"] == [
+        {
+            "folderId": "FOLDER_CHILD_123",
+            "name": "교직원 자료",
+            "driveId": "DRIVE_123456",
+            "parentIds": ["FOLDER_PARENT_123"],
+        }
+    ]
+    assert result["truncated"] is False
+    assert "corpora=drive" in captured["url"]
+    assert "includeItemsFromAllDrives=true" in captured["url"]
+    assert captured["token"] == "sa-token"
+
+
+def test_drive_folder_children_endpoint_uses_compute_service_account(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
+    monkeypatch.setattr(dept_gui, "_run_command", lambda args: (True, "caller-token"))
+    monkeypatch.setattr(
+        dept_gui,
+        "_service_account_access_token",
+        lambda *args, **kwargs: ("sa-token", "compute@example.com", 5, ""),
+    )
+    captured: dict[str, str] = {}
+
+    def fake_children(drive_id: str, parent_id: str, token: str) -> dict[str, object]:
+        captured.update(drive_id=drive_id, parent_id=parent_id, token=token)
+        return {
+            "driveId": drive_id,
+            "parentId": parent_id,
+            "folders": [],
+            "truncated": False,
+        }
+
+    monkeypatch.setattr(dept_gui, "_drive_folder_children", fake_children)
+    response = client.post(
+        "/api/v1/departments/drive-folders",
+        headers=headers,
+        json={"driveId": "DRIVE_123456", "parentId": "FOLDER_PARENT_123"},
+    )
+
+    assert response.status_code == 200
+    assert captured == {
+        "drive_id": "DRIVE_123456",
+        "parent_id": "FOLDER_PARENT_123",
+        "token": "sa-token",
+    }
+    assert response.json()["serviceAccount"] == "compute@example.com"
+
+
 def test_sync_execution_record_parses_manual_backfill() -> None:
     row = {
         "name": "projects/p/locations/r/workflows/rag-daily-sync/executions/ex-123",
@@ -1622,6 +1818,35 @@ def test_workflow_not_found_is_distinguished_from_lookup_failure(
 
     with pytest.raises(dept_gui.WorkflowNotFoundError):
         dept_gui._list_sync_execution_rows("project-test", "asia-northeast3")
+
+
+def test_active_sync_rows_are_described_before_duplicate_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_gcloud(args, timeout=12):
+        calls.append(args)
+        if args[:3] == ["workflows", "executions", "list"]:
+            return True, [
+                {
+                    "name": "projects/p/locations/r/workflows/w/executions/ex-active",
+                    "state": "ACTIVE",
+                }
+            ]
+        return True, {
+            "name": "projects/p/locations/r/workflows/w/executions/ex-active",
+            "state": "ACTIVE",
+            "argument": '{"driveIds":["DRIVE_CS_123456"],"backfill":true,"departmentCode":"cs"}',
+            "labels": {"department": "cs", "mode": "backfill"},
+        }
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+    rows = dept_gui._list_sync_execution_rows("project-test", "asia-northeast3")
+
+    assert dept_gui._execution_arguments(rows[0])["driveIds"] == ["DRIVE_CS_123456"]
+    assert rows[0]["labels"]["department"] == "cs"
+    assert any(call[:3] == ["workflows", "executions", "describe"] for call in calls)
 
 
 def _bootstrap(monkeypatch: pytest.MonkeyPatch, project: str = "project-test") -> None:
@@ -2475,3 +2700,527 @@ def test_project_accessible_checks_one_project_not_the_whole_list(
     # 형식이 틀리면 왕복조차 하지 않는다.
     assert dept_gui._project_accessible("BAD ID") is False
     assert len(calls) == 2
+
+
+def _write_twin_department(dept_dir: Path, code: str) -> None:
+    """ee 와 코퍼스·버킷을 공유하는 학과 YAML 을 직접 만든다."""
+    payload = _payload()
+    (dept_dir / f"{code}.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "기계공학과",
+                "corpora": payload["corpora"],
+                "keys": {"staff": "k" * 24, "student": "s" * 24},
+                "buckets": payload["buckets"],
+                "drive": {"driveIds": ["DRIVE-1"], "syncFolderIds": ["STAFF-1"]},
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _wait_for_teardown(timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        runs = list(dept_gui._TEARDOWN_RUNS.values())
+        if runs and all(run["status"] != "RUNNING" for run in runs):
+            return
+        time.sleep(0.02)
+    raise AssertionError("삭제 작업이 끝나지 않았다")
+
+
+def _stub_teardown_deletes(monkeypatch: pytest.MonkeyPatch, failures: set[str] | None = None) -> list[str]:
+    """실제 GCP 호출 대신 호출 순서만 기록한다. failures 에 든 이름은 터뜨린다."""
+    calls: list[str] = []
+    broken = failures or set()
+
+    def record(kind: str):
+        def _call(name: str, *args, **kwargs) -> str:
+            calls.append(f"{kind}:{name}")
+            if name in broken:
+                raise RuntimeError(f"{name} 삭제 실패")
+            return "삭제 완료"
+
+        return _call
+
+    monkeypatch.setattr(dept_gui, "_delete_cloud_run_service", record("run"))
+    monkeypatch.setattr(dept_gui, "_delete_workflow_resource", record("workflow"))
+    monkeypatch.setattr(dept_gui, "_delete_scheduler_job", record("scheduler"))
+    monkeypatch.setattr(dept_gui, "_delete_bucket_resource", record("bucket"))
+    monkeypatch.setattr(
+        dept_gui, "_delete_rag_corpus", lambda name, region, token: calls.append(f"corpus:{name}") or "삭제 완료"
+    )
+    monkeypatch.setattr(dept_gui, "_provision_access_token", lambda: "token")
+    return calls
+
+
+def test_department_teardown_plan_lists_every_owned_resource(isolated_config: Path) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+
+    plan = client.get("/api/v1/departments/ee/teardown-plan").json()
+
+    assert plan["confirmWord"] == "ee"
+    assert [target["key"] for target in plan["targets"]] == [
+        "mcp-staff",
+        "mcp-student",
+        "corpus-staff",
+        "corpus-student",
+        "bucket-hwpOriginal",
+        "bucket-source",
+        "config",
+    ]
+    # 설정 파일은 맨 뒤여야 한다 — 앞이 실패하면 남겨서 다시 시도한다.
+    assert plan["targets"][-1]["kind"] == "config"
+    assert not any(target["skipped"] for target in plan["targets"])
+
+
+def test_teardown_plan_keeps_resources_shared_with_other_departments(
+    isolated_config: Path,
+) -> None:
+    """다른 학과가 같은 코퍼스·버킷을 가리키면 지우면 안 된다.
+
+    지워도 남은 학과의 MCP 는 오류를 내지 않는다 — 검색이 조용히 빈 결과가 된다.
+    """
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    # API 는 리소스 중복 등록을 막는다. 여기서 보려는 것은 "이미 그런 상태" 이므로
+    # 파일을 직접 둔다 — 손으로 편집한 YAML 이 실제로 이런 모양이 된다.
+    _write_twin_department(isolated_config, "me")
+
+    plan = client.get("/api/v1/departments/ee/teardown-plan").json()
+    by_key = {target["key"]: target for target in plan["targets"]}
+
+    assert by_key["corpus-staff"]["skipped"] is True
+    assert by_key["corpus-staff"]["sharedWith"] == ["me"]
+    assert by_key["bucket-source"]["skipped"] is True
+    # 학과 전용인 것은 그대로 지운다.
+    assert by_key["mcp-staff"]["skipped"] is False
+    assert by_key["config"]["skipped"] is False
+
+
+def test_teardown_refuses_when_confirm_word_does_not_match(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    calls = _stub_teardown_deletes(monkeypatch)
+
+    response = client.post(
+        "/api/v1/departments/ee/teardown", headers=headers, json={"confirm": "EE "}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "TEARDOWN_CONFIRM_MISMATCH"
+    assert calls == []
+    assert (isolated_config / "ee.yaml").exists()
+
+
+def test_teardown_deletes_owned_resources_and_config_last(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    calls = _stub_teardown_deletes(monkeypatch)
+    plan = dept_gui.department_teardown_plan("ee")
+
+    dept_gui.start_teardown_run(plan, "ee")
+    _wait_for_teardown()
+    run = next(iter(dept_gui._TEARDOWN_RUNS.values()))
+
+    assert run["status"] == "COMPLETED"
+    assert calls == [
+        "run:rag-mcp-ee-staff",
+        "run:rag-mcp-ee-student",
+        "corpus:projects/project-test/locations/asia-northeast3/ragCorpora/staff-1",
+        "corpus:projects/project-test/locations/asia-northeast3/ragCorpora/student-1",
+        "bucket:rag-ee-hwp-project-test",
+        "bucket:rag-ee-source-project-test",
+    ]
+    assert not (isolated_config / "ee.yaml").exists()
+
+
+def test_teardown_keeps_config_file_when_a_gcp_delete_fails(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GCP 쪽이 남았는데 설정을 지우면 고아 리소스를 콘솔에서 못 찾는다."""
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    _stub_teardown_deletes(monkeypatch, failures={"rag-ee-source-project-test"})
+    plan = dept_gui.department_teardown_plan("ee")
+
+    dept_gui.start_teardown_run(plan, "ee")
+    _wait_for_teardown()
+    run = next(iter(dept_gui._TEARDOWN_RUNS.values()))
+    by_key = {target["key"]: target for target in run["targets"]}
+
+    assert run["status"] == "PARTIAL"
+    assert by_key["bucket-source"]["status"] == "FAILED"
+    assert by_key["config"]["status"] == "SKIPPED"
+    assert (isolated_config / "ee.yaml").exists()
+
+
+def test_teardown_skips_shared_resources_when_running(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    # API 는 리소스 중복 등록을 막는다. 여기서 보려는 것은 "이미 그런 상태" 이므로
+    # 파일을 직접 둔다 — 손으로 편집한 YAML 이 실제로 이런 모양이 된다.
+    _write_twin_department(isolated_config, "me")
+    calls = _stub_teardown_deletes(monkeypatch)
+    plan = dept_gui.department_teardown_plan("ee")
+
+    dept_gui.start_teardown_run(plan, "ee")
+    _wait_for_teardown()
+    run = next(iter(dept_gui._TEARDOWN_RUNS.values()))
+
+    assert calls == ["run:rag-mcp-ee-staff", "run:rag-mcp-ee-student"]
+    assert run["status"] == "COMPLETED"
+    assert not (isolated_config / "ee.yaml").exists()
+    assert (isolated_config / "me.yaml").exists()
+
+
+def test_common_runtime_teardown_plan_warns_about_remaining_departments(
+    isolated_config: Path,
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+
+    plan = client.get("/api/v1/common-runtime/teardown-plan").json()
+
+    assert plan["confirmWord"] == "project-test"
+    assert plan["remainingDepartments"] == ["ee"]
+    # Scheduler → Workflow → Cloud Run 순. 거꾸로 지우면 잡이 죽은 워크플로를 부른다.
+    assert [target["key"] for target in plan["targets"]] == [
+        "scheduler",
+        "workflow",
+        "sync",
+        "parser",
+    ]
+
+
+def test_common_runtime_teardown_removes_runtime_but_not_departments(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    calls = _stub_teardown_deletes(monkeypatch)
+
+    response = client.post(
+        "/api/v1/common-runtime/teardown", headers=headers, json={"confirm": "project-test"}
+    )
+    assert response.status_code == 202
+    _wait_for_teardown()
+    run = dept_gui._TEARDOWN_RUNS[response.json()["runId"]]
+
+    assert run["status"] == "COMPLETED"
+    assert calls == [
+        "scheduler:rag-daily-sync",
+        "workflow:rag-daily-sync",
+        "run:rag-sync",
+        "run:rag-parser",
+    ]
+    assert (isolated_config / "ee.yaml").exists()
+
+
+def _sync_common() -> dict:
+    return {"GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3"}
+
+
+def test_sync_check_defers_to_the_deploy_failure_that_caused_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """공통 런타임이 안 떠 있으면 동기화 실패는 그 사고의 그림자다.
+
+    두 줄로 세면 어느 쪽을 고쳐야 하는지 흐려진다 — SYNC 는 SKIP 으로 물러나고
+    배포 버튼을 그대로 달아 준다.
+    """
+    called: list[list[str]] = []
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda args, timeout=12: called.append(args) or (False, ""))
+    deploy_checks = [
+        {"layer": "DEPLOY", "name": "parser", "status": "WARN", "detail": "미배포"},
+        {"layer": "DEPLOY", "name": "mcp-cs-staff", "status": "OK", "detail": "ok"},
+    ]
+
+    checks = dept_gui._sync_status(_sync_common(), deploy_checks=deploy_checks, code="cs")
+
+    assert len(checks) == 1
+    assert checks[0]["status"] == "SKIP"
+    assert checks[0]["actionType"] == "COMMON_RUNTIME_DEPLOY"
+    assert checks[0]["blockedBy"] == ["parser"]
+    # 원인이 앞에 있으면 gcloud 를 아예 부르지 않는다.
+    assert called == []
+
+
+def test_missing_workflow_offers_the_common_runtime_deploy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_gcloud(args, timeout=12):
+        if args[:2] == ["workflows", "describe"]:
+            return False, "ERROR: NOT_FOUND: Workflow does not exist"
+        raise AssertionError(f"불필요한 호출: {args}")
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    checks = dept_gui._sync_status(_sync_common(), deploy_checks=[], code="cs")
+
+    assert checks[0]["status"] == "WARN"
+    assert checks[0]["actionType"] == "COMMON_RUNTIME_DEPLOY"
+    assert "rag-daily-sync" in checks[0]["detail"]
+
+
+def test_deployed_workflow_without_runs_points_at_manual_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_gcloud(args, timeout=12):
+        if args[:2] == ["workflows", "describe"]:
+            return True, {"name": "rag-daily-sync", "state": "ACTIVE"}
+        if args[:3] == ["scheduler", "jobs", "describe"]:
+            return True, {"state": "ENABLED", "schedule": "0 0 * * *", "timeZone": "Asia/Seoul"}
+        return True, []
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    checks = dept_gui._sync_status(_sync_common(), deploy_checks=[], code="cs")
+    by_name = {item["name"]: item for item in checks}
+
+    assert by_name["scheduler-job"]["status"] == "OK"
+    assert by_name["latest-workflow"]["status"] == "WARN"
+    assert by_name["latest-workflow"]["actionType"] == "MANUAL_SYNC"
+    assert by_name["latest-workflow"]["departmentCode"] == "cs"
+
+
+def test_missing_scheduler_job_is_reported_instead_of_a_bare_workflow_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """배포가 Scheduler 단계에서 죽으면 잡이 없다 — 그게 진짜 원인이다.
+
+    예전에는 어느 검사에도 안 잡혀서 "최근 실행 없음" 한 줄로만 드러났고,
+    화면에서는 고칠 방법이 보이지 않았다.
+    """
+
+    def fake_gcloud(args, timeout=12):
+        if args[:2] == ["workflows", "describe"]:
+            return True, {"name": "rag-daily-sync"}
+        if args[:3] == ["scheduler", "jobs", "describe"]:
+            return False, "ERROR: NOT_FOUND: The job does not exist"
+        return True, []
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    checks = dept_gui._sync_status(_sync_common(), deploy_checks=[], code="cs")
+    by_name = {item["name"]: item for item in checks}
+
+    assert by_name["scheduler-job"]["status"] == "WARN"
+    assert by_name["scheduler-job"]["actionType"] == "COMMON_RUNTIME_DEPLOY"
+    # 실행 이력 쪽은 원인이 아니므로 오류로 세지 않는다.
+    assert by_name["latest-workflow"]["status"] == "SKIP"
+    assert by_name["latest-workflow"]["blockedBy"] == ["scheduler-job"]
+
+
+def test_paused_scheduler_job_shows_the_resume_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_gcloud(args, timeout=12):
+        if args[:2] == ["workflows", "describe"]:
+            return True, {"name": "rag-daily-sync"}
+        if args[:3] == ["scheduler", "jobs", "describe"]:
+            return True, {"state": "PAUSED", "schedule": "0 0 * * *"}
+        return True, [{"state": "SUCCEEDED", "endTime": "2026-08-29T00:00:00+00:00"}]
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    checks = dept_gui._sync_status(_sync_common(), deploy_checks=[], code="cs")
+    job = next(item for item in checks if item["name"] == "scheduler-job")
+
+    assert job["status"] == "WARN"
+    assert "PAUSED" in job["detail"]
+    # 재배포로는 못 고친다 — 명령을 그대로 보여준다.
+    assert "actionType" not in job
+    assert "jobs resume" in job["action"]
+
+
+def test_execution_lookup_failure_stays_an_error_with_the_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """조회 자체가 깨진 것은 배포로 고칠 수 없다 — 버튼 대신 사유를 남긴다."""
+
+    def fake_gcloud(args, timeout=12):
+        if args[:2] == ["workflows", "describe"]:
+            return True, {"name": "rag-daily-sync"}
+        return False, "PERMISSION_DENIED: workflows.executions.list"
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    checks = dept_gui._sync_status(_sync_common(), deploy_checks=[], code="cs")
+
+    assert checks[0]["status"] == "FAIL"
+    assert "PERMISSION_DENIED" in checks[0]["detail"]
+    assert "actionType" not in checks[0]
+
+
+def test_successful_run_still_reports_freshness(monkeypatch: pytest.MonkeyPatch) -> None:
+    finished = (
+        datetime.now(UTC).replace(microsecond=0) - timedelta(hours=2)
+    ).isoformat()
+
+    def fake_gcloud(args, timeout=12):
+        if args[:2] == ["workflows", "describe"]:
+            return True, {"name": "rag-daily-sync"}
+        if args[:3] == ["scheduler", "jobs", "describe"]:
+            return True, {"state": "ENABLED", "schedule": "0 0 * * *"}
+        return True, [{"state": "SUCCEEDED", "startTime": finished, "endTime": finished}]
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    checks = dept_gui._sync_status(_sync_common(), deploy_checks=[], code="cs")
+    latest = next(item for item in checks if item["name"] == "latest-workflow")
+
+    assert latest["status"] == "OK"
+    assert "SUCCEEDED" in latest["detail"]
+
+
+def test_cancelled_duplicate_does_not_hide_a_successful_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    finished = datetime.now(UTC).replace(microsecond=0).isoformat()
+
+    def fake_gcloud(args, timeout=12):
+        if args[:2] == ["workflows", "describe"]:
+            return True, {"name": "rag-daily-sync"}
+        if args[:3] == ["scheduler", "jobs", "describe"]:
+            return True, {"state": "ENABLED", "schedule": "0 0 * * *"}
+        assert "--limit=10" in args
+        return True, [
+            {"state": "CANCELLED", "startTime": finished, "endTime": finished},
+            {"state": "SUCCEEDED", "startTime": finished, "endTime": finished},
+        ]
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    checks = dept_gui._sync_status(_sync_common(), deploy_checks=[], code="cs")
+    latest = next(item for item in checks if item["name"] == "latest-workflow")
+
+    assert latest["status"] == "OK"
+    assert "SUCCEEDED" in latest["detail"]
+
+
+def _sync_service(env: dict[str, str]) -> dict:
+    return {
+        "spec": {"template": {"spec": {"containers": [
+            {"env": [{"name": key, "value": value} for key, value in env.items()]}
+        ]}}}
+    }
+
+
+def test_runtime_env_drift_catches_stale_buckets_after_a_department_rebuild(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """학과를 다시 만들면 버킷 이름이 바뀐다. 서비스는 살아 있고 env 만 낡는다.
+
+    이 상태의 rag-sync 는 없어진 버킷에 업로드해 전량 404 → DLQ 로 보낸다.
+    로그를 뒤지기 전에는 안 보이므로 여기서 잡아야 한다.
+    """
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+
+    def fake_gcloud(args, timeout=12):
+        assert args[:3] == ["run", "services", "describe"]
+        return True, _sync_service(
+            {
+                "GCS_HWP_ORIGINAL_BUCKET": "rag-ee-hwp-old",
+                "GCS_SOURCE_BUCKET": "rag-ee-source-old",
+                "RAG_CORPUS_NAME": (
+                    "projects/project-test/locations/asia-northeast3/ragCorpora/staff-1"
+                ),
+                "DEPARTMENTS_JSON": "{}",
+            }
+        )
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+    report = dept_gui.runtime_env_drift()
+    by_service = {item["serviceName"]: item for item in report["services"]}
+
+    assert report["status"] == "DRIFT"
+    stale_keys = {item["key"] for item in by_service["rag-sync"]["staleKeys"]}
+    assert "GCS_HWP_ORIGINAL_BUCKET" in stale_keys
+    assert "DEPARTMENTS_JSON" in stale_keys
+    # 코퍼스는 그대로이므로 드리프트로 세지 않는다.
+    assert "RAG_CORPUS_NAME" not in stale_keys
+
+
+def test_runtime_env_reports_ok_when_deployment_matches_config(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    expected = dept_config.build_env("ee", "staff")
+    deployed = {
+        "GCS_HWP_ORIGINAL_BUCKET": expected["GCS_HWP_ORIGINAL_BUCKET"],
+        "GCS_SOURCE_BUCKET": expected["GCS_SOURCE_BUCKET"],
+        "RAG_CORPUS_NAME": expected["RAG_CORPUS_NAME"],
+        "DEPARTMENTS_JSON": dept_config.departments_json(),
+    }
+    monkeypatch.setattr(
+        dept_gui, "_gcloud_json", lambda args, timeout=12: (True, _sync_service(deployed))
+    )
+
+    report = client.get("/api/v1/runtime-env").json()
+
+    assert report["status"] == "OK"
+    assert all(item["status"] == "OK" for item in report["services"])
+
+
+def test_missing_service_is_not_reported_as_drift(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """서비스가 없는 것은 드리프트가 아니라 미배포다 — DEPLOY 층이 잡는다."""
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda args, timeout=12: (False, "NOT_FOUND"))
+
+    report = dept_gui.runtime_env_drift()
+
+    assert report["status"] == "OK"
+    assert all(item["status"] == "UNKNOWN" for item in report["services"])
+
+
+def test_env_only_run_skips_build_workflow_and_scheduler_steps(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """env 갱신은 이미지·Workflow·Scheduler 를 건드리지 않는다."""
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        stdout = io.StringIO("")
+        returncode = 0
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(dept_gui.shutil, "which", lambda name: "pwsh.exe")
+    def fake_popen(args, **kwargs):
+        captured["args"] = list(args)
+        return FakeProcess()
+
+    monkeypatch.setattr(dept_gui.subprocess, "Popen", fake_popen)
+    dept_gui._run_common_runtime_deploy_script(on_line=lambda line: None, env_only=True)
+
+    assert "-EnvOnly" in captured["args"]
+    assert "-SkipMcp" not in captured["args"]
+
+    class DeferredThread:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(dept_gui, "threading", type("T", (), {"Thread": DeferredThread}))
+    run = dept_gui.start_common_runtime_deployment(env_only=True)
+
+    assert run["envOnly"] is True
+    assert [step["key"] for step in run["steps"]] == ["config", "cloudRun", "ready"]
+

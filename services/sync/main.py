@@ -303,7 +303,7 @@ def backfill(body: BackfillBody) -> dict[str, Any]:
 class BackfillRunBody(BaseModel):
     drive_id: str = Field(..., alias="driveId")
     parser_url: str = Field(default="", alias="parserUrl")
-    index_batch_size: int = Field(default=10, alias="indexBatchSize", ge=1, le=50)
+    index_batch_size: int = Field(default=50, alias="indexBatchSize", ge=1, le=50)
     run_id: str = Field(default="", alias="runId", max_length=32)
     department_code: str = Field(default="", alias="departmentCode", max_length=20)
     drive_index: int = Field(default=1, alias="driveIndex", ge=1)
@@ -380,7 +380,12 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     _publish_backfill_progress(
         store,
         body,
-        {"status": "RUNNING", "phase": "LISTING", "processed": 0},
+        {
+            "status": "RUNNING",
+            "phase": "LISTING",
+            "processed": 0,
+            "syncFolderIds": settings.sync_folder_id_list,
+        },
     )
     snapshot = _build_backfill_changes(
         body.drive_id, store=store, drive=drive, settings=settings
@@ -414,6 +419,7 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     pending_ids: list[str] = []
     processed_count = 0
     last_progress_at = 0.0
+    progress_context: dict[str, Any] = {}
     # lock: totals·pending 접근용(짧게). index_lock: import 직렬화용(길게).
     # 하나로 합치면 import 가 도는 수십 초 동안 워커 8개가 집계조차 못 하고 멈춘다
     # — 동시성이 사실상 1로 붕괴하고, 그 지연이 Cloud Run 타임아웃까지 이어진다.
@@ -439,6 +445,7 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
                 "phase": phase,
                 "processed": processed_count,
                 "totals": dict(totals),
+                **dict(progress_context),
             },
         )
         last_progress_at = now
@@ -463,6 +470,12 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
         uris, ids = batch
         try:
             # import 는 직렬화하되(Vertex RPM), 집계 lock 은 쥐지 않는다.
+            with lock:
+                progress_context.update(
+                    currentAction="RAG 코퍼스 색인",
+                    currentBatchSize=len(ids),
+                    currentStatus="INDEXING",
+                )
             publish_progress("INDEXING", force=True)
             with index_lock:
                 indexed = _import_and_mark(store, uris, ids, rag=rag).imported
@@ -535,6 +548,13 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
 
             status = result.get("status")
             with lock:
+                progress_context.update(
+                    currentAction="Drive 파일 처리",
+                    currentFileId=str(ch.get("fileId") or ""),
+                    currentFileName=str(ch.get("name") or ch.get("fileId") or ""),
+                    currentFilePath=str(result.get("path") or ch.get("name") or ""),
+                    currentStatus=str(status or "UNKNOWN"),
+                )
                 if status == "GCS_READY":
                     uris = list(result.get("gcsUris") or [])
                     if not uris and result.get("gcsUri"):
@@ -1187,6 +1207,7 @@ def _ingest_hwp(
                 "gcsUri": raw_uri,
                 "mimeType": body.mime_type,
                 "fileId": body.file_id,
+                "sourceBucket": settings.gcs_source_bucket,
             },
         )
         if resp.status_code == 422:

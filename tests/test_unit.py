@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from services.parser.cleanup import cleanup_markdown, to_nfc
 from services.parser.quality_gate import ParseMetrics, evaluate_quality
 from shared.config import Settings
+from shared.gcs import GcsClient
 from shared.hashing import sha256_text
 from shared.mime_types import RouteKind, classify_route, is_hwp_family, is_hwpx
 
@@ -35,6 +37,17 @@ def test_classify_hwp():
     assert classify_route("application/haansofthwpx", "a.hwpx") == RouteKind.HWP_PARSE
     assert is_hwp_family("", "report.HWPX")
     assert is_hwpx("application/hwp+zip", "x.hwpx")
+
+
+def test_parser_output_can_target_the_requesting_departments_bucket():
+    gcs = GcsClient.__new__(GcsClient)
+    gcs.settings = SimpleNamespace(gcs_source_bucket="first-department")
+    gcs.upload_text = MagicMock(return_value="gs://ee-source/f1.md")
+
+    uri = gcs.upload_source_md("본문", "f1", "ee-source")
+
+    assert uri == "gs://ee-source/f1.md"
+    gcs.upload_text.assert_called_once_with("본문", "ee-source", "f1.md")
 
 
 def test_classify_routes():

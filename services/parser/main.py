@@ -56,6 +56,9 @@ class ParseRequestBody(BaseModel):
     gcs_uri: str = Field(..., alias="gcsUri")
     mime_type: str = Field(..., alias="mimeType")
     file_id: str = Field(..., alias="fileId")
+    # 공용 Parser가 첫 학과 설정에 묶이지 않도록 Sync가 요청별 출력 버킷을 준다.
+    # 비우면 기존 직접 호출과 이전 Sync 버전을 위해 환경변수 버킷으로 폴백한다.
+    source_bucket: str = Field(default="", alias="sourceBucket", max_length=222)
 
     model_config = {"populate_by_name": True}
 
@@ -212,7 +215,7 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
                     ) from exc
 
     content_hash = sha256_text(markdown)
-    md_uri = gcs.upload_source_md(markdown, req.file_id)
+    md_uri = gcs.upload_source_md(markdown, req.file_id, req.source_bucket)
 
     result = ParseResult(
         gcs_markdown_uri=md_uri,

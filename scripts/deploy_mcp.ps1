@@ -4,8 +4,8 @@
 # 못 붙는다. 공개 URL 은 여기서만 나온다(ALLOW_UNAUTH, 기본 true).
 #
 # 사용:
-#   .\scripts\deploy_mcp.ps1 -Dept cs                 # 학과 교직원
-#   .\scripts\deploy_mcp.ps1 -Dept cs -Audience student
+#   .\scripts\deploy_mcp.ps1 -Dept cs                 # 그 학과에 설정된 범위 전부
+#   .\scripts\deploy_mcp.ps1 -Dept cs -Audience student  # 하나만
 #   .\scripts\deploy_mcp.ps1 -All                     # 전 학과 x 교직원/학생
 #
 # 설정 원본은 config/common.yaml + config/departments/<학과>.yaml 이다.
@@ -42,18 +42,38 @@ function Assert-LastExit {
 }
 
 # ---- 배포 대상 정하기 ----
-$targets = @()
-if ($All) {
-  foreach ($c in (Get-DepartmentCodes)) {
-    foreach ($a in @(Get-DepartmentAudiences -DeptCode $c)) {
-      $targets += [pscustomobject]@{ Dept = $c; Audience = $a }
+# -Dept 만 주면 **그 학과에 설정된 범위 전부**다. 예전에는 staff 하나만 올라갔고
+# 학생 MCP 는 아무 말 없이 빠졌다 — 콘솔은 둘을 기대해 Ready 확인에서 걸렸고
+# ("Ready 상태가 아닌 서비스: rag-mcp-cs-student"), 손으로 돌린 사람은 학생
+# 서비스가 낡은 채로 도는 것을 몰랐다(실측).
+# 하나만 올리려면 -Audience 를 명시한다.
+function Get-DeployTargets {
+  param(
+    [string]$Dept,
+    [string]$Audience,
+    [bool]$All,
+    [bool]$AudienceExplicit
+  )
+  $found = @()
+  if ($All) {
+    foreach ($c in (Get-DepartmentCodes)) {
+      foreach ($a in @(Get-DepartmentAudiences -DeptCode $c)) {
+        $found += [pscustomobject]@{ Dept = $c; Audience = $a }
+      }
     }
+  } elseif ($Dept) {
+    $audiences = if ($AudienceExplicit) { @($Audience) } else { @(Get-DepartmentAudiences -DeptCode $Dept) }
+    foreach ($a in $audiences) {
+      $found += [pscustomobject]@{ Dept = $Dept; Audience = $a }
+    }
+  } else {
+    throw "-Dept <학과> 또는 -All 이 필요하다 (설정 원본은 config/departments/)"
   }
-} elseif ($Dept) {
-  $targets += [pscustomobject]@{ Dept = $Dept; Audience = $Audience }
-} else {
-  throw "-Dept <학과> 또는 -All 이 필요하다 (설정 원본은 config/departments/)"
+  return $found
 }
+
+$targets = @(Get-DeployTargets -Dept $Dept -Audience $Audience -All $All.IsPresent `
+  -AudienceExplicit $PSBoundParameters.ContainsKey("Audience"))
 
 # ---- 키 중복 사전 검사 ----
 # 배포를 시작한 뒤에 걸리면 절반만 올라간 채로 멈춘다. 먼저 전부 본다.
@@ -136,12 +156,24 @@ foreach ($t in $targets) {
   $authArgs = @("--allow-unauthenticated")
   if ($ALLOW_UNAUTH -ne "true") { $authArgs = @("--no-allow-unauthenticated") }
 
+  # 다른 운영 PC가 로컬 YAML 없이도 Cloud Run에서 학과 설정을 복원한다.
+  # annotation 값은 비밀을 뺀 JSON의 base64url이고 쉼표가 없어 gcloud 인자에 안전하다.
+  if ([string]::IsNullOrWhiteSpace($env:DEPT_CODE) -or
+      [string]::IsNullOrWhiteSpace($env:MCP_AUDIENCE) -or
+      [string]::IsNullOrWhiteSpace($env:DEPLOYMENT_METADATA_B64)) {
+    throw "$SERVICE : Cloud Run 관리 메타데이터를 만들지 못했다"
+  }
+  $managementLabels = "gcp-rag-managed=true,gcp-rag-dept=$($env:DEPT_CODE),gcp-rag-audience=$($env:MCP_AUDIENCE),gcp-rag-schema=v1"
+  $managementAnnotation = "gcp-rag.dev/department-metadata=$($env:DEPLOYMENT_METADATA_B64)"
+
   $envVars = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|RAG_CORPUS_NAME=$($env:RAG_CORPUS_NAME)|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|FIRESTORE_DATABASE=$FS_DB|DOC_STATE_COLLECTION=$FS_COL|MCP_API_KEY=$MCP_API_KEY|TOP_K_DEFAULT=$TOP_K|SEARCH_FETCH_MULTIPLIER=$FETCH_MULT|SEARCH_FETCH_MAX=$FETCH_MAX"
 
   gcloud run deploy $SERVICE `
     --image=$IMAGE `
     --region=$REGION `
     @authArgs `
+    --update-labels=$managementLabels `
+    --update-annotations=$managementAnnotation `
     --set-env-vars=$envVars `
     --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY `
     --min-instances=$MIN_INSTANCES

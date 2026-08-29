@@ -10,6 +10,8 @@ config/ 는 커밋되므로 키가 한 번 들어가면 이력에 영구히 남�
 
 from __future__ import annotations
 
+import base64
+import json
 import re
 import sys
 from pathlib import Path
@@ -456,6 +458,49 @@ def test_both_audience_keys_are_exported(tmp_path, monkeypatch):
         assert env["MCP_API_KEY_STAFF"] != env["MCP_API_KEY_STUDENT"]
         # 이번 대상 키는 그 대상 것이어야 한다.
         assert env["MCP_API_KEY"] == env[f"MCP_API_KEY_{audience.upper()}"]
+
+
+def test_deployment_metadata_is_complete_and_contains_no_secret(tmp_path, monkeypatch):
+    """Cloud Run 주석은 YAML 대체용 설정만 담고 MCP 키는 절대 담지 않는다."""
+    body = _dept_body(
+        "x",
+        name="엑스학과",
+        minInstances={"staff": 1, "student": 0},
+    )
+    _write_depts(tmp_path, monkeypatch, {"x": body})
+
+    staff_env = build_env("x", "staff")
+    student_env = build_env("x", "student")
+    metadata = json.loads(
+        base64.urlsafe_b64decode(staff_env["DEPLOYMENT_METADATA_B64"]).decode("utf-8")
+    )
+
+    assert metadata == {
+        "audience": "staff",
+        "buckets": {"hwpOriginal": "b-x-hwp", "source": "b-x-src"},
+        "code": "x",
+        "corpora": {"staff": "c-x-staff", "student": "c-x-student"},
+        "corpusMode": "split",
+        "drive": {
+            "driveIds": ["D_X"],
+            "studentFolderIds": ["F_X_A"],
+            "syncFolderIds": ["F_X_A", "F_X_B"],
+        },
+        "managedBy": "gcp-rag",
+        "minInstances": {"staff": 1, "student": 0},
+        "name": "엑스학과",
+        "schemaVersion": 1,
+    }
+    encoded_text = base64.urlsafe_b64decode(
+        staff_env["DEPLOYMENT_METADATA_B64"]
+    ).decode("utf-8")
+    assert staff_env["MCP_API_KEY"] not in encoded_text
+    assert student_env["MCP_API_KEY"] not in encoded_text
+    assert "MCP_API_KEY" not in encoded_text
+    student_metadata = json.loads(
+        base64.urlsafe_b64decode(student_env["DEPLOYMENT_METADATA_B64"]).decode("utf-8")
+    )
+    assert student_metadata["audience"] == "student"
 
 
 def test_deploy_checks_only_read_keys_dept_config_exports(tmp_path, monkeypatch):

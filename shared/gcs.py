@@ -67,9 +67,9 @@ class GcsClient:
         blob = f"{file_id}{ext}"
         return self.upload_bytes(data, self.settings.gcs_hwp_original_bucket, blob)
 
-    def upload_source_md(self, markdown: str, file_id: str) -> str:
+    def upload_source_md(self, markdown: str, file_id: str, bucket: str = "") -> str:
         blob = f"{file_id}.md"
-        return self.upload_text(markdown, self.settings.gcs_source_bucket, blob)
+        return self.upload_text(markdown, bucket or self.settings.gcs_source_bucket, blob)
 
     def upload_source_sidecar_md(self, markdown: str, file_id: str) -> str:
         """바이너리(PDF/PPTX 등)용 경로·묶음 메타 MD (본문과 함께 RAG import)."""

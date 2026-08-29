@@ -196,6 +196,14 @@ python -c "import secrets;print(secrets.token_urlsafe(32))"   # 키 2개 생성
 - `deploy_mcp.ps1` 은 **MCP 만 재배포**할 때 쓴다 (검색 파라미터·키 교체 등)
 - `ALLOW_UNAUTH=false` 로 두면 IAM 전용이 되고 FactChat 은 붙지 못한다
 - **공개 MCP 의 경계는 API 키뿐이다.** 키가 새면 그 코퍼스 전량이 열린다 — 교직원 키는 특히 주의
+- MCP 배포에는 관리 라벨과 비밀값 없는 메타데이터 주석도 기록한다. 다른 운영 PC에서
+  같은 프로젝트·리전으로 로그인하면 로컬 학과 YAML 없이도 배포된 학과, 코퍼스, 버킷,
+  Drive 범위와 Cloud Run Ready 상태를 콘솔에서 읽기 전용으로 확인할 수 있다. MCP 키는
+  메타데이터에 넣지 않는다
+- 최초 공통 환경설정은 `rag-parser`·`rag-sync` 존재 여부도 확인한다. 이미 있으면
+  유지하고, 없으면 학과가 없는 빈 라우팅 상태로 공용 서비스만 먼저 배포한다
+- 이후 학과 추가는 공용 `rag-sync`의 학과 맵을 갱신하고 학과별 MCP만 늘린다.
+  `rag-parser`는 공통 코드나 실행 설정이 바뀔 때만 다시 배포한다
 
 ### 1) 전체
 
@@ -255,7 +263,7 @@ gcloud workflows run rag-daily-sync --location=$R --project=$P `
 |---|---|---|
 | `backfill` | `false` | `true` = 전체 재수집. **처음엔 이걸로** |
 | `maxChanges` | 200 | 델타 1페이지당 변경 수 (Workflows 변수 512KB 한도 대비) |
-| `indexBatchSize` | 10 | RAG import 배치 |
+| `indexBatchSize` | 50 | RAG import 배치 |
 | `recoverLimit` | 200 | DLQ 회수 상한 |
 
 - `backfill` 없이 돌리면 델타 모드다. 다만 **최초 토큰이 없으면 자동으로 백필 스냅샷**을 탄다

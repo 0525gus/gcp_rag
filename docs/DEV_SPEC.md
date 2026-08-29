@@ -209,11 +209,19 @@ gs://{source 버킷}/{fileId}{.pdf|…}
   생성·저장을 막지 않고 확인 창에서 진행 여부를 고른다. 확인 없이는
   `409 DRIVE_ID_CONFLICT`다. 배포 맵 검증은 여전히 중복을 거부한다
 - `폴더 정보 확인`은 입력한 `syncFolderIds`를 Compute SA로 Drive API에서 조회한다.
+- 공유드라이브 연결 확인이 성공하면 최상위 폴더부터 표시하며, 폴더를 펼칠 때 직속
+  하위 폴더(2단계)까지 병렬로 미리 조회하고 접힌 트리로 표시한다. 이후 단계는 펼칠 때
+  지연 조회한다. 트리에서 체크한 폴더 ID를 `syncFolderIds`로 저장하고 학생 분리 범위도
+  같은 선택 목록에서 정한다. 상위 폴더 선택 시 이미 선택한 하위 폴더는 제거하고 해당
+  가지를 잠근다. ID 직접 입력은 고급 옵션으로 남긴다
   설정에 저장되는 ID는 유지하고, 확인된 실제 폴더명을 태그와 학생 폴더 선택 목록에 표시한다.
   GUI 라벨은 `동기화 폴더 ID`, `학생 폴더 ID`를 사용하고 라벨 옆 `?` 툴팁으로
   전자가 전체 수집 범위이며 후자가 그 부분집합임을 설명한다
   폴더가 아닌 항목·휴지통 항목·접근 불가 ID는 개별 실패로 안내한다
 - `동기화 관리` 탭은 학과별 변경분 동기화 또는 전체 backfill을 수동 실행한다.
+- `데이터 동기화`의 현재 실행 카드는 학과, 활성 Drive, 동기화 폴더 범위, Workflow
+  단계와 실행 ID를 표시한다. backfill은 Firestore 실행 진행 문서에 최근 처리 파일명·ID·
+  경로·결과를 주기적으로 기록하며 콘솔이 이를 2초 간격으로 갱신한다
   선택 학과의 Drive만 Workflow 인자로 넘기며, 같은 Drive에 ACTIVE 실행이 있으면 중복 실행을
   거부한다. backfill은 확인 창을 거친 뒤 실행한다
 - GUI가 만든 수동 실행은 `runId`를 Workflow와 `rag-sync`에 전달한다. backfill 중간 상태는
@@ -225,6 +233,11 @@ gs://{source 버킷}/{fileId}{.pdf|…}
   상세 패널에서 각 URL과 해당 범위의 MCP 키를 개별 복사할 수 있다. 키는 버튼을 누른
   순간에만 로컬 세션 검증 POST 응답으로 전달하며 목록·설정 API에는 포함하지 않는다.
   클립보드에는 FactChat 인증 헤더에 바로 쓸 수 있는 `Bearer {key}` 형식으로 기록한다
+- MCP 실제 배포 시 Cloud Run에 관리 라벨(`gcp-rag-managed`, 학과, 대상, 스키마)과
+  `gcp-rag.dev/department-metadata` 주석을 함께 기록한다. 주석은 base64url JSON이며
+  학과명·대상·코퍼스·버킷·Drive/폴더 범위·최소 인스턴스만 포함하고 MCP 키는 제외한다.
+  콘솔은 이를 조회해 로컬 학과 YAML이 없는 항목도 `CLOUD` 읽기 전용 학과로 합친다.
+  구형 배포는 서비스 환경변수의 비밀값 아닌 항목만 제한적으로 복원한다
 - `코퍼스 확인` 탭은 기본이 Vertex RAG 검색 근거 조회다. `Gemini 답변`을 켜면
   같은 gcloud 계정으로 `gemini-2.5-flash-lite`(Vertex global endpoint) 답을 붙이며
   별도 API 키가 필요 없다. 토큰은 서버 밖으로 노출하지 않는다
@@ -290,7 +303,9 @@ gs://{source 버킷}/{fileId}{.pdf|…}
 | `GET /api/v1/common-config/resource-provisioning/{runId}` | 공통 리소스 생성 진행 상태 |
 | `POST /api/v1/common-config` | 최초 공통 설정 생성(기존 파일 덮어쓰기 금지) |
 | `GET /api/v1/departments/resource-options` | 표시 이름이 포함된 코퍼스와 보호된 리전 버킷 조회 |
+| `GET /api/v1/cloud-mcp-services` | Cloud Run 메타데이터에서 YAML 없는 배포 학과와 Ready 상태 조회 |
 | `POST /api/v1/departments/drive-preflight` | 입력한 공유드라이브 ID의 Compute SA 실접근 확인. 다른 학과와 겹치면 `driveConflicts`를 함께 반환 |
+| `POST /api/v1/departments/drive-folders` | 공유드라이브 또는 폴더의 직속 하위 폴더를 Compute SA로 지연 조회 |
 | `POST /api/v1/departments/preview` | 신규 YAML 정규화·검증·비밀값 제거 preview. Drive 중복은 `driveConflicts` 경고 |
 | `POST /api/v1/departments` | 신규 학과 YAML 원자적 생성과 MCP 키 자동 생성. Drive 중복은 확인 전 `409 DRIVE_ID_CONFLICT` |
 | `GET /api/v1/departments/{code}/config` | 비밀 키를 제외한 기존 학과 설정 조회 |

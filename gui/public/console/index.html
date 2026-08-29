@@ -4,14 +4,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light" />
-    <title>GCP RAG 학과 관리</title>
+    <title>GCP RAG 서비스 관리</title>
     <meta
       name="description"
       content="학과별 RAG 설정을 생성하고 GCP 배포 상태를 확인하는 로컬 운영 콘솔"
     />
-    <meta property="og:title" content="GCP RAG 학과 관리" />
+    <meta property="og:title" content="GCP RAG 서비스 관리" />
     <meta property="og:description" content="학과별 RAG 설정 생성과 배포 상태 확인" />
-    <meta property="og:image" content="/og.png" />
     <link rel="stylesheet" href="/console/app.css" />
     <script src="/console/app.js" defer></script>
   </head>
@@ -21,10 +20,10 @@
       <div class="setup-card">
         <header class="setup-header">
           <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-          <div><span class="eyebrow">FIRST RUN SETUP</span><h1 id="setupTitle">공통 환경 설정</h1></div>
-          <span class="setup-step">01 / 01</span>
+          <div><span class="eyebrow" id="setupEyebrow">FIRST RUN SETUP</span><h1 id="setupTitle">공통 환경 설정</h1></div>
+          <span class="setup-step" id="setupStep">01 / 01</span>
         </header>
-        <p class="setup-intro">학과 설정을 만들기 전에 이 콘솔이 사용할 GCP 기본 환경을 연결합니다. 검증된 운영 기본값은 자동으로 채워집니다.</p>
+        <p class="setup-intro" id="setupIntro">학과 설정을 만들기 전에 이 콘솔이 사용할 GCP 기본 환경을 연결합니다. 검증된 운영 기본값은 자동으로 채워집니다.</p>
         <div class="setup-auth" id="setupAuth" data-status="checking">
           <span class="setup-auth-dot"><i></i></span>
           <div><b id="setupAuthTitle">gcloud 로그인 확인 중</b><p id="setupAuthDetail">활성 계정과 접근 가능한 프로젝트를 확인합니다.</p></div>
@@ -79,6 +78,10 @@
           <div class="validation-banner hidden" id="setupValidationBanner"></div>
           <button type="submit" class="button primary setup-submit" id="createCommonConfig">설정 저장하고 시작</button>
         </form>
+        <div class="setup-login-actions hidden" id="setupLoginActions">
+          <button type="button" class="button secondary" id="skipGcloudLogin">로그인 없이 둘러보기</button>
+          <p>학과 설정 목록과 편집은 로그인 없이도 열립니다. 검사·배포·GCP 리소스 조회만 로그인 뒤에 동작합니다.</p>
+        </div>
       </div>
     </section>
 
@@ -93,25 +96,28 @@
         </div>
 
         <nav class="nav-list">
+          <span class="nav-section-label">서비스 관리</span>
           <button class="nav-item active" data-view="dashboard">
             <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></span>
-            <span>상태 대시보드</span>
+            <span>서비스 현황</span>
           </button>
           <button class="nav-item" data-view="create">
-            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg></span>
-            <span>학과 추가</span>
+            <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg></span>
+            <span>신규 등록</span>
           </button>
+          <span class="nav-section-label">데이터 운영</span>
           <button class="nav-item" data-view="sync">
             <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></span>
-            <span>동기화 관리</span>
+            <span>동기화</span>
           </button>
           <button class="nav-item" data-view="corpus">
             <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span>
-            <span>코퍼스 확인</span>
+            <span>검색 테스트</span>
           </button>
+          <span class="nav-section-label">시스템</span>
           <button class="nav-item" data-view="environment">
             <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
-            <span>실행 환경</span>
+            <span>운영 환경</span>
           </button>
         </nav>
 
@@ -143,7 +149,7 @@
           <div class="page-heading">
             <div>
               <span class="eyebrow">OPERATIONS OVERVIEW</span>
-              <h1 id="dashboardTitle">학과 서비스 현황</h1>
+              <h1 id="dashboardTitle">서비스 현황</h1>
               <p>설정부터 동기화까지, 운영에 필요한 상태를 한곳에서 확인하세요.</p>
             </div>
             <button class="button primary" id="checkAllButton">
@@ -183,8 +189,8 @@
           <section class="panel department-panel">
             <div class="panel-toolbar">
               <div>
-                <h2>학과 목록</h2>
-                <span id="departmentMeta">0개 학과</span>
+                <h2>등록 서비스</h2>
+                <span id="departmentMeta">0개 서비스</span>
               </div>
               <div class="toolbar-controls">
                 <label class="search-box">
@@ -204,7 +210,7 @@
               <table class="status-table">
                 <thead>
                   <tr>
-                    <th>학과</th>
+                    <th>서비스 / 학과</th>
                     <th>전체</th>
                     <th>설정</th>
                     <th>리소스</th>
@@ -221,9 +227,9 @@
 
             <div class="empty-state hidden" id="emptyState">
               <div class="empty-visual"><span></span><span></span><span></span></div>
-              <h3>등록된 학과가 없습니다</h3>
-              <p>첫 학과 설정을 만들면 여기서 상태를 한눈에 볼 수 있습니다.</p>
-              <button class="button primary" data-go-create>첫 학과 추가</button>
+              <h3>등록된 서비스가 없습니다</h3>
+              <p>첫 학과 서비스를 추가하면 여기서 상태를 한눈에 볼 수 있습니다.</p>
+              <button class="button primary" data-go-create>첫 학과 서비스 추가</button>
             </div>
           </section>
         </section>
@@ -232,7 +238,7 @@
           <div class="page-heading create-heading">
             <div>
               <span class="eyebrow" id="createEyebrow">NEW DEPARTMENT</span>
-              <h1 id="createTitle">새 학과 연결</h1>
+              <h1 id="createTitle">서비스 등록</h1>
               <p id="createDescription">필요한 정보를 단계별로 입력하면 안전한 YAML을 생성합니다.</p>
             </div>
             <button class="text-button" id="cancelCreate">작성 취소</button>
@@ -340,7 +346,7 @@
               <div class="wizard-step" data-step="2">
                 <div class="form-section-heading">
                   <span class="section-number">02</span>
-                  <div><h2>Google Drive 수집 범위</h2><p>ID를 쉼표나 줄바꿈으로 붙여넣을 수 있습니다.</p></div>
+                  <div><h2>Google Drive 수집 범위</h2><p>ID를 쉼표나 줄바꿈으로 붙여넣을 수 있습니다. Enter는 연결 확인입니다.</p></div>
                 </div>
                 <div class="scope-callout">
                   <span>i</span>
@@ -365,13 +371,13 @@
                 <div class="form-grid two-columns scope-grid">
                   <div class="field tag-field sync-folder-field">
                     <div class="field-action-heading">
-                      <label for="syncFolderIds">동기화 폴더 ID <em>필수</em><span class="field-help-tooltip" tabindex="0" aria-label="동기화 시킬 폴더를 모두 입력해 주세요. 동기화 대상 폴더는 교직원 대상 폴더와 같습니다. " data-tooltip="동기화 시킬 폴더를 모두 입력해 주세요. 동기화 대상 폴더는 교직원 대상 범위와 같습니다. ">?</span></label>
-                      <button type="button" class="inline-check-button" id="lookupFolderNames" disabled>
-                        <span class="inline-check-dot" aria-hidden="true"></span>
-                        폴더 정보 확인
-                      </button>
+                      <label>동기화 폴더 선택 <em>필수</em><span class="field-help-tooltip" tabindex="0" aria-label="공유드라이브 폴더 트리에서 동기화할 범위를 선택해 주세요." data-tooltip="선택한 폴더와 모든 하위 항목이 동기화 대상이 됩니다.">?</span></label>
                     </div>
-                    <textarea id="syncFolderIds" name="syncFolderIds" rows="5" placeholder="FOLDER_ID_1&#10;FOLDER_ID_2"></textarea>
+                    <div class="drive-folder-browser" id="driveFolderBrowser"><p>공유드라이브 연결을 확인하면 폴더를 탐색할 수 있습니다.</p></div>
+                    <details class="manual-folder-input"><summary>ID 직접 입력 <span>고급</span></summary>
+                      <textarea id="syncFolderIds" name="syncFolderIds" rows="4" placeholder="FOLDER_ID_1&#10;FOLDER_ID_2"></textarea>
+                      <button type="button" class="inline-check-button" id="lookupFolderNames" disabled><span class="inline-check-dot" aria-hidden="true"></span>입력한 ID 확인</button>
+                    </details>
                     <span class="tag-preview" data-tags="syncFolderIds"></span>
                     <span class="preflight-result" id="folderLookupStatus" aria-live="polite"></span>
                     <span class="field-error" data-error="drive.syncFolderIds"></span>
@@ -424,7 +430,7 @@
           <div class="page-heading">
             <div>
               <span class="eyebrow">SYNC OPERATIONS</span>
-              <h1 id="syncTitle">동기화 관리</h1>
+              <h1 id="syncTitle">데이터 동기화</h1>
               <p>학과별 변경분 동기화와 전체 다시 적재를 수동으로 실행하고 진행 상태를 확인하세요.</p>
             </div>
             <button type="button" class="button secondary" id="refreshSyncRuns">실행 이력 새로고침</button>
@@ -475,7 +481,7 @@
           <div class="page-heading">
             <div>
               <span class="eyebrow">CORPUS CONVERSATION</span>
-              <h1 id="corpusTitle">학과 코퍼스 확인</h1>
+              <h1 id="corpusTitle">검색 테스트</h1>
               <p>질문을 보내 실제 Vertex RAG 코퍼스에서 검색되는 문서 조각과 출처를 확인하세요.</p>
             </div>
           </div>
@@ -524,7 +530,7 @@
           <div class="page-heading">
             <div>
               <span class="eyebrow">LOCAL ENVIRONMENT</span>
-              <h1 id="environmentTitle">실행 환경</h1>
+              <h1 id="environmentTitle">운영 환경</h1>
               <p>현재 콘솔이 사용하는 로컬 저장소와 인증 상태입니다.</p>
             </div>
           </div>
@@ -535,6 +541,13 @@
             <span class="shield-mark">✓</span>
             <div><h2>로컬 보안 경계</h2><p>이 콘솔은 127.0.0.1에서만 열리며 MCP 키와 GCP 토큰을 브라우저에 저장하지 않습니다.</p></div>
           </section>
+          <section class="panel danger-zone" id="commonRuntimeDangerZone">
+            <div>
+              <b>공통 런타임 철거</b>
+              <p>Parser, Sync, Workflow, Scheduler를 삭제합니다. 학과 코퍼스와 버킷은 남습니다. 남아 있는 학과가 있으면 그 학과의 동기화가 멈춥니다.</p>
+            </div>
+            <button class="button danger" id="commonRuntimeTeardown">공통 런타임 삭제</button>
+          </section>
         </section>
       </main>
     </div>
@@ -544,7 +557,15 @@
       <div class="drawer-panel">
         <header>
           <div><span class="eyebrow">DEPARTMENT DETAIL</span><h2 id="drawerTitle">학과 상세</h2><p id="drawerPath"></p></div>
-          <button class="icon-button" data-close-drawer aria-label="상세 닫기">×</button>
+          <div class="drawer-header-actions">
+            <details class="drawer-more" id="drawerMore">
+              <summary aria-label="학과 추가 작업">•••</summary>
+              <div class="drawer-more-menu">
+                <button type="button" id="drawerDelete"><span>⌫</span><div><b>학과 삭제</b><small>관련 리소스와 설정 삭제</small></div></button>
+              </div>
+            </details>
+            <button class="icon-button" data-close-drawer aria-label="상세 닫기">×</button>
+          </div>
         </header>
         <div class="drawer-summary" id="drawerSummary"></div>
         <section class="drawer-mcp-servers" id="drawerMcpServers" aria-live="polite"></section>
@@ -651,6 +672,34 @@
         <footer>
           <button type="button" class="button ghost" data-close-common-runtime-deployment id="closeCommonRuntimeDeployment">닫기</button>
           <button type="button" class="button primary hidden" id="retryCommonRuntimeDeployment">다시 배포</button>
+        </footer>
+      </div>
+    </aside>
+
+    <aside class="resource-modal" id="teardownModal" aria-hidden="true" aria-labelledby="teardownTitle">
+      <div class="resource-modal-backdrop" data-close-teardown></div>
+      <div class="resource-modal-panel deployment-modal-panel teardown-panel" role="dialog" aria-modal="true">
+        <header>
+          <div><span class="eyebrow danger-eyebrow">DELETE RESOURCES</span><h2 id="teardownTitle">리소스 삭제</h2><p id="teardownDescription">지워질 리소스를 확인한 뒤 진행하세요.</p></div>
+          <button type="button" class="icon-button" data-close-teardown aria-label="삭제 창 닫기">×</button>
+        </header>
+        <div class="resource-modal-body">
+          <div class="resource-plan-context">
+            <div><span>PROJECT</span><b id="teardownProject">—</b></div>
+            <div><span>REGION</span><b id="teardownRegion">—</b></div>
+          </div>
+          <div class="teardown-warning" id="teardownWarning"><span aria-hidden="true">!</span><p id="teardownWarningText"></p></div>
+          <div class="deployment-step-list" id="teardownTargets"></div>
+          <label class="field teardown-confirm" id="teardownConfirmField">
+            <span>확인을 위해 <b id="teardownConfirmWord">—</b> 를 그대로 입력하세요</span>
+            <input id="teardownConfirmInput" autocomplete="off" spellcheck="false" placeholder="확인 문구" />
+          </label>
+          <div class="validation-banner hidden" id="teardownError"></div>
+        </div>
+        <footer>
+          <button type="button" class="button ghost" data-close-teardown id="closeTeardown">취소</button>
+          <button type="button" class="button secondary hidden" id="retryTeardown">남은 리소스 다시 삭제</button>
+          <button type="button" class="button danger" id="startTeardown" disabled>영구 삭제</button>
         </footer>
       </div>
     </aside>

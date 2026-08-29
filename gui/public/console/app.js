@@ -14,6 +14,7 @@
     editingCode: null,
     editingRevision: null,
     setupResourceRequest: 0,
+    setupMode: "create",
     authPollTimer: null,
     authLoginPending: false,
     departmentResourceRequest: 0,
@@ -22,6 +23,9 @@
     folderLookupSignature: "",
     folderLookupPending: false,
     folderLookupById: new Map(),
+    driveFolderChildren: new Map(),
+    driveFolderExpanded: new Set(),
+    driveFolderLoading: new Set(),
     codeAvailable: null,
     codeAvailabilityRequest: 0,
     codeAvailabilityTimer: null,
@@ -43,6 +47,12 @@
     mcpDeploymentPollTimers: new Map(),
     commonRuntimeDeployment: null,
     commonRuntimeDeploymentPollTimer: null,
+    runtimeEnv: null,
+    runtimeEnvChecking: false,
+    runtimeEnvSignature: "",
+    teardownPlan: null,
+    teardownRun: null,
+    teardownPollTimer: null,
     mcpServers: new Map(),
     mcpServerRequests: new Map(),
     driveConflicts: [],
@@ -130,6 +140,7 @@
       loadEnvironment();
       refreshDriveSaStatusInline();
     }
+    if (view === "dashboard") refreshRuntimeEnvIfStale();
     if (view === "sync") loadSyncRuns();
     if (view === "corpus") {
       renderCorpusDepartmentOptions();
@@ -142,12 +153,13 @@
     const select = $("#corpusDepartment");
     if (!select) return;
     const current = select.value;
-    select.innerHTML = '<option value="">학과 선택</option>' + state.departments.map((dept) =>
+    const localDepartments = state.departments.filter((dept) => !dept.cloudOnly);
+    select.innerHTML = '<option value="">학과 선택</option>' + localDepartments.map((dept) =>
       `<option value="${escapeHtml(dept.code)}">${escapeHtml(dept.name)} · ${escapeHtml(dept.code)}</option>`
     ).join("");
-    if (state.departments.some((dept) => dept.code === current)) select.value = current;
-    else if (state.departments.length === 1) select.value = state.departments[0].code;
-    select.disabled = state.departments.length === 0;
+    if (localDepartments.some((dept) => dept.code === current)) select.value = current;
+    else if (localDepartments.length === 1) select.value = localDepartments[0].code;
+    select.disabled = localDepartments.length === 0;
     updateCorpusChatTarget();
   }
 
@@ -301,6 +313,16 @@
     if (force) state.mcpServers.delete(code);
     if (state.mcpServers.has(code)) return state.mcpServers.get(code);
     if (state.mcpServerRequests.has(code)) return state.mcpServerRequests.get(code);
+    const department = state.departments.find((item) => item.code === code);
+    if (department?.cloudServices?.length) {
+      const data = {
+        code,
+        region: state.environment?.region || "Cloud Run",
+        servers: department.cloudServices,
+      };
+      state.mcpServers.set(code, data);
+      return data;
+    }
     const request = api(`/api/v1/departments/${encodeURIComponent(code)}/mcp-servers`)
       .then((data) => {
         state.mcpServers.set(code, data);
@@ -331,7 +353,7 @@
       <div class="drawer-mcp-grid">${servers.map((server) => {
         const ready = server.status === "READY";
         const statusLabel = ready ? "준비됨" : server.status === "NOT_READY" ? "배포 확인 필요" : "아직 배포되지 않음";
-        const url = server.url || "URL 없음";
+        const url = server.mcpUrl || (server.url ? `${server.url.replace(/\/$/, "")}/mcp` : "URL 없음");
         const urlElement = server.healthUrl
           ? `<a class="mcp-server-url" href="${escapeHtml(server.healthUrl)}" target="_blank" rel="noopener">${escapeHtml(url)}</a>`
           : `<span class="mcp-server-url">${escapeHtml(url)}</span>`;
@@ -340,7 +362,7 @@
           <div class="mcp-server-main">
             <div class="mcp-server-title"><span class="mcp-ready-dot" title="${escapeHtml(statusLabel)}"></span><b>${escapeHtml(server.serviceName)}</b></div>
             ${urlElement}
-            <div class="mcp-server-actions"><button type="button" class="mcp-url-copy" data-copy-mcp-url="${escapeHtml(server.url || "")}" ${server.url ? "" : "disabled"}>URL 복사</button><button type="button" class="mcp-url-copy mcp-key-copy" data-copy-mcp-key="${escapeHtml(server.audience)}" data-department-code="${escapeHtml(code)}">키 복사</button></div>
+            <div class="mcp-server-actions"><button type="button" class="mcp-url-copy" data-copy-mcp-url="${escapeHtml(url === "URL 없음" ? "" : url)}" ${url === "URL 없음" ? "disabled" : ""}>MCP URL 복사</button><button type="button" class="mcp-url-copy mcp-key-copy" data-copy-mcp-key="${escapeHtml(server.audience)}" data-department-code="${escapeHtml(code)}">키 복사</button></div>
           </div>
         </article>`;
       }).join("")}</div>`;
@@ -402,7 +424,7 @@
         return statusDiff || a.code.localeCompare(b.code);
       });
 
-    $("#departmentMeta").textContent = `${state.departments.length}개 학과`;
+    $("#departmentMeta").textContent = `${state.departments.length}개 서비스`;
     $("#emptyState").classList.toggle("hidden", state.departments.length > 0);
     $(".table-wrap").classList.toggle("hidden", state.departments.length === 0);
     $("#departmentRows").innerHTML = rows.map((dept) => {
@@ -411,12 +433,12 @@
       const checkedAt = result?.checkedAt;
       const initials = dept.code.slice(0, 2).toUpperCase();
       const layers = ["LOCAL", "RESOURCE", "DEPLOY", "RUNTIME", "SYNC"];
-      return `<tr data-code="${escapeHtml(dept.code)}">
-        <td><div class="department-cell"><span class="department-avatar">${escapeHtml(initials)}</span><span><b>${escapeHtml(dept.name)}</b><small>${escapeHtml(dept.code)}</small></span></div></td>
+      return `<tr data-code="${escapeHtml(dept.code)}" data-cloud-only="${dept.cloudOnly ? "true" : "false"}">
+        <td><div class="department-cell"><span class="department-avatar">${escapeHtml(initials)}</span><span><b>${escapeHtml(dept.name)}</b><small>${escapeHtml(dept.code)}${dept.cloudOnly ? ' · <em class="cloud-only-mark">CLOUD</em>' : ""}</small></span></div></td>
         <td>${badge(overall)}</td>
-        ${layers.map((layer) => `<td>${badge(overall === "CHECKING" ? "CHECKING" : layerStatus(result, layer))}</td>`).join("")}
+        ${layers.map((layer) => `<td>${badge(layerStatus(result, layer))}</td>`).join("")}
         <td class="time-cell" title="${escapeHtml(checkedAt || "")}">${overall === "CHECKING" ? "확인 중" : relativeTime(checkedAt)}</td>
-        <td><div class="row-actions"><button class="row-button" data-action="check" title="다시 확인" aria-label="${escapeHtml(dept.name)} 다시 확인">↻</button><button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세">›</button></div></td>
+        <td><div class="row-actions"><button class="row-button" data-action="check" title="${dept.cloudOnly ? "Cloud 메타데이터 항목" : "다시 확인"}" aria-label="${escapeHtml(dept.name)} 다시 확인" ${dept.cloudOnly ? "disabled" : ""}>↻</button><button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세">›</button></div></td>
       </tr>`;
     }).join("");
 
@@ -424,7 +446,7 @@
       row.addEventListener("click", (event) => {
         const button = event.target.closest("button");
         const code = row.dataset.code;
-        if (button?.dataset.action === "check") startStatus([code]);
+        if (button?.dataset.action === "check" && !button.disabled) startStatus([code]);
         else openDrawer(code);
       });
     });
@@ -433,10 +455,34 @@
 
   async function loadDepartments() {
     try {
-      const data = await api("/api/v1/departments");
-      state.departments = data.departments || [];
+      // Cloud 조회는 로컬 YAML과 동시에 시작하되, 느린 gcloud 왕복 때문에 로컬 목록
+      // 표시까지 늦어지지 않게 먼저 렌더한다.
+      const cloudRequest = api("/api/v1/cloud-mcp-services")
+        .then((value) => ({ ok: true, value }), (error) => ({ ok: false, error }));
+      const local = (await api("/api/v1/departments")).departments || [];
+      const merged = new Map(local.map((item) => [item.code, item]));
+      state.departments = [...merged.values()];
       renderDepartments();
       renderCorpusDepartmentOptions();
+
+      const cloudResult = await cloudRequest;
+      const cloud = cloudResult.ok ? (cloudResult.value.departments || []) : [];
+      cloud.forEach((item) => {
+        const existing = merged.get(item.code);
+        if (existing) {
+          existing.cloudServices = item.cloudServices || [];
+          existing.cloudMetadata = item.metadata || {};
+        } else {
+          merged.set(item.code, item);
+        }
+      });
+      state.departments = [...merged.values()];
+      state.mcpServers.clear();
+      renderDepartments();
+      renderCorpusDepartmentOptions();
+      if (!cloudResult.ok) {
+        toast("Cloud MCP 목록을 읽지 못했습니다", cloudResult.error.message, "fail");
+      }
     } catch (error) {
       toast("학과 목록을 불러오지 못했습니다", error.message, "fail");
     }
@@ -492,15 +538,24 @@
     select.disabled = state.syncTargets.length === 0 || state.syncStartPending;
     const target = selectedSyncTarget();
     $("#syncTargetSummary").innerHTML = syncTargetRows(target);
+    const activeForTarget = Boolean(target) && state.syncRuns.some((run) => {
+      if (run.state !== "ACTIVE") return false;
+      if (run.departmentCode && run.departmentCode === target.code) return true;
+      const activeDriveIds = new Set(run.driveIds || []);
+      if ((target.driveIds || []).some((driveId) => activeDriveIds.has(driveId))) return true;
+      return !run.departmentCode && activeDriveIds.size === 0;
+    });
     $$('[data-sync-mode]').forEach((button) => {
       button.classList.toggle("active", button.dataset.syncMode === state.syncMode);
-      button.disabled = state.syncStartPending;
+      button.disabled = state.syncStartPending || activeForTarget;
     });
     const start = $("#startManualSync");
     const workflowMissing = state.syncWorkflowStatus === "NOT_FOUND";
-    start.disabled = !target || state.syncStartPending || workflowMissing;
+    start.disabled = !target || state.syncStartPending || workflowMissing || activeForTarget;
     start.textContent = workflowMissing
       ? "워크플로우 배포 필요"
+      : activeForTarget
+      ? "이 학과 동기화 실행 중"
       : state.syncStartPending
       ? "Workflow 시작 중…"
       : state.syncMode === "backfill" ? "전체 다시 적재" : "변경분 동기화 실행";
@@ -516,6 +571,19 @@
       COMPLETE: "Drive 처리 완료",
       FAILED: "처리 실패",
     })[phase] || (run.effectiveMode === "backfill" ? "Workflow 준비 중" : "변경분 동기화 중");
+  }
+
+  function syncItemStatusLabel(value) {
+    return ({
+      GCS_READY: "GCS 업로드 완료",
+      UNCHANGED: "변경 없음",
+      HASH_UNCHANGED: "내용 변경 없음",
+      SKIPPED: "제외됨",
+      DLQ: "검토 대기열 이동",
+      SPLIT_QUEUED: "분할 처리 대기",
+      INDEXING: "RAG 색인 중",
+      UNKNOWN: "처리 결과 확인 중",
+    })[String(value || "").toUpperCase()] || String(value || "처리 중");
   }
 
   function renderSyncActiveRun() {
@@ -536,18 +604,62 @@
     const failures = syncNumber(totals.failed) + syncNumber(totals.indexFailed);
     const percent = listed > 0 ? Math.min(99, Math.round((processed / listed) * 100)) : 0;
     const hasMeasuredProgress = run.effectiveMode === "backfill" && listed > 0;
+    const elapsedSeconds = Math.max(1, Math.floor((Date.now() - new Date(run.startTime).getTime()) / 1000));
+    const itemsPerMinute = hasMeasuredProgress && processed > 0 ? processed / (elapsedSeconds / 60) : 0;
+    const remainingMinutes = itemsPerMinute > 0 ? Math.ceil((listed - processed) / itemsPerMinute) : 0;
+    const speedLabel = itemsPerMinute > 0 ? `분당 ${itemsPerMinute.toFixed(itemsPerMinute < 10 ? 1 : 0)}개` : "속도 계산 중";
+    const etaLabel = remainingMinutes > 0
+      ? `약 ${remainingMinutes >= 60 ? `${Math.floor(remainingMinutes / 60)}시간 ${remainingMinutes % 60}분` : `${remainingMinutes}분`} 남음`
+      : "완료 시간 계산 중";
+    const activePhase = String(progress.phase || "PREPARING");
+    const phaseOrder = ["LISTING", "INGESTING", "INDEXING", "COMPLETE"];
+    const activePhaseIndex = phaseOrder.indexOf(activePhase);
+    const stageHtml = [
+      ["LISTING", "1", "파일 조사"],
+      ["INGESTING", "2", "변환·업로드"],
+      ["INDEXING", "3", "RAG 색인"],
+      ["COMPLETE", "4", "정합성 확인"],
+    ].map(([key, number, label], index) => {
+      const stateClass = index < activePhaseIndex ? "done" : key === activePhase ? "active" : "";
+      return `<div class="sync-progress-stage ${stateClass}"><i>${stateClass === "done" ? "✓" : number}</i><span>${label}</span></div>`;
+    }).join("");
     const modeLabel = run.mode === "delta" && run.effectiveMode === "backfill"
       ? "초기 전체 적재로 자동 전환"
       : run.effectiveMode === "backfill" ? "전체 다시 적재" : "변경분 동기화";
     const drivePosition = progress.driveCount
       ? `Drive ${syncNumber(progress.driveIndex)} / ${syncNumber(progress.driveCount)}`
       : `${syncNumber(run.driveIds?.length)}개 Drive`;
+    const activeDriveId = progress.driveId
+      || run.driveIds?.[Math.max(0, syncNumber(progress.driveIndex) - 1)]
+      || run.driveIds?.[0]
+      || "—";
+    const folderIds = progress.syncFolderIds?.length ? progress.syncFolderIds : (run.syncFolderIds || []);
+    const folderScope = folderIds.length
+      ? `${folderIds.slice(0, 2).join(", ")}${folderIds.length > 2 ? ` 외 ${folderIds.length - 2}개` : ""}`
+      : "전체 Drive 또는 범위 확인 중";
+    const currentItem = progress.currentFilePath || progress.currentFileName || "파일 목록 또는 다음 작업 확인 중";
+    const currentItemId = progress.currentFileId || "";
+    const currentAction = progress.currentAction || syncPhaseLabel(run);
+    const progressUpdated = progress.updatedAt ? relativeTime(progress.updatedAt) : "갱신 대기";
     content.innerHTML = `<div class="sync-run-heading">
       <div><b>${escapeHtml(run.departmentName || run.departmentCode || "전체 동기화")}</b><small>${escapeHtml(modeLabel)} · ${escapeHtml(drivePosition)}</small></div>
       <span class="sync-run-state">실행 중</span>
     </div>
-    <div class="sync-progress-copy"><div><b>${escapeHtml(syncPhaseLabel(run))}</b><span>${hasMeasuredProgress ? `${processed.toLocaleString()} / ${listed.toLocaleString()}개 처리` : "진행 상태를 확인하고 있습니다."}</span></div><strong>${hasMeasuredProgress ? `${percent}%` : "LIVE"}</strong></div>
-    <div class="sync-progress-track${hasMeasuredProgress ? "" : " indeterminate"}"><span style="width:${hasMeasuredProgress ? percent : 34}%"></span></div>
+    <div class="sync-progress-stages">${stageHtml}</div>
+    <div class="sync-progress-copy"><div><b>${escapeHtml(syncPhaseLabel(run))}</b><span>${hasMeasuredProgress ? `${processed.toLocaleString()} / ${listed.toLocaleString()}개 처리 · ${escapeHtml(speedLabel)} · ${escapeHtml(etaLabel)}` : "진행 상태를 확인하고 있습니다."}</span></div><strong>${hasMeasuredProgress ? `${percent}%` : "LIVE"}</strong></div>
+    <div class="sync-progress-track${hasMeasuredProgress ? "" : " indeterminate"}" role="progressbar" aria-label="동기화 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${hasMeasuredProgress ? percent : 0}"><div class="sync-progress-value" style="width:${hasMeasuredProgress ? percent : 34}%"><span></span><i></i></div></div>
+    <div class="sync-progress-meta"><span>0%</span><b>5초마다 자동 갱신</b><span>100%</span></div>
+    <section class="sync-live-detail">
+      <header><b>현재 실행 위치</b><span>${escapeHtml(progressUpdated)}</span></header>
+      <div class="sync-live-detail-grid">
+        <div><span>학과 서비스</span><b>${escapeHtml(run.departmentName || run.departmentCode || "전체 동기화")}</b></div>
+        <div><span>공유드라이브</span><code>${escapeHtml(activeDriveId)}</code></div>
+        <div><span>동기화 범위</span><code>${escapeHtml(folderScope)}</code></div>
+        <div><span>현재 작업</span><b>${escapeHtml(currentAction)}</b></div>
+        <div class="sync-current-item"><span>최근 처리 항목</span><b>${escapeHtml(currentItem)}</b>${currentItemId ? `<code>${escapeHtml(currentItemId)}</code>` : ""}</div>
+        <div><span>최근 처리 결과</span><b>${escapeHtml(syncItemStatusLabel(progress.currentStatus))}</b></div>
+      </div>
+    </section>
     <div class="sync-metric-grid">
       <div class="sync-metric"><span>처리</span><b>${processed.toLocaleString()}</b></div>
       <div class="sync-metric"><span>GCS 업로드</span><b>${uploaded.toLocaleString()}</b></div>
@@ -609,7 +721,7 @@
         );
       }
       if (state.syncRuns.some((item) => item.state === "ACTIVE")) {
-        state.syncPollTimer = window.setTimeout(() => loadSyncRuns(true), 2000);
+        state.syncPollTimer = window.setTimeout(() => loadSyncRuns(true), 5000);
       }
     } catch (error) {
       if (requestId !== state.syncRequest) return;
@@ -701,7 +813,7 @@
       { icon: "⌂", label: "저장소", value: env.repository, detail: `${env.departmentCount}개 학과 설정` },
       { icon: "G", label: "GCP 프로젝트", value: env.configuredProject || "미설정", detail: env.region },
       { icon: "SA", label: "Drive 확인 서비스 계정", value: env.serviceAccount || "확인 필요", detail: driveDetail, copy: env.serviceAccount, check: true, tone: driveTone },
-      { icon: "›_", label: "gcloud", value: env.gcloudInstalled ? (env.gcloudAuthenticated ? "로그인됨" : "로그인 필요") : "설치되지 않음", detail: env.gcloudAccount || "활성 계정 없음" },
+      { icon: "›_", label: "gcloud", value: env.gcloudInstalled ? (env.gcloudAuthenticated ? "로그인됨" : "로그인 필요") : "설치되지 않음", detail: env.gcloudAccount || "활성 계정 없음", login: Boolean(env.gcloudInstalled) && !env.gcloudAuthenticated },
       { icon: "Py", label: "Python", value: env.pythonVersion, detail: "로컬 API 런타임" },
       { icon: "↔", label: "프로젝트 일치", value: projectMatch ? "일치" : "확인 필요", detail: env.gcloudProject || "gcloud 프로젝트 없음" },
       { icon: "●", label: "서버 경계", value: "127.0.0.1", detail: "외부 네트워크 비공개" },
@@ -715,6 +827,7 @@
             <b>${escapeHtml(card.value)}</b>
             ${card.copy ? `<button type="button" class="copy-value-button" data-copy-value="${escapeHtml(card.copy)}" aria-label="서비스 계정 복사">복사</button>` : ""}
             ${card.check ? `<button type="button" class="copy-value-button" id="checkDriveSa" ${state.driveSaChecking ? "disabled" : ""}>${state.driveSaChecking ? "확인 중…" : (driveStatus ? "다시 확인" : "상태 확인")}</button>` : ""}
+            ${card.login ? `<button type="button" class="copy-value-button" id="openGcloudLogin">로그인</button>` : ""}
           </div>
           <small>${escapeHtml(card.detail)}</small>
         </div>
@@ -1383,11 +1496,58 @@
     $("#createCommonConfig").disabled = true;
   }
 
+  // 첫 실행 설정과 로그인 요구를 같은 화면으로 처리한다. create 는 common.yaml 을
+  // 만들어야 하는 상태, login 은 설정은 있고 gcloud 로그인만 없는 상태다.
+  function applySetupMode(mode) {
+    state.setupMode = mode;
+    const loginOnly = mode === "login";
+    $("#setupGate").dataset.mode = mode;
+    $("#commonSetupForm").classList.toggle("hidden", loginOnly);
+    $("#setupLoginActions").classList.toggle("hidden", !loginOnly);
+    $("#setupEyebrow").textContent = loginOnly ? "SIGN IN REQUIRED" : "FIRST RUN SETUP";
+    $("#setupTitle").textContent = loginOnly ? "gcloud 로그인" : "공통 환경 설정";
+    $("#setupStep").textContent = loginOnly ? "" : "01 / 01";
+    $("#setupIntro").textContent = loginOnly
+      ? "공통 설정은 이미 있습니다. 콘솔이 GCP를 호출하려면 gcloud 로그인만 마치면 됩니다."
+      : "학과 설정을 만들기 전에 이 콘솔이 사용할 GCP 기본 환경을 연결합니다. 검증된 운영 기본값은 자동으로 채워집니다.";
+  }
+
+  function needsCommonSetup(env) {
+    // 로그인이 없으면 콘솔의 모든 조회가 412 로 떨어진다. 설정 파일이 이미 있어도
+    // 빈 화면 대신 로그인 화면을 세운다.
+    return Boolean(env) && (!env.commonExists || !env.gcloudAuthenticated);
+  }
+
   function showCommonSetup(env) {
+    applySetupMode(env?.commonExists ? "login" : "create");
     const ready = renderCommonBootstrap(env);
     $("#setupGate").classList.remove("hidden");
+    if (state.setupMode === "login") {
+      if (!$("#refreshGcloudAuth").disabled) window.setTimeout(() => $("#refreshGcloudAuth").focus(), 100);
+      return;
+    }
     window.setTimeout(() => $("#commonSetupForm").elements.projectId.focus(), 100);
     if (ready) loadSetupResources();
+  }
+
+  // login 모드는 저장할 것이 없다. 로그인이 확인되면 화면을 닫고 평소 부팅의
+  // 남은 절차(재연결)를 그대로 이어간다.
+  async function closeLoginOnlySetup(env) {
+    $("#setupGate").classList.add("hidden");
+    applySetupMode("create");
+    await loadDepartments();
+    if (env?.commonValid) {
+      await Promise.all([reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
+    }
+  }
+
+  // 로그인이 없어도 학과 목록·설정은 전부 로컬 YAML 이라 읽고 고칠 수 있다.
+  // 로그인을 미루는 선택을 막지 않는다 — 막히는 건 gcloud 를 타는 작업뿐이다.
+  async function dismissGcloudLoginGate() {
+    window.clearTimeout(state.authPollTimer);
+    state.authLoginPending = false;
+    await closeLoginOnlySetup(state.environment);
+    toast("gcloud 로그인 없이 계속합니다", "검사·배포는 상단 gcloud 카드에서 로그인한 뒤 쓸 수 있습니다.");
   }
 
   async function pollGcloudLogin(attempt = 0) {
@@ -1395,6 +1555,11 @@
     if (env?.gcloudAuthenticated) {
       state.authLoginPending = false;
       window.clearTimeout(state.authPollTimer);
+      if (state.setupMode === "login") {
+        toast("gcloud 로그인을 확인했습니다", env.gcloudAccount || "활성 계정", "ok");
+        await closeLoginOnlySetup(env);
+        return;
+      }
       const ready = renderCommonBootstrap(env);
       if (ready) await loadSetupResources();
       toast("gcloud 로그인을 확인했습니다", env.gcloudAccount || "활성 계정", "ok");
@@ -1430,6 +1595,10 @@
         return;
       }
       const env = await loadEnvironment();
+      if (state.setupMode === "login" && env?.gcloudAuthenticated) {
+        await closeLoginOnlySetup(env);
+        return;
+      }
       if (env && renderCommonBootstrap(env)) await loadSetupResources();
     } catch (error) {
       state.authLoginPending = false;
@@ -1504,17 +1673,25 @@
   }
 
   function runResultToDepartments(results) {
+    let changed = false;
     results.forEach((result) => {
       const dept = state.departments.find((item) => item.code === result.code);
       if (dept) {
-        if (dept.lastResult?.checkedAt !== result.checkedAt) state.mcpServers.delete(result.code);
+        if (dept.lastResult?.checkedAt !== result.checkedAt) {
+          state.mcpServers.delete(result.code);
+          changed = true;
+        }
         dept.lastResult = result;
         dept.lastStatus = result.overall;
       }
-      state.checkingCodes.delete(result.code);
+      if (state.checkingCodes.delete(result.code)) changed = true;
     });
-    renderDepartments();
-    if (state.selectedCode) openDrawer(state.selectedCode, false);
+    // polling 응답은 완료된 학과를 누적해서 돌려준다. 새 결과가 없는데도 매번
+    // tbody 를 다시 만들면 CHECKING spinner 애니메이션이 0.7초마다 재시작된다.
+    if (changed) {
+      renderDepartments();
+      if (state.selectedCode) openDrawer(state.selectedCode, false);
+    }
   }
 
   async function pollRun(runId) {
@@ -1552,7 +1729,10 @@
 
   async function startStatus(codes = []) {
     if (!state.nonce || state.activeRunId) return;
-    const scope = codes.length ? codes : state.departments.map((item) => item.code);
+    const localCodes = new Set(
+      state.departments.filter((item) => !item.cloudOnly).map((item) => item.code),
+    );
+    const scope = (codes.length ? codes : [...localCodes]).filter((code) => localCodes.has(code));
     if (!scope.length) {
       toast("확인할 학과가 없습니다", "먼저 학과 설정을 추가해 주세요.");
       return;
@@ -1592,21 +1772,39 @@
         .catch((error) => { if (state.selectedCode === code) renderDrawerMcpServers(code, null, error.message); });
     }
     const result = dept.lastResult;
+    const metadata = dept.metadata || {};
+    const metadataRows = dept.cloudOnly ? [
+      ["교직원 코퍼스", metadata.corpora?.staff || "—"],
+      ["학생 코퍼스", metadata.corpora?.student || "—"],
+      ["HWP 버킷", metadata.buckets?.hwpOriginal || "—"],
+      ["Source 버킷", metadata.buckets?.source || "—"],
+      ["공유드라이브", (metadata.drive?.driveIds || []).join(", ") || "—"],
+      ["동기화 폴더", (metadata.drive?.syncFolderIds || []).join(", ") || "—"],
+      ["학생 폴더", (metadata.drive?.studentFolderIds || []).join(", ") || "—"],
+    ] : [];
+    const metadataHtml = metadataRows.length ? `<section class="check-layer cloud-metadata-layer"><h3>CLOUD METADATA</h3><div class="cloud-metadata-grid">${metadataRows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><code>${escapeHtml(value)}</code></div>`).join("")}</div></section>` : "";
     if (!result?.checks?.length) {
-      $("#drawerContent").innerHTML = `<div class="empty-state"><h3>아직 검사 결과가 없습니다</h3><p>이 학과의 상태를 확인하면 단계별 결과가 표시됩니다.</p></div>`;
+      $("#drawerContent").innerHTML = metadataHtml + `<div class="empty-state"><h3>아직 검사 결과가 없습니다</h3><p>이 학과의 상태를 확인하면 단계별 결과가 표시됩니다.</p></div>`;
     } else {
-      $("#drawerContent").innerHTML = Object.entries(layerLabels).map(([layer, label]) => {
+      $("#drawerContent").innerHTML = metadataHtml + Object.entries(layerLabels).map(([layer, label]) => {
         const checks = result.checks.filter((item) => item.layer === layer);
         if (!checks.length) return "";
         return `<section class="check-layer"><h3>${label.toUpperCase()}</h3><div class="check-list">${checks.map((item) => `
           <article class="check-row" data-status="${escapeHtml(item.status)}">
             <span class="check-dot">${item.status === "OK" ? "✓" : item.status === "FAIL" ? "×" : item.status === "WARN" ? "!" : "–"}</span>
-            <div class="check-main"><div><b>${escapeHtml(item.name)}</b><small>${item.latencyMs ? `${item.latencyMs}ms` : statusLabels[item.status]}</small></div><p>${escapeHtml(item.detail)}</p>${item.actionType === "MCP_DEPLOY" ? `<button type="button" class="check-deploy-button" data-deploy-mcp="${escapeHtml(item.departmentCode || code)}">MCP 배포</button>` : item.actionType === "COMMON_RUNTIME_DEPLOY" ? `<button type="button" class="check-deploy-button" data-deploy-common-runtime>공통 런타임 배포</button>` : item.action ? `<div class="check-action">${escapeHtml(item.action)}</div>` : ""}</div>
+            <div class="check-main"><div><b>${escapeHtml(item.name)}</b><small>${item.latencyMs ? `${item.latencyMs}ms` : statusLabels[item.status]}</small></div><p>${escapeHtml(item.detail)}</p>${item.actionType === "MCP_DEPLOY" ? `<button type="button" class="check-deploy-button" data-deploy-mcp="${escapeHtml(item.departmentCode || code)}">MCP 배포</button>` : item.actionType === "COMMON_RUNTIME_DEPLOY" ? `<button type="button" class="check-deploy-button" data-deploy-common-runtime>${escapeHtml(item.action || "공통 런타임 배포")}</button>` : item.actionType === "MANUAL_SYNC" ? `<button type="button" class="check-deploy-button" data-open-sync="${escapeHtml(item.departmentCode || code)}">동기화 실행</button>` : item.action ? `<div class="check-action">${escapeHtml(item.action)}</div>` : ""}</div>
           </article>`).join("")}</div></section>`;
       }).join("");
     }
     $("#drawerCheck").dataset.code = code;
     $("#drawerEdit").dataset.code = code;
+    $("#drawerCheck").disabled = Boolean(dept.cloudOnly);
+    $("#drawerEdit").disabled = Boolean(dept.cloudOnly);
+    $("#drawerCheck").title = dept.cloudOnly ? "로컬 YAML이 없어 일반 검사를 실행할 수 없습니다." : "다시 확인";
+    $("#drawerEdit").title = dept.cloudOnly ? "Cloud 메타데이터 항목은 읽기 전용입니다." : "설정 수정";
+    $("#drawerDelete").dataset.code = code;
+    $("#drawerMore").removeAttribute("open");
+    $("#drawerMore").classList.toggle("hidden", Boolean(dept.cloudOnly));
     const drawer = $("#detailDrawer");
     drawer.classList.add("open");
     drawer.setAttribute("aria-hidden", "false");
@@ -1628,6 +1826,7 @@
     output.dataset.status = status || "";
     output.textContent = message;
     state.codeAvailable = status === "ok" ? true : status === "fail" ? false : null;
+    if (status === "ok") clearFieldError("code");
     updateResourceProvisionAvailability();
   }
 
@@ -1760,6 +1959,148 @@
     const modal = $("#resourceProvisionModal");
     modal.classList.remove("open");
     modal.setAttribute("aria-hidden", "true");
+  }
+
+  const teardownStatusLabels = { PENDING: "대기", RUNNING: "삭제 중", COMPLETE: "삭제됨", SKIPPED: "유지", FAILED: "실패" };
+
+  function teardownTargetIcon(status) {
+    if (status === "COMPLETE") return "✓";
+    if (status === "FAILED") return "!";
+    if (status === "SKIPPED") return "–";
+    if (status === "RUNNING") return "";
+    return "○";
+  }
+
+  function renderTeardownTargets(targets) {
+    $("#teardownTargets").innerHTML = (targets || []).map((target) => `<article class="deployment-step" data-status="${escapeHtml(target.status)}">
+      <span class="deployment-step-mark">${teardownTargetIcon(target.status)}</span>
+      <div class="deployment-step-copy"><b>${escapeHtml(target.label)}</b><p>${escapeHtml(target.name)}</p><p>${escapeHtml(target.detail || "")}</p></div>
+      <span class="deployment-step-state">${escapeHtml(teardownStatusLabels[target.status] || target.status)}</span>
+    </article>`).join("");
+  }
+
+  function teardownWarningText(plan) {
+    if (plan.kind === "commonRuntime") {
+      const remaining = plan.remainingDepartments || [];
+      return remaining.length
+        ? `등록된 학과 ${remaining.length}곳(${remaining.join(", ")})의 자동 동기화가 즉시 멈춥니다. 학과 코퍼스와 버킷은 남습니다.`
+        : "Parser, Sync, Workflow, Scheduler를 삭제합니다. 다시 쓰려면 공통 런타임을 재배포해야 합니다.";
+    }
+    const kept = (plan.targets || []).filter((target) => target.skipped);
+    return kept.length
+      ? `다른 학과가 함께 쓰는 리소스 ${kept.length}개는 지우지 않고 남깁니다. 나머지는 되돌릴 수 없습니다.`
+      : "이 학과의 GCP 리소스와 설정 파일을 모두 지웁니다. 되돌릴 수 없습니다.";
+  }
+
+  function syncTeardownConfirmState() {
+    const plan = state.teardownPlan;
+    const value = $("#teardownConfirmInput").value.trim();
+    $("#startTeardown").disabled = !plan || Boolean(state.teardownRun) || value !== plan.confirmWord;
+  }
+
+  function showTeardownModal() {
+    $("#teardownModal").classList.add("open");
+    $("#teardownModal").setAttribute("aria-hidden", "false");
+    window.setTimeout(() => $("#teardownConfirmInput").focus(), 200);
+  }
+
+  function closeTeardownModal() {
+    window.clearTimeout(state.teardownPollTimer);
+    state.teardownRun = null;
+    $("#teardownModal").classList.remove("open");
+    $("#teardownModal").setAttribute("aria-hidden", "true");
+  }
+
+  async function openTeardown(kind, code = "") {
+    const url = kind === "department"
+      ? `/api/v1/departments/${encodeURIComponent(code)}/teardown-plan`
+      : "/api/v1/common-runtime/teardown-plan";
+    try {
+      const plan = await api(url);
+      state.teardownPlan = plan;
+      state.teardownRun = null;
+      $("#teardownTitle").textContent = kind === "department" ? `${plan.name} 삭제` : "공통 런타임 삭제";
+      $("#teardownDescription").textContent = "지워질 리소스를 확인한 뒤 진행하세요. 창을 닫아도 삭제는 계속됩니다.";
+      $("#teardownProject").textContent = plan.projectId || "—";
+      $("#teardownRegion").textContent = plan.region || "—";
+      $("#teardownWarningText").textContent = teardownWarningText(plan);
+      $("#teardownConfirmWord").textContent = plan.confirmWord;
+      $("#teardownConfirmInput").value = "";
+      $("#teardownConfirmField").classList.remove("hidden");
+      $("#teardownError").classList.add("hidden");
+      $("#startTeardown").classList.remove("hidden");
+      $("#retryTeardown").classList.add("hidden");
+      $("#closeTeardown").textContent = "취소";
+      $("#closeTeardown").classList.add("ghost");
+      $("#closeTeardown").classList.remove("primary");
+      renderTeardownTargets(plan.targets);
+      syncTeardownConfirmState();
+      showTeardownModal();
+    } catch (error) {
+      toast("삭제 계획을 불러오지 못했습니다", error.message, "fail");
+    }
+  }
+
+  function renderTeardownRun(run) {
+    state.teardownRun = run;
+    const running = run.status === "RUNNING";
+    const done = run.status === "COMPLETED";
+    renderTeardownTargets(run.targets);
+    // 실행이 시작되면 확인 입력과 삭제 버튼은 할 일이 없다. 끝난 창에 죽은
+    // 버튼이 남아 있으면 "또 눌러야 하나" 로 읽힌다.
+    $("#teardownConfirmField").classList.add("hidden");
+    $("#startTeardown").classList.add("hidden");
+    $("#retryTeardown").classList.toggle("hidden", running || done);
+    $("#closeTeardown").textContent = running ? "닫기" : "확인";
+    $("#closeTeardown").classList.toggle("ghost", running);
+    $("#closeTeardown").classList.toggle("primary", !running);
+    $("#teardownDescription").textContent = running
+      ? "삭제 중입니다. 창을 닫아도 계속 진행됩니다."
+      : done ? "삭제를 완료했습니다." : "일부 리소스를 지우지 못했습니다. 상세를 확인하고 다시 시도하세요.";
+  }
+
+  async function pollTeardown(runId) {
+    window.clearTimeout(state.teardownPollTimer);
+    try {
+      const run = await api(`/api/v1/teardowns/${runId}`);
+      renderTeardownRun(run);
+      if (run.status === "RUNNING") {
+        state.teardownPollTimer = window.setTimeout(() => pollTeardown(runId), 1200);
+        return;
+      }
+      await loadDepartments();
+      if (run.kind === "department" && state.selectedCode === run.code) closeDrawer();
+      const succeeded = run.status === "COMPLETED";
+      toast(
+        succeeded ? "삭제를 완료했습니다" : "일부 리소스를 지우지 못했습니다",
+        run.targets.filter((target) => target.status === "FAILED").map((target) => target.name).join(", "),
+        succeeded ? "ok" : "fail",
+      );
+    } catch (error) {
+      const banner = $("#teardownError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+    }
+  }
+
+  async function startTeardown() {
+    const plan = state.teardownPlan;
+    if (!plan) return;
+    const url = plan.kind === "department"
+      ? `/api/v1/departments/${encodeURIComponent(plan.code)}/teardown`
+      : "/api/v1/common-runtime/teardown";
+    $("#startTeardown").disabled = true;
+    $("#teardownError").classList.add("hidden");
+    try {
+      const run = await api(url, { method: "POST", body: { confirm: $("#teardownConfirmInput").value.trim() } });
+      renderTeardownRun(run);
+      pollTeardown(run.runId);
+    } catch (error) {
+      const banner = $("#teardownError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+      syncTeardownConfirmState();
+    }
   }
 
   function deploymentStepIcon(status) {
@@ -2033,10 +2374,11 @@
     }
   }
 
-  async function beginCommonRuntimeDeployment(followUpDepartmentCode = "") {
-    const query = followUpDepartmentCode
-      ? `?followUpDepartmentCode=${encodeURIComponent(followUpDepartmentCode)}`
-      : "";
+  async function beginCommonRuntimeDeployment(followUpDepartmentCode = "", { envOnly = false } = {}) {
+    const params = new URLSearchParams();
+    if (followUpDepartmentCode) params.set("followUpDepartmentCode", followUpDepartmentCode);
+    if (envOnly) params.set("envOnly", "true");
+    const query = params.toString() ? `?${params}` : "";
     try {
       const run = await api(`/api/v1/common-runtime-deployments${query}`, { method: "POST" });
       renderCommonRuntimeDeployment(run);
@@ -2074,6 +2416,34 @@
       await beginCommonRuntimeDeployment(followUpDepartmentCode);
     } catch (error) {
       toast("공통 런타임 배포를 열지 못했습니다", error.message, "fail");
+    }
+  }
+
+  // 배포된 parser/sync env 가 현재 학과 설정과 어긋나면 조용히 망가진다 —
+  // 없어진 버킷에 업로드하다 전량 DLQ 로 간다. 서비스 관리 화면에 들어올 때마다
+  // 대조하고, 어긋나 있으면 env 만 새로 씌운다(리비전 하나, 수십 초).
+  async function refreshRuntimeEnvIfStale() {
+    if (state.runtimeEnvChecking) return;
+    if (state.commonRuntimeDeployment?.status === "RUNNING") return;
+    state.runtimeEnvChecking = true;
+    try {
+      const report = await api("/api/v1/runtime-env");
+      state.runtimeEnv = report;
+      if (report.status !== "DRIFT") return;
+      const signature = JSON.stringify(report.services || []);
+      // 같은 드리프트로 반복 배포하지 않는다. 실패했으면 사용자가 다시 부른다.
+      if (state.runtimeEnvSignature === signature) return;
+      state.runtimeEnvSignature = signature;
+      const stale = (report.services || [])
+        .filter((item) => item.status === "DRIFT")
+        .map((item) => item.serviceName)
+        .join(", ");
+      toast("런타임 설정을 새로고침합니다", `${stale}의 값이 현재 학과 설정과 달랐습니다.`, "warn");
+      await beginCommonRuntimeDeployment("", { envOnly: true });
+    } catch (error) {
+      state.runtimeEnv = { status: "UNKNOWN", reason: error.message };
+    } finally {
+      state.runtimeEnvChecking = false;
     }
   }
 
@@ -2218,6 +2588,7 @@
       status.dataset.status = "changed";
       status.textContent = "입력값이 변경되었습니다. 다시 연결을 확인해 주세요.";
       renderDriveConflictStatus([]);
+      resetDriveFolderBrowser();
     }
   }
 
@@ -2234,6 +2605,13 @@
       const owner = item.name || item.code;
       return `${owner} 학과와 중복된 공유드라이브 ID입니다: ${(item.driveIds || []).join(", ")}`;
     }).join(" · ");
+  }
+
+  function submitDriveIdsOnEnter(event) {
+    if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+    event.preventDefault();
+    if ($("#checkDriveIds").classList.contains("is-checking")) return;
+    checkDriveIds();
   }
 
   async function checkDriveIds() {
@@ -2261,6 +2639,9 @@
         ? `${result.detail} · ${result.action}`
         : result.detail;
       renderDriveConflictStatus(state.driveConflicts);
+      if (String(result.status || "").toUpperCase() === "OK") {
+        await loadDriveFolderRoots(driveIds);
+      }
     } catch (error) {
       if (splitIds(form.elements.driveIds.value).join("\n") !== signature) return;
       state.drivePreflightSignature = "";
@@ -2272,6 +2653,133 @@
       button.classList.remove("is-checking");
       updateDrivePreflightAvailability();
     }
+  }
+
+  function driveFolderKey(driveId, parentId) {
+    return `${driveId}:${parentId}`;
+  }
+
+  function resetDriveFolderBrowser() {
+    state.driveFolderChildren.clear();
+    state.driveFolderExpanded.clear();
+    state.driveFolderLoading.clear();
+    const browser = $("#driveFolderBrowser");
+    if (browser) browser.innerHTML = "<p>공유드라이브 연결을 확인하면 폴더를 탐색할 수 있습니다.</p>";
+  }
+
+  async function loadDriveFolderChildren(driveId, parentId, { expand = true, quiet = false } = {}) {
+    const key = driveFolderKey(driveId, parentId);
+    if (state.driveFolderLoading.has(key)) return [];
+    if (state.driveFolderChildren.has(key)) {
+      if (expand) state.driveFolderExpanded.add(key);
+      renderDriveFolderBrowser();
+      return state.driveFolderChildren.get(key);
+    }
+    state.driveFolderLoading.add(key);
+    renderDriveFolderBrowser();
+    try {
+      const result = await api("/api/v1/departments/drive-folders", {
+        method: "POST",
+        body: { driveId, parentId },
+      });
+      const folders = result.folders || [];
+      state.driveFolderChildren.set(key, folders);
+      if (expand) state.driveFolderExpanded.add(key);
+      folders.forEach((folder) => {
+        state.folderLookupById.set(folder.folderId, { ...folder, status: "OK" });
+      });
+      if (result.truncated) {
+        toast("폴더가 많아 일부만 표시합니다", "직접 입력에서 추가 폴더 ID를 넣을 수 있습니다.");
+      }
+      return folders;
+    } catch (error) {
+      if (!quiet) toast("하위 폴더를 읽지 못했습니다", error.message, "fail");
+      return [];
+    } finally {
+      state.driveFolderLoading.delete(key);
+      renderDriveFolderBrowser();
+    }
+  }
+
+  async function loadDriveFolderRoots(driveIds) {
+    resetDriveFolderBrowser();
+    await Promise.all(driveIds.map((driveId) => loadDriveFolderChildren(driveId, driveId)));
+    const secondLevel = driveIds.flatMap((driveId) => {
+      const roots = state.driveFolderChildren.get(driveFolderKey(driveId, driveId)) || [];
+      return roots.map((folder) => loadDriveFolderChildren(
+        driveId,
+        folder.folderId,
+        { expand: false, quiet: true },
+      ));
+    });
+    await Promise.all(secondLevel);
+    renderDriveFolderBrowser();
+  }
+
+  function driveFolderBranch(driveId, parentId, depth = 0, ancestorSelected = false) {
+    const key = driveFolderKey(driveId, parentId);
+    const children = state.driveFolderChildren.get(key) || [];
+    const selected = new Set(splitIds($("#departmentForm").elements.syncFolderIds.value));
+    return children.map((folder) => {
+      const childKey = driveFolderKey(driveId, folder.folderId);
+      const currentSelected = selected.has(folder.folderId);
+      const selectionLocked = ancestorSelected;
+      const expanded = state.driveFolderExpanded.has(childKey) && !currentSelected && !selectionLocked;
+      const loading = state.driveFolderLoading.has(childKey);
+      const nested = expanded
+        ? driveFolderBranch(driveId, folder.folderId, depth + 1, currentSelected || selectionLocked)
+        : "";
+      return `<div class="drive-tree-node">
+        <div class="drive-tree-row ${currentSelected ? "is-selected" : ""} ${selectionLocked ? "is-locked" : ""}">
+          <span class="drive-tree-indent" aria-hidden="true"></span>
+          <button type="button" class="drive-tree-expand" data-drive-id="${escapeHtml(driveId)}" data-parent-id="${escapeHtml(folder.folderId)}" aria-label="${escapeHtml(folder.name)} 하위 폴더 ${expanded ? "접기" : "펼치기"}" ${(currentSelected || selectionLocked) ? "disabled" : ""}><span>${loading ? "…" : (expanded ? "⌄" : "›")}</span></button>
+          <label><input type="checkbox" data-drive-id="${escapeHtml(driveId)}" data-sync-folder-id="${escapeHtml(folder.folderId)}" ${currentSelected ? "checked" : ""} ${selectionLocked ? "disabled" : ""} /><i aria-hidden="true">▰</i><span><b>${escapeHtml(folder.name)}</b><code>${escapeHtml(folder.folderId)}</code></span>${currentSelected ? '<em>하위 포함</em>' : ""}</label>
+        </div>${nested ? `<div class="drive-tree-children">${nested}</div>` : ""}</div>`;
+    }).join("");
+  }
+
+  function renderDriveFolderBrowser() {
+    const browser = $("#driveFolderBrowser");
+    if (!browser) return;
+    const driveIds = splitIds($("#departmentForm").elements.driveIds.value);
+    if (!driveIds.length || !state.driveFolderChildren.size) {
+      if (!state.driveFolderLoading.size) browser.innerHTML = "<p>공유드라이브 연결을 확인하면 폴더를 탐색할 수 있습니다.</p>";
+      return;
+    }
+    browser.innerHTML = driveIds.map((driveId) => {
+      const key = driveFolderKey(driveId, driveId);
+      const loading = state.driveFolderLoading.has(key);
+      const branch = driveFolderBranch(driveId, driveId);
+      return `<section class="drive-tree-drive"><header><span>DRIVE</span><b>공유드라이브</b><code>${escapeHtml(driveId)}</code></header>${loading ? '<p>최상위 폴더를 불러오는 중…</p>' : (branch || '<p>표시할 최상위 폴더가 없습니다.</p>')}</section>`;
+    }).join("");
+  }
+
+  function loadedDriveFolderDescendants(driveId, folderId, found = new Set()) {
+    const children = state.driveFolderChildren.get(driveFolderKey(driveId, folderId)) || [];
+    children.forEach((child) => {
+      if (found.has(child.folderId)) return;
+      found.add(child.folderId);
+      loadedDriveFolderDescendants(driveId, child.folderId, found);
+    });
+    return found;
+  }
+
+  function toggleDriveFolderSelection(input) {
+    const form = $("#departmentForm");
+    const selected = new Set(splitIds(form.elements.syncFolderIds.value));
+    const folderId = input.dataset.syncFolderId;
+    if (input.checked) {
+      selected.add(folderId);
+      loadedDriveFolderDescendants(input.dataset.driveId, folderId).forEach((id) => selected.delete(id));
+      state.driveFolderExpanded.delete(driveFolderKey(input.dataset.driveId, folderId));
+    } else {
+      selected.delete(folderId);
+    }
+    form.elements.syncFolderIds.value = [...selected].join("\n");
+    updateTagPreview(form.elements.syncFolderIds);
+    updateFolderLookupAvailability();
+    renderStudentFolderPicker();
+    renderDriveFolderBrowser();
   }
 
   function resetFolderLookup() {
@@ -2355,7 +2863,7 @@
 
   function formPayload() {
     const form = $("#departmentForm");
-    const value = (name) => form.elements[name]?.value?.trim() || "";
+    const value = (fieldName) => form.querySelector(`[name="${fieldName}"]`)?.value?.trim() || "";
     return {
       code: value("code").toLowerCase(),
       name: value("name"),
@@ -2468,6 +2976,36 @@
     $$(".field.has-error").forEach((item) => item.classList.remove("has-error"));
   }
 
+  function clearFieldError(field) {
+    const label = $(`[data-error="${CSS.escape(field)}"]`);
+    if (!label) return;
+    label.textContent = "";
+    const fieldRoot = label.closest(".field");
+    fieldRoot?.classList.remove("has-error");
+    fieldRoot?.querySelectorAll("input, textarea, select").forEach((input) => {
+      input.classList.remove("invalid");
+    });
+  }
+
+  const formFieldErrorNames = {
+    code: "code",
+    name: "name",
+    staffCorpus: "corpora.staff",
+    studentCorpus: "corpora.student",
+    hwpBucket: "buckets.hwpOriginal",
+    sourceBucket: "buckets.source",
+    driveIds: "drive.driveIds",
+    syncFolderIds: "drive.syncFolderIds",
+    studentFolderIds: "drive.studentFolderIds",
+    staffMin: "minInstances.staff",
+    studentMin: "minInstances.student",
+  };
+
+  function clearChangedFormFieldError(event) {
+    const field = formFieldErrorNames[event.target?.name];
+    if (field) clearFieldError(field);
+  }
+
   function showFieldErrors(errors = {}) {
     clearFieldErrors();
     let first = null;
@@ -2531,8 +3069,21 @@
         : "/api/v1/departments/preview";
       const result = await api(previewUrl, { method: "POST", body: payload });
       if (!result.valid) {
-        showFieldErrors(result.fieldErrors);
-        toast("입력값을 확인해 주세요", "표시된 항목을 수정한 뒤 다시 진행하세요.", "fail");
+        const fieldErrors = result.fieldErrors || {};
+        const fields = Object.keys(fieldErrors);
+        const errorStep = fields.some((field) => field.startsWith("drive.")) ? 2 : 1;
+        showStep(errorStep);
+        showFieldErrors(fieldErrors);
+        const detail = Object.values(fieldErrors)
+          .flat()
+          .filter(Boolean)
+          .slice(0, 3)
+          .join(" · ");
+        toast(
+          "입력값을 확인해 주세요",
+          detail || "표시된 항목을 수정한 뒤 다시 진행하세요.",
+          "fail",
+        );
         return false;
       }
       clearFieldErrors();
@@ -2598,6 +3149,7 @@
     state.drivePreflightSignature = "";
     state.driveConflicts = [];
     state.allowDuplicateDriveIds = false;
+    resetDriveFolderBrowser();
     closeDriveConflictModal();
     state.codeAvailable = null;
     state.codeAvailabilityRequest += 1;
@@ -2625,7 +3177,7 @@
 
   function setEditorMode(editing) {
     $("#createEyebrow").textContent = editing ? "EDIT DEPARTMENT" : "NEW DEPARTMENT";
-    $("#createTitle").textContent = editing ? "학과 설정 수정" : "새 학과 연결";
+    $("#createTitle").textContent = editing ? "학과 서비스 수정" : "서비스 등록";
     $("#createDescription").textContent = editing
       ? "기존 MCP 키를 유지하면서 연결 설정을 안전하게 수정합니다."
       : "필요한 정보를 단계별로 입력하면 안전한 YAML을 생성합니다.";
@@ -2838,6 +3390,7 @@
     $("#departmentForm").addEventListener("submit", submitDepartment);
     $("#commonSetupForm").addEventListener("submit", submitCommonSetup);
     $("#refreshGcloudAuth").addEventListener("click", refreshGcloudSetup);
+    $("#skipGcloudLogin").addEventListener("click", dismissGcloudLoginGate);
     $("#confirmDriveSaRepair").addEventListener("click", confirmDriveSaAction);
     $$("[data-close-drive-sa]").forEach((item) => item.addEventListener("click", closeDriveSaModal));
     $("#planCommonResources").addEventListener("click", planCommonResources);
@@ -2885,6 +3438,7 @@
       beginMcpDeployment();
     });
     $("#departmentForm").elements.driveIds.addEventListener("input", updateDrivePreflightAvailability);
+    $("#departmentForm").elements.driveIds.addEventListener("keydown", submitDriveIdsOnEnter);
     $("#checkDriveIds").addEventListener("click", checkDriveIds);
     $("#lookupFolderNames").addEventListener("click", lookupFolderNames);
     $("#refreshSyncRuns").addEventListener("click", () => loadSyncRuns());
@@ -2900,6 +3454,7 @@
     $$('[data-close-drive-conflict]').forEach((item) => item.addEventListener("click", closeDriveConflictModal));
     $("#environmentGrid").addEventListener("click", (event) => {
       if (event.target.closest("#checkDriveSa")) return checkDriveServiceAccount();
+      if (event.target.closest("#openGcloudLogin")) return showCommonSetup(state.environment);
       return copyEnvironmentValue(event);
     });
     $("#drawerMcpServers").addEventListener("click", copySingleMcpServer);
@@ -2909,6 +3464,12 @@
         openOrStartCommonRuntimeDeployment();
         return;
       }
+      const syncButton = event.target.closest("[data-open-sync]");
+      if (syncButton) {
+        closeDrawer();
+        openSyncManagement(syncButton.dataset.openSync);
+        return;
+      }
       const button = event.target.closest("[data-deploy-mcp]");
       if (button) openOrStartMcpDeployment(button.dataset.deployMcp);
     });
@@ -2916,7 +3477,23 @@
     $$("textarea").forEach((item) => item.addEventListener("input", () => updateTagPreview(item)));
     $("#departmentForm").elements.syncFolderIds.addEventListener("input", renderStudentFolderPicker);
     $("#departmentForm").elements.syncFolderIds.addEventListener("input", updateFolderLookupAvailability);
+    $("#departmentForm").elements.syncFolderIds.addEventListener("input", renderDriveFolderBrowser);
     $("#studentFolderPicker").addEventListener("change", syncStudentFolderSelection);
+    $("#driveFolderBrowser").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-parent-id]");
+      if (!button) return;
+      const key = driveFolderKey(button.dataset.driveId, button.dataset.parentId);
+      if (state.driveFolderExpanded.has(key)) {
+        state.driveFolderExpanded.delete(key);
+        renderDriveFolderBrowser();
+      } else {
+        loadDriveFolderChildren(button.dataset.driveId, button.dataset.parentId);
+      }
+    });
+    $("#driveFolderBrowser").addEventListener("change", (event) => {
+      const input = event.target.closest("[data-sync-folder-id]");
+      if (input) toggleDriveFolderSelection(input);
+    });
     $("#toggleStudentFolders").addEventListener("click", () => {
       const options = $$("#studentFolderPicker input");
       const selectAll = options.some((input) => !input.checked);
@@ -2927,8 +3504,26 @@
       event.target.value = event.target.value.toLowerCase().replace(/[^a-z0-9-]/g, "");
       scheduleDepartmentCodeCheck();
     });
+    $("#departmentForm").addEventListener("input", clearChangedFormFieldError);
+    $("#departmentForm").addEventListener("change", clearChangedFormFieldError);
     $$('[data-close-drawer]').forEach((item) => item.addEventListener("click", closeDrawer));
     $("#drawerEdit").addEventListener("click", (event) => beginEdit(event.currentTarget.dataset.code));
+    $("#drawerDelete").addEventListener("click", (event) => {
+      $("#drawerMore").removeAttribute("open");
+      openTeardown("department", event.currentTarget.dataset.code);
+    });
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest("#drawerMore")) $("#drawerMore").removeAttribute("open");
+    });
+    $("#commonRuntimeTeardown").addEventListener("click", () => openTeardown("commonRuntime"));
+    $$('[data-close-teardown]').forEach((item) => item.addEventListener("click", closeTeardownModal));
+    $("#teardownConfirmInput").addEventListener("input", syncTeardownConfirmState);
+    $("#startTeardown").addEventListener("click", startTeardown);
+    // 남은 것만 다시 지운다. 계획을 새로 받아야 이미 지워진 항목이 빠진다.
+    $("#retryTeardown").addEventListener("click", () => {
+      const plan = state.teardownPlan;
+      if (plan) openTeardown(plan.kind, plan.code);
+    });
     $("#drawerCheck").addEventListener("click", (event) => startStatus([event.currentTarget.dataset.code]));
     $("#cancelRun").addEventListener("click", async () => {
       if (!state.activeRunId) return;
@@ -2937,7 +3532,8 @@
     });
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
-      if ($("#syncConfirmModal").classList.contains("open")) closeSyncConfirmModal();
+      if ($("#teardownModal").classList.contains("open")) closeTeardownModal();
+      else if ($("#syncConfirmModal").classList.contains("open")) closeSyncConfirmModal();
       else if ($("#commonRuntimeDeploymentModal").classList.contains("open")) closeCommonRuntimeDeployment();
       else if ($("#mcpDeploymentModal").classList.contains("open")) closeMcpDeployment();
       else if ($("#resourceProvisionModal").classList.contains("open")) closeResourceModal();
@@ -2993,8 +3589,12 @@
       // 기다릴 이유가 없어 먼저 띄우고, 계정·프로젝트는 뒤에서 채운다.
       if (session.commonExists === false) showCommonSetupShell();
       const [, env] = await Promise.all([loadDepartments(), loadEnvironment()]);
-      if (env && !env.commonExists) showCommonSetup(env);
-      else if (env?.commonValid) await Promise.all([reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
+      if (needsCommonSetup(env)) showCommonSetup(env);
+      else if (env?.commonValid) {
+        await Promise.all([reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
+        // 첫 화면이 서비스 관리다 — 진입과 같은 취급으로 런타임 설정을 대조한다.
+        refreshRuntimeEnvIfStale();
+      }
     } catch (error) {
       toast("콘솔을 초기화하지 못했습니다", error.message, "fail");
     }
