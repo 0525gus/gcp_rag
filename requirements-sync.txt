@@ -7,11 +7,11 @@ uvicorn[standard]>=0.32.0,<1
 pydantic>=2.9.0,<3
 google-cloud-storage>=2.18.0,<4
 google-cloud-firestore>=2.19.0,<3
+google-cloud-tasks>=2.19.0,<3
 google-api-python-client>=2.149.0,<3
 google-auth>=2.35.0,<3
-# 상한 필수 — requirements-mcp.txt 의 같은 줄 주석 참고.
-# `vertexai.rag` 폐기 예고 상태이며, 사라지면 이 서비스도 import 에서 죽는다.
-google-cloud-aiplatform>=1.70.0,<2
+# 하한·상한 근거는 requirements-mcp.txt 의 같은 줄 주석 참고.
+google-cloud-aiplatform>=1.149.0,<2
 httpx>=0.27.0,<1
 # RAG Engine 한도(PDF 50MB) 초과분을 페이지 단위로 쪼개기 위해
 pypdf>=5.1.0,<7

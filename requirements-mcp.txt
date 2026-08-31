@@ -8,11 +8,9 @@ mcp>=1.1.0,<2
 uvicorn[standard]>=0.32.0,<1
 pydantic>=2.9.0,<3
 google-cloud-firestore>=2.19.0,<3
-# 상한 필수 
-# shared/rag_engine.py 가 `from vertexai import rag` 에 전적으로 의존하는데
-# 이 모듈은 이미 폐기 예고 상태다(import 시 "vertexai.rag is deprecated and
-# will be removed in a future version. Please migrate to the agentplatform
-# client."). 사라지는 날 rag-sync·rag-mcp 가 **둘 다 import 에서 죽는다**.
-# 상한만으로는 시한폭탄을 미루는 것뿐이니 agentplatform 이관을 별도로 잡을 것.
-google-cloud-aiplatform>=1.70.0,<2
+# 하한 필수 — shared/rag_engine.py 가 `from agentplatform import rag` 를 쓴다.
+# agentplatform 패키지는 이 배포판 안에 들어있고 1.149.0 부터 존재한다.
+# (폐기 예고된 vertexai.rag 에서 이관 완료. 되돌리지 말 것.)
+# 상한 필수 — 2.x 는 API 변경 폭이 커서 재검증 전엔 올리지 않는다.
+google-cloud-aiplatform>=1.149.0,<2
 google-auth>=2.35.0,<3

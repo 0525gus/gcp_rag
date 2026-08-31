@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import logging
+import random
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
-import vertexai
+import agentplatform
 from google.api_core import exceptions as gcp_exceptions
-from vertexai import rag
+from agentplatform import rag
 
 from shared.config import Settings, get_settings
+from shared.gcs import GcsClient, gs_uri
 from shared.models import SearchHit, SearchSource
+from shared.rag_import_result import RagImportResult, parse_import_results
+from shared.rag_mapping import RagFileMapping, RagFileMappingStore
 from shared.search_postprocess import extract_file_id, unescape_chunk_text
 
 logger = logging.getLogger(__name__)
@@ -47,6 +52,8 @@ class ImportOutcome:
     imported: int
     failed: int
     skipped: int
+    results: tuple[RagImportResult, ...] = ()
+    result_sinks: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -92,7 +99,28 @@ class RagImportError(RuntimeError):
         super().__init__(f"RAG import incomplete: {detail}")
 
 
-def _with_throttle_retry(fn: Any, *, what: str, max_retries: int = 5) -> Any:
+class RagImportThrottledError(RuntimeError):
+    """Vertex RAG 요청 쿼터가 재시도 한도까지 복구되지 않았을 때의 오류."""
+
+
+def _contains_exception(exc: BaseException, kinds: tuple[type[BaseException], ...]) -> bool:
+    """SDK wrapper의 cause/context/args 안에 든 실제 API 예외까지 찾는다."""
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, kinds):
+            return True
+        for nested in (current.__cause__, current.__context__, *current.args):
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return False
+
+
+def _with_throttle_retry(fn: Any, *, what: str, max_retries: int = 6) -> Any:
     """RPM 초과(429)만 지수 백오프로 재시도한다.
 
     import 에만 재시도가 걸려 있었다. list/delete 는 배치 하나가 수십 번 부르는데도
@@ -104,12 +132,16 @@ def _with_throttle_retry(fn: Any, *, what: str, max_retries: int = 5) -> Any:
     for attempt in range(max_retries):
         try:
             return fn()
-        except gcp_exceptions.ResourceExhausted as exc:
+        except Exception as exc:
+            if not _contains_exception(exc, (gcp_exceptions.ResourceExhausted,)):
+                raise
             last = exc
             logger.warning("RAG %s throttled (attempt %s): %s", what, attempt + 1, exc)
-            time.sleep(delay)
+            time.sleep(random.uniform(0, delay))
             delay = min(delay * 2, 60)
-    raise RuntimeError(f"RAG {what} failed after {max_retries} retries: {last}")
+    raise RagImportThrottledError(
+        f"Vertex RAG quota still exhausted after {max_retries} retries ({what})"
+    ) from last
 
 
 class RagEngineClient:
@@ -127,7 +159,7 @@ class RagEngineClient:
         이상일 때 서로 덮어쓴다.
         """
         self.settings = settings or get_settings()
-        vertexai.init(
+        agentplatform.init(
             project=self.settings.gcp_project_id,
             location=self.settings.gcp_region,
         )
@@ -175,6 +207,8 @@ class RagEngineClient:
             imported=sum(b.imported for b in batches),
             failed=sum(b.failed for b in batches),
             skipped=sum(b.skipped for b in batches),
+            results=tuple(result for b in batches for result in b.results),
+            result_sinks=tuple(sink for b in batches for sink in b.result_sinks),
         )
         # 캐시를 통째로 버리면 다음 배치가 또 코퍼스를 훑는다.
         # 이번에 건드린 id 만 dirty 로 두고 나머지 캐시는 살린다.
@@ -219,12 +253,27 @@ class RagEngineClient:
         last_err: Exception | None = None
         for attempt in range(max_retries):
             try:
+                result_sink = self._new_import_result_sink()
+                import_kwargs: dict[str, Any] = {}
+                if result_sink:
+                    import_kwargs["import_result_sink"] = result_sink
                 response = rag.import_files(
                     self.corpus_name,
                     gcs_uris,
                     transformation_config=transformation,
+                    **import_kwargs,
                 )
                 outcome = self._read_outcome(gcs_uris, response)
+                if result_sink:
+                    results = self._read_import_result_sink(result_sink)
+                    outcome = ImportOutcome(
+                        uris=outcome.uris,
+                        imported=outcome.imported,
+                        failed=outcome.failed,
+                        skipped=outcome.skipped,
+                        results=tuple(results),
+                        result_sinks=(result_sink,),
+                    )
                 if outcome.skipped:
                     # ok 판정에는 성공으로 세지만(위 docstring) 정상 경로에서
                     # 나올 값이 아니다 — pre-delete 가 놓친 것이 있다는 뜻이다.
@@ -257,8 +306,8 @@ class RagEngineClient:
                         [u.rsplit("/", 1)[-1] for u in gcs_uris[:5]],
                     )
                 return outcome
-            except Exception as exc:  # noqa: BLE001
-                # vertexai SDK가 내부에서 원인 예외를 잡아 RuntimeError 로
+            except Exception as exc:
+                # agentplatform SDK가 내부에서 원인 예외를 잡아 RuntimeError 로
                 # 재포장하므로(__cause__ 에 원본이 남음), 타입 매칭만으로는 못 잡는다.
                 #
                 # 기다리면 풀리는 두 가지를 재시도한다.
@@ -274,9 +323,7 @@ class RagEngineClient:
                         gcp_exceptions.FailedPrecondition,
                     )
                 )
-                transient = isinstance(exc, retryable) or isinstance(
-                    exc.__cause__, retryable
-                )
+                transient = _contains_exception(exc, retryable)
                 if not transient:
                     logger.exception("RAG import failed")
                     raise
@@ -284,15 +331,66 @@ class RagEngineClient:
                 logger.warning(
                     "RAG import retryable (attempt %s): %s", attempt + 1, exc
                 )
-                time.sleep(delay)
+                time.sleep(random.uniform(0, delay))
                 delay = min(delay * 2, 60)
-        raise RuntimeError(f"RAG import failed after retries: {last_err}")
+        if last_err is not None and _contains_exception(
+            last_err, (gcp_exceptions.ResourceExhausted,)
+        ):
+            # 호출자가 HTTP 429로 보존할 수 있게 타입과 원인 체인을 남긴다.
+            # 문자열 RuntimeError만 올리면 Workflow가 일반 500으로 보고 바깥
+            # 재시도를 반복해 한 파일이 수 분 동안 같은 쿼터를 두드린다.
+            raise RagImportThrottledError(
+                f"Vertex RAG quota still exhausted after {max_retries} retries"
+            ) from last_err
+        raise RuntimeError(f"RAG import failed after retries: {last_err}") from last_err
+
+    def _new_import_result_sink(self) -> str:
+        settings = getattr(self, "settings", None)
+        if not getattr(settings, "rag_mapping_write_enabled", False):
+            return ""
+        bucket = str(getattr(settings, "rag_metadata_bucket", "") or "").strip()
+        if not bucket:
+            logger.error(
+                "RAG_MAPPING_WRITE_ENABLED=true but RAG_METADATA_BUCKET is empty"
+            )
+            return ""
+        corpus_id = self.corpus_name.rstrip("/").rsplit("/", 1)[-1] or "unknown"
+        return gs_uri(
+            bucket,
+            f"import-results/{corpus_id}/{uuid.uuid4().hex}.ndjson",
+        )
+
+    def _read_import_result_sink(self, sink_uri: str) -> list[RagImportResult]:
+        delay = 0.25
+        last_error: Exception | None = None
+        for attempt in range(4):
+            try:
+                payload = GcsClient(self.settings).download_bytes(sink_uri)
+                results = parse_import_results(
+                    payload,
+                    corpus_name=self.corpus_name,
+                    sink_uri=sink_uri,
+                )
+                logger.info(
+                    "RAG import result sink read rows=%s sink=%s",
+                    len(results),
+                    sink_uri,
+                )
+                return results
+            except Exception as exc:  # mapping 관측 실패가 실제 색인을 실패시키면 안 됨
+                last_error = exc
+                if attempt < 3:
+                    time.sleep(delay)
+                    delay *= 2
+        logger.error("RAG import result sink unavailable sink=%s: %s", sink_uri, last_error)
+        return []
 
     def list_files(self) -> list[Any]:
-        return list(
-            _with_throttle_retry(
-                lambda: rag.list_files(corpus_name=self.corpus_name), what="list_files"
-            )
+        # SDK는 호출 시 pager만 만들고 실제 RPC는 순회할 때 보낼 수 있다. list()가
+        # 재시도 바깥에 있으면 그 지연 RPC의 429가 그대로 500으로 빠진다.
+        return _with_throttle_retry(
+            lambda: list(rag.list_files(corpus_name=self.corpus_name)),
+            what="list_files",
         )
     def _file_index(self, wanted: set[str] | None = None) -> dict[str, list[str]]:
         """fileId → RagFile resource_name 목록.
@@ -347,15 +445,77 @@ class RagEngineClient:
         return self.delete_files_by_ids([file_id]) > 0
 
     def delete_files_by_ids(self, file_ids: list[str]) -> int:
-        """여러 fileId 의 RagFile 을 제거. 인덱스 조회라 코퍼스 크기와 무관하다."""
+        """여러 fileId의 RagFile을 제거한다.
+
+        매핑 read가 켜져 있으면 Firestore 단건 조회로 바로 resource name을 얻는다.
+        매핑이 없는 파일만 기존 코퍼스 전체 스캔으로 보완한다. rollout 중에는
+        fallback을 끄지 않아 불완전한 backfill이 문서 삭제 누락으로 이어지지 않게
+        한다.
+        """
         wanted = {fid for fid in file_ids if fid}
         if not wanted:
             return 0
 
-        index = self._file_index(wanted)
+        mapping_store: RagFileMappingStore | None = None
+        mappings_by_target: dict[tuple[str, str], list[RagFileMapping]] = {}
+        direct_index: dict[str, list[str]] = {}
+        missing = set(wanted)
+        if getattr(self.settings, "rag_mapping_read_enabled", False):
+            try:
+                mapping_store = RagFileMappingStore(self.settings)
+                corpus_id = self.corpus_name.rstrip("/").rsplit("/", 1)[-1]
+                for fid in wanted:
+                    rows = [
+                        row
+                        for row in mapping_store.list_for_file(fid)
+                        if row.corpus_name.rstrip("/").rsplit("/", 1)[-1]
+                        == corpus_id
+                    ]
+                    if not rows:
+                        continue
+                    missing.discard(fid)
+                    for row in rows:
+                        # project ID/number 표기가 달라도 마지막 RagFile ID가 같으면
+                        # 동일 리소스다. backfill+dual-write 중복 행을 한 호출로 접는다.
+                        rag_file_id = row.rag_file_name.rstrip("/").rsplit("/", 1)[-1]
+                        target = (fid, rag_file_id)
+                        direct_index.setdefault(fid, []).append(row.rag_file_name)
+                        mappings_by_target.setdefault(target, []).append(row)
+                logger.info(
+                    "RAG mapping lookup corpus=%s requested=%s hit=%s missing=%s",
+                    self.corpus_name,
+                    len(wanted),
+                    len(wanted - missing),
+                    len(missing),
+                )
+            except Exception:  # 매핑 장애 시 기존 스캔으로 안전하게 복귀한다.
+                logger.exception("RAG mapping lookup failed; using corpus scan fallback")
+                mapping_store = None
+                direct_index = {}
+                mappings_by_target = {}
+                missing = set(wanted)
+
+        index = direct_index
+        if missing and (
+            not getattr(self.settings, "rag_mapping_read_enabled", False)
+            or getattr(self.settings, "rag_mapping_fallback_scan_enabled", True)
+        ):
+            scanned = self._file_index(missing)
+            index = {**direct_index}
+            for fid in missing:
+                # 캐시 안의 리스트 참조를 유지해야 아래 성공 삭제의 remove가
+                # 캐시에도 반영된다. 복사하면 같은 프로세스의 다음 호출이 이미
+                # 삭제한 RagFile을 다시 삭제하려 든다.
+                index.setdefault(fid, scanned.get(fid, []))
+
         targets: list[tuple[str, str]] = []
+        seen_targets: set[tuple[str, str]] = set()
         for fid in wanted:
             for resource_name in index.get(fid, ()):
+                key = (fid, resource_name.rstrip("/").rsplit("/", 1)[-1])
+                if key in seen_targets:
+                    continue
+                seen_targets.add(key)
                 targets.append((fid, resource_name))
         if not targets:
             return 0
@@ -376,6 +536,17 @@ class RagEngineClient:
                     what="delete_file",
                 )
                 logger.info("Deleted RAG file: %s (%s)", resource_name, fid)
+                if mapping_store is not None:
+                    key = (fid, resource_name.rstrip("/").rsplit("/", 1)[-1])
+                    for mapping in mappings_by_target.get(key, ()):
+                        try:
+                            mapping_store.delete(mapping)
+                        except Exception:
+                            logger.exception(
+                                "RAG mapping cleanup failed fileId=%s mapping=%s",
+                                fid,
+                                mapping.mapping_id,
+                            )
                 return item
             except Exception:  # noqa: BLE001
                 # 이미 지워졌거나 일시 오류 — 재색인 자체를 막지는 않는다
