@@ -1,4 +1,4 @@
-# 알림 일괄 설정 (멱등) — 예산 1건 + 운영 정책 3건
+﻿# 알림 일괄 설정 (멱등) - 예산 1건 + 운영 정책 3건
 # 사용:
 #   $env:ALERT_EMAIL = "ops@example.com"
 #   .\scripts\setup_alerts.ps1
@@ -208,6 +208,6 @@ Write-Host ""
 Write-Host "Done."
 Write-Host "  채널 : $ALERT_EMAIL"
 Write-Host "  정책 : 24시간 무성공 / 워크플로 실패 / 동기화 정체"
-Write-Host "  예산 : $BUDGET_AMOUNT (50%·90%·100%)"
+Write-Host "  예산 : $BUDGET_AMOUNT (50/90/100%)"
 Write-Host ""
 Write-Host "확인: gcloud alpha monitoring policies list --project=$PROJECT_ID --format=`"table(displayName,enabled)`""

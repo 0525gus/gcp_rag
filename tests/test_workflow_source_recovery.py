@@ -93,6 +93,11 @@ def test_recovery_false_results_are_reported_as_errors() -> None:
     assert "severity: ERROR" in yaml.safe_dump(reindex_check["steps"])
     assert "severity: ERROR" in yaml.safe_dump(retry_check["steps"])
 
+    finalizer = _named_step(top_steps, "finalize_summary")["switch"][0]
+    assert finalizer["condition"] == "${totals.failed > 0 or totals.indexFailed > 0}"
+    assert "sync incomplete" in finalizer["raise"]
+    assert "next: return_summary" not in WORKFLOW.read_text(encoding="utf-8")
+
     summary = _named_step(top_steps, "return_summary")["return"]
-    # 색인 실패는 별도 지표라, ok 에서 명시적으로 함께 봐야 묻히지 않는다.
-    assert summary["ok"] == "${totals.failed == 0 and totals.indexFailed == 0}"
+    # 실패는 위에서 raise 되므로 return 경로는 실제 성공만 남는다.
+    assert summary["ok"] is True

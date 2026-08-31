@@ -118,7 +118,30 @@ def test_student_split_requires_student_key() -> None:
     assert "MCP_API_KEY_STUDENT" in (p.stderr + p.stdout)
 
 
+def _parse_engines() -> list[str]:
+    """파싱 엔진. Windows 5.1 을 빠뜨리면 UTF-8 한글 회귀를 놓친다.
+
+    pwsh 7 은 BOM 없는 UTF-8 도 읽는다. 5.1 은 BOM 이 없으면 cp949 로 읽어
+    한글 문자열의 닫는 따옴표를 삼킨다. 그래서 5.1 이 있으면 그쪽을 먼저 본다.
+    """
+    engines: list[str] = []
+    seen: set[str] = set()
+    windir = os.environ.get("WINDIR", r"C:\Windows")
+    winps = Path(windir) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    for candidate in ((str(winps) if winps.is_file() else None), PWSH):
+        if not candidate:
+            continue
+        key = os.path.normcase(os.path.abspath(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        engines.append(candidate)
+    return engines
+
+
 def test_ps1_scripts_parse() -> None:
+    engines = _parse_engines()
+    assert engines, "PowerShell 없음"
     for name in (
         "deploy.ps1",
         "deploy_mcp.ps1",
@@ -135,14 +158,17 @@ def test_ps1_scripts_parse() -> None:
             f"'{path}', [ref]$t, [ref]$e); "
             "if ($e) { $e | ForEach-Object { $_.ToString() }; exit 1 }"
         )
-        p = subprocess.run(
-            [PWSH, "-NoProfile", "-Command", script],
-            cwd=str(ROOT),
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        assert p.returncode == 0, f"{name}: {p.stdout}{p.stderr}"
+        for engine in engines:
+            p = subprocess.run(
+                [engine, "-NoProfile", "-Command", script],
+                cwd=str(ROOT),
+                text=True,
+                capture_output=True,
+                check=False,
+                encoding="utf-8",
+                errors="replace",
+            )
+            assert p.returncode == 0, f"{name} via {engine}: {p.stdout}{p.stderr}"
 
 
 def test_mcp_deploy_attaches_cloud_management_metadata() -> None:

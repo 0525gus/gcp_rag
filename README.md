@@ -1,25 +1,37 @@
 # RAG MCP
 
-Drive → GCS → Vertex RAG → Cloud Run MCP `search`.
+공유드라이브 문서를 Vertex RAG에 동기화하고 Cloud Run MCP로 검색하는 서비스다.
 
-- 일 배치로 공유드라이브를 색인하고 FactChat에서 검색
-- GCS hwp , source 각 1개. RAG 코퍼스와 MCP 서버 학생용, 직원용 각각 하나씩
-- 명세: [`docs/DEV_SPEC.md`](docs/DEV_SPEC.md)
+- Scheduler가 매일 00:00 KST에 변경분 동기화 실행
+- HWP/HWPX 및 스프레드시트 등은 Markdown으로 정규화해 GCS에 저장
+- 교직원·학생 코퍼스를 분리하고 Cloud Tasks에서 독립 처리·재시도
+- Firestore 매핑으로 수정·삭제 시 Vertex 코퍼스 전체 순회 방지
+- 상세 명세: [`docs/DEV_SPEC.md`](docs/DEV_SPEC.md)
 
 ```mermaid
 flowchart TB
   Drive["Google Drive"]
+  Scheduler["Cloud Scheduler"]
+  Workflow["Cloud Workflows"]
   Sync[rag-sync]
   Parser[rag-parser]
+  FacultyQueue["Cloud Tasks · 교직원"]
+  StudentQueue["Cloud Tasks · 학생"]
+  Firestore["Firestore · 상태/매핑"]
   GCS["GCS hwp + source"]
   StaffRAG[RAG 교직원]
   StudentRAG[RAG 학생]
   McpStaff[rag-mcp-cs-staff]
   McpStudent[rag-mcp-cs-student]
 
+  Scheduler --> Workflow
+  Workflow --> Sync
   Drive --> Sync
   Sync <--> Parser
   Sync --> GCS
+  Sync <--> Firestore
+  Sync --> FacultyQueue --> Sync
+  Sync --> StudentQueue --> Sync
   Sync --> StaffRAG
   Sync --> StudentRAG
   McpStaff --> StaffRAG
@@ -29,11 +41,16 @@ flowchart TB
 | 서비스 | 역할 | 공개 |
 |---|---|---|
 | `rag-parser` | HWP/HWPX → MD | IAM |
-| `rag-sync` | Drive / GCS / RAG | IAM |
+| `rag-sync` | Drive 변경 감지, GCS 적재, RAG 작업 생성·처리 | IAM |
 | `MCP_SERVICE_NAME_STAFF` | 교직원 `search` / `answer` | URL + 키 |
 | `MCP_SERVICE_NAME_STUDENT` | 학생 (분리 켠 뒤) | URL + 키 |
 
-일 배치: Scheduler 00:00 KST → Workflows → `rag-sync`.
+변경분 처리 순서:
+
+1. Workflow가 Drive 변경을 조회하고 파일을 GCS에 적재한다.
+2. `rag-sync`가 교직원·학생 태스크를 각 큐에 등록한다.
+3. 두 태스크가 독립적으로 재시도되며, 모두 성공해야 문서가 `INDEXED`가 된다.
+4. Workflow는 작업 완료와 정합성을 확인한 뒤에만 Drive `pageToken`을 커밋한다.
 
 ---
 
@@ -59,14 +76,18 @@ gcloud config set project <GCP_PROJECT_ID>
 
 | 대상 | 비고 |
 |---|---|
-| GCS 버킷 2개 | 웹 콘솔에서 보호 기본값으로 생성 또는 기존 버킷 선택 |
+| 학과별 GCS 버킷 2개 | HWP 원본 + RAG source. 웹 콘솔에서 생성 또는 기존 버킷 선택 |
+| 공용 RAG metadata 버킷 1개 | Vertex import 결과 NDJSON 임시 보관 |
 | Firestore Native DB | 이름·타입·리전 **생성 후 변경 불가**. `(default)` Datastore 불가 |
 | Vertex RAG 코퍼스 | 웹 콘솔에서 교직원·학생 2개 생성 또는 기존 코퍼스 선택 |
+| Cloud Tasks 큐 2개 | `deploy.ps1`이 교직원·학생 큐와 IAM을 생성·갱신 |
 | 공유드라이브 공유 | Cloud Run SA `<프로젝트번호>-compute@developer.gserviceaccount.com` 를 뷰어 이상으로 초대 |
 
 ```powershell
 gcloud storage buckets create gs://<hwp-original-bucket> --location=asia-northeast3 --uniform-bucket-level-access --pap
 gcloud storage buckets create gs://<source-bucket> --location=asia-northeast3 --uniform-bucket-level-access --pap
+gcloud storage buckets create gs://<rag-metadata-bucket> --location=asia-northeast3 --uniform-bucket-level-access --pap
+gcloud storage buckets update gs://<rag-metadata-bucket> --lifecycle-file=config/rag_metadata_lifecycle.json
 gcloud firestore databases create --database=rag-sync-state --location=asia-northeast3 --type=firestore-native
 ```
 
@@ -278,38 +299,52 @@ gcloud workflows executions list --workflow=rag-daily-sync --location=$R --proje
 gcloud logging read 'resource.labels.service_name="rag-sync"' --project=$P --limit=30
 ```
 
-### RAG 파일 매핑과 삭제 성능
+### 동기화 내부 구조
 
-`rag-sync`는 Vertex import 결과를 `doc_state/{driveFileId}/rag_files`에 기록한다.
-삭제·수정 시 이 매핑으로 RagFile resource name을 바로 찾아 코퍼스 전체 순회를
-피한다. `RAG_MAPPING_FALLBACK_SCAN_ENABLED=true`인 동안 매핑이 없는 파일만 기존
-전체 스캔으로 안전하게 보완한다.
+#### Firestore RAG 매핑
 
-기존 코퍼스는 읽기 전환 전에 다음 관리 API를 `dryRun=true`로 확인한 뒤
-`false`로 한 번 backfill한다.
+Vertex import 결과는 `doc_state/{driveFileId}/rag_files`에 저장한다. 수정·삭제 시
+이 매핑으로 RagFile resource name을 바로 찾아 코퍼스 전체 순회를 피한다.
+매핑이 없으면 `RAG_MAPPING_FALLBACK_SCAN_ENABLED=true`인 동안 기존 스캔으로
+안전하게 보완한다.
+
+기존 코퍼스에 매핑을 채울 때는 `POST /sync/backfill-rag-mappings`를 사용한다.
+먼저 `dryRun:true`로 `listed == mappable`, `skipped == 0`을 확인한 뒤
+`dryRun:false`로 적용한다.
 
 ```json
 {"driveId":"<공유드라이브ID>","dryRun":true}
 ```
 
-호출 경로는 `POST /sync/backfill-rag-mappings`다. `listed == mappable`,
-`skipped == 0`을 확인한 뒤 적용한다. 운영 스위치는 다음과 같다.
+| 설정 | 역할 |
+|---|---|
+| `RAG_MAPPING_WRITE_ENABLED` | Vertex import 결과를 Firestore에 기록 |
+| `RAG_MAPPING_READ_ENABLED` | 삭제 시 Firestore 매핑 우선 사용 |
+| `RAG_MAPPING_FALLBACK_SCAN_ENABLED` | 매핑 누락 시 기존 코퍼스 스캔 |
+| `RAG_METADATA_BUCKET` | import 결과 NDJSON 임시 보관 |
 
-- `RAG_MAPPING_WRITE_ENABLED`: Vertex import result sink를 Firestore에 기록
-- `RAG_MAPPING_READ_ENABLED`: 삭제 시 Firestore 매핑을 우선 사용
-- `RAG_MAPPING_FALLBACK_SCAN_ENABLED`: 매핑 누락 시 코퍼스 스캔 허용
-- `RAG_METADATA_BUCKET`: import result NDJSON 임시 보관 버킷
+#### Cloud Tasks 색인
 
-### 비동기 코퍼스 색인
+`POST /sync/index-gcs-async`가 작업을 만들고 교직원·학생 코퍼스를 독립 큐로
+보낸다. Workflow는 `GET /sync/index-jobs/{jobId}`를 폴링한다.
 
-변경분 색인은 `POST /sync/index-gcs-async`가 job을 만든 뒤 교직원·학생 코퍼스를
-각각 `faculty-rag-sync-queue`, `student-rag-sync-queue`로 보낸다. 두 파트는 서로
-독립적으로 재시도되며 모두 성공한 뒤에만 job이 `DONE`, 문서가 `INDEXED`가 된다.
-Workflow는 `GET /sync/index-jobs/{jobId}`를 폴링하고 `DONE`일 때만 pageToken을
-커밋한다.
+| 큐 | 대상 | 기본 제한 |
+|---|---|---|
+| `faculty-rag-sync-queue` | 교직원 코퍼스 | 동시 실행 1, 0.2/s |
+| `student-rag-sync-queue` | 학생 코퍼스 | 동시 실행 1, 0.2/s |
 
-큐 기본값은 코퍼스별 동시 실행 1, 시작률 0.2/s, 최대 5회, backoff 2~60초다.
-한 코퍼스가 동시 import/delete를 받지 않도록 동시성을 1로 유지한다.
+- 최대 5회 재시도
+- backoff 2~60초, 전체 재시도 시간 900초
+- 한쪽이 429로 재시도돼도 다른 코퍼스의 성공 결과는 유지
+- 두 파트가 모두 `DONE`이어야 문서 상태 및 pageToken 확정
+
+상태 확인:
+
+```powershell
+gcloud tasks queues describe faculty-rag-sync-queue --location=$R --project=$P
+gcloud tasks queues describe student-rag-sync-queue --location=$R --project=$P
+gcloud workflows executions list --workflow=rag-daily-sync --location=$R --project=$P --limit=5
+```
 
 ---
 

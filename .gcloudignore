@@ -2,6 +2,9 @@
 .venv/
 venv/
 .env
+# 학과별 실제 설정에는 MCP API 키와 corpus/Drive 식별자가 들어간다.
+# 배포 스크립트가 필요한 값은 환경 변수로 주입하므로 소스 아카이브에 넣지 않는다.
+config/departments/*.yaml
 **/__pycache__/
 .pytest_cache/
 .mypy_cache/

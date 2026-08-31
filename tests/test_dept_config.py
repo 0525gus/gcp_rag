@@ -168,6 +168,12 @@ def test_real_department_files_are_gitignored():
     assert "config/departments/*.yaml" in [r.strip() for r in rules]
 
 
+def test_real_department_files_are_excluded_from_cloud_build():
+    """Git 제외만으로는 부족하다. gcloud submit도 비밀 YAML을 업로드하면 안 된다."""
+    rules = (ROOT / ".gcloudignore").read_text(encoding="utf-8").splitlines()
+    assert "config/departments/*.yaml" in [r.strip() for r in rules]
+
+
 @requires_dept_files
 def test_department_buckets_override_common():
     """학과 버킷을 적으면 common.yaml 의 공용 버킷을 덮는다."""

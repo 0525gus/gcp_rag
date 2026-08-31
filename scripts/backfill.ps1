@@ -1,11 +1,11 @@
-# Drive → GCS → RAG 색인을 수동으로 돌린다 (rag-daily-sync 워크플로 실행).
+﻿# Drive → GCS → RAG 색인을 수동으로 돌린다 (rag-daily-sync 워크플로 실행).
 # 사용: .\scripts\backfill.ps1               전체 백필 (첫 적재)
 #       .\scripts\backfill.ps1 -Delta        델타만 (스케줄러와 같은 동작)
 #       .\scripts\backfill.ps1 -NoWait       실행만 걸고 빠진다
 #
 # 스케줄러는 00:00 KST 에 돈다. 그걸 기다리지 않을 때 쓴다.
 #
-# 코퍼스가 ACTIVE 가 아니면 시작하지 않는다 — 색인이 통째로 실패하는데
+# 코퍼스가 ACTIVE 가 아니면 시작하지 않는다 - 색인이 통째로 실패하는데
 # 워크플로는 SUCCEEDED 로 끝나서 알아채기 어렵다(실측).
 
 [CmdletBinding()]
@@ -39,19 +39,19 @@ Add-RequiredEnv $errs RAG_CORPUS_NAME "Vertex RAG corpus path"
 Assert-EnvErrors $errs
 
 if (-not (Get-Command gcloud -ErrorAction SilentlyContinue)) {
-  throw "gcloud not on PATH — https://cloud.google.com/sdk/docs/install"
+  throw "gcloud not on PATH - https://cloud.google.com/sdk/docs/install"
 }
 
 $PROJECT_ID = Get-EnvOr GCP_PROJECT_ID ""
 $REGION = Get-EnvOr GCP_REGION "asia-northeast3"
-$ids = @(($DriveIds ? $DriveIds : (Get-EnvOr DRIVE_IDS "")) -split "," |
-  ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$rawIds = if ($DriveIds) { $DriveIds } else { Get-EnvOr DRIVE_IDS "" }
+$ids = @($rawIds -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($ids.Count -eq 0) { throw "DRIVE_IDS 가 비어 있다" }
 
 # 코퍼스가 못 쓰는 상태면 색인이 전부 실패한다. 워크플로는 그래도 SUCCEEDED 로
 # 끝나므로 여기서 먼저 막는다.
 $tokenR = Get-GcloudText -GcloudArgs @("auth", "print-access-token")
-if (-not $tokenR.Ok) { throw "gcloud auth print-access-token 실패 — gcloud auth login" }
+if (-not $tokenR.Ok) { throw "gcloud auth print-access-token 실패 - gcloud auth login" }
 $token = $tokenR.Text.Split("`n")[0].Trim()
 
 # 대상 드라이브가 속한 학과의 코퍼스만 본다 — 한 학과를 다시 적재하는데 남의
@@ -91,7 +91,7 @@ $PARSER_URL = (Get-GcloudText -GcloudArgs @(
     "run", "services", "describe", "rag-parser", "--region=$REGION", "--project=$PROJECT_ID",
     "--format=value(status.url)")).Text.Trim()
 if (-not $SYNC_URL -or -not $PARSER_URL) {
-  throw "rag-sync / rag-parser URL 을 못 얻었다 — 배포부터 할 것"
+  throw "rag-sync / rag-parser URL 을 못 얻었다 - 배포부터 할 것"
 }
 
 $payload = [ordered]@{
