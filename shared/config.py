@@ -203,6 +203,25 @@ class Settings:
     rag_chunk_size: int = 1024
     rag_chunk_overlap: int = 256
 
+    # RagFile resource-name mapping rollout switches.  Write/read are separate so
+    # production can accumulate and audit mappings before direct deletion trusts
+    # them.  A missing mapping falls back to the legacy corpus scan until coverage
+    # has been proven.
+    rag_metadata_bucket: str = ""
+    rag_mapping_write_enabled: bool = False
+    rag_mapping_read_enabled: bool = False
+    rag_mapping_fallback_scan_enabled: bool = True
+
+    # Cloud Tasks 기반 코퍼스 분리. 기능 플래그를 켜기 전에는 기존 동기
+    # /sync/index-gcs 경로를 그대로 쓴다.
+    cloud_tasks_enabled: bool = False
+    task_queue_location: str = "asia-northeast3"
+    task_queue_faculty: str = "faculty-rag-sync-queue"
+    task_queue_student: str = "student-rag-sync-queue"
+    task_service_account: str = ""
+    sync_task_base_url: str = ""
+    index_job_timeout_seconds: int = 900
+
     # RagFile 삭제 호출 사이 간격(초). VertexRagDataService 쿼터가 분당 60건이라
     # 배치 하나가 다 써버리지 않게 벌려 둔 값이다. 쿼터를 올렸다면 같이 낮출 것
     # (300rpm 이면 0.2 정도). 0 이면 페이싱 없음.
@@ -343,6 +362,27 @@ class Settings:
             ),
             rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 1024),
             rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 256),
+            rag_metadata_bucket=os.environ.get("RAG_METADATA_BUCKET", ""),
+            rag_mapping_write_enabled=_env_bool("RAG_MAPPING_WRITE_ENABLED", False),
+            rag_mapping_read_enabled=_env_bool("RAG_MAPPING_READ_ENABLED", False),
+            rag_mapping_fallback_scan_enabled=_env_bool(
+                "RAG_MAPPING_FALLBACK_SCAN_ENABLED", True
+            ),
+            cloud_tasks_enabled=_env_bool("CLOUD_TASKS_ENABLED", False),
+            task_queue_location=os.environ.get(
+                "TASK_QUEUE_LOCATION", os.environ.get("GCP_REGION", "asia-northeast3")
+            ),
+            task_queue_faculty=os.environ.get(
+                "TASK_QUEUE_FACULTY", "faculty-rag-sync-queue"
+            ),
+            task_queue_student=os.environ.get(
+                "TASK_QUEUE_STUDENT", "student-rag-sync-queue"
+            ),
+            task_service_account=os.environ.get("TASK_SERVICE_ACCOUNT", ""),
+            sync_task_base_url=os.environ.get("SYNC_TASK_BASE_URL", ""),
+            index_job_timeout_seconds=max(
+                60, _env_int("INDEX_JOB_TIMEOUT_SECONDS", 900)
+            ),
             rag_delete_pacing_seconds=_env_float("RAG_DELETE_PACING_SECONDS", 1.1),
             rag_delete_concurrency=max(
                 1, min(_env_int("RAG_DELETE_CONCURRENCY", 1), 16)

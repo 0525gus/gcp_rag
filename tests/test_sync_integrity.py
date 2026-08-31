@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 import services.sync.main as sync_main
 import shared.rag_engine as rag_module
@@ -43,6 +44,7 @@ class _BackfillStore(_LockableStore):
     def __init__(self) -> None:
         self.committed: list[tuple[str, str]] = []
         self.progress: list[tuple[str, dict[str, object]]] = []
+        self.indexed: list[str] = []
 
     def get_start_page_token(self, _drive_id: str) -> None:
         return None
@@ -52,6 +54,12 @@ class _BackfillStore(_LockableStore):
 
     def update_sync_run(self, run_id: str, fields: dict[str, object]) -> None:
         self.progress.append((run_id, fields))
+
+    def get(self, _file_id: str) -> None:
+        return None
+
+    def mark_indexed(self, file_id: str) -> None:
+        self.indexed.append(file_id)
 
 
 class _BackfillDrive:
@@ -464,6 +472,7 @@ def test_index_gcs_stops_when_predelete_fails(
 
     monkeypatch.setattr(sync_main, "RagEngineClient", FakeRag)
     monkeypatch.setattr(sync_main, "DocStateStore", FakeStore)
+    monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
 
     with pytest.raises(RuntimeError, match="delete unavailable"):
         sync_main.index_gcs(
@@ -471,6 +480,80 @@ def test_index_gcs_stops_when_predelete_fails(
         )
 
     assert calls == ["delete"]
+
+
+def test_index_gcs_preserves_vertex_quota_as_http_429(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRag:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
+        def delete_files_by_ids(self, _file_ids: list[str]) -> int:
+            return 0
+
+        def import_from_gcs(self, _uris: list[str]) -> ImportOutcome:
+            raise sync_main.RagImportThrottledError("Vertex RAG quota still exhausted")
+
+    class FakeStore:
+        def get(self, _file_id: str):
+            return None
+
+    monkeypatch.setattr(sync_main, "RagEngineClient", FakeRag)
+    monkeypatch.setattr(sync_main, "DocStateStore", FakeStore)
+    monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
+
+    with pytest.raises(HTTPException) as raised:
+        sync_main.index_gcs(
+            sync_main.IndexGcsBody(gcsUris=["gs://b/f1.md"], fileIds=["f1"])
+        )
+
+    assert raised.value.status_code == 429
+    assert "quota" in str(raised.value.detail).lower()
+
+
+def test_student_corpus_failure_does_not_mark_document_indexed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = DocState(file_id="student-file", drive_id="drive", status=DocStatus.PARSED)
+    upserts: list[DocStatus] = []
+
+    class FakeStore:
+        def get(self, _file_id: str) -> DocState:
+            return state
+
+        def upsert(self, doc: DocState) -> None:
+            upserts.append(doc.status)
+
+    class FakeRag:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            pass
+
+        def delete_files_by_ids(self, _file_ids: list[str]) -> int:
+            return 0
+
+        def import_from_gcs(self, uris: list[str]) -> ImportOutcome:
+            return ImportOutcome(uris=list(uris), imported=len(uris), failed=0, skipped=0)
+
+    monkeypatch.setattr(sync_main, "DocStateStore", FakeStore)
+    monkeypatch.setattr(sync_main, "RagEngineClient", FakeRag)
+    monkeypatch.setattr(sync_main, "get_settings", lambda: _SplitSettings())
+    monkeypatch.setattr(
+        sync_main,
+        "_sync_student_corpus",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("student failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="student failed"):
+        sync_main.index_gcs(
+            sync_main.IndexGcsBody(
+                gcsUris=["gs://bucket/student-file.md"],
+                fileIds=["student-file"],
+            )
+        )
+
+    assert state.status == DocStatus.PARSED
+    assert upserts == []
 
 
 @pytest.mark.parametrize("batch_size", [3, 10])

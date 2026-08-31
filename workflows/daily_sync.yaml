@@ -11,7 +11,7 @@
 #         → backfill=true 이면 /sync/backfill (초기 전체)
 #            아니면 /sync/changes (델타; 최초 토큰 없으면 backfill 스냅샷)
 #         → for each change → ingest|delete
-#         → /sync/index-gcs → reconcile → commit-token
+#         → /sync/index-gcs-async → job poll → reconcile → commit-token
 #
 
 main:
@@ -27,10 +27,14 @@ main:
           - sync_url: ${default(map.get(args, "syncUrl"), "https://SYNC_SERVICE_URL")}
           - parser_url: ${default(map.get(args, "parserUrl"), "https://PARSER_SERVICE_URL")}
           - drive_ids: ${default(map.get(args, "driveIds"), [])}
-          - index_batch_size: ${default(map.get(args, "indexBatchSize"), 50)}
+          # backfill(최대 50)와 reindex-pending(최대 25)이 함께 쓰는 값이다.
+          - index_batch_size: ${default(map.get(args, "indexBatchSize"), 24)}
           - do_backfill: ${default(map.get(args, "backfill"), false)}
           - run_id: ${default(map.get(args, "runId"), "")}
           - department_code: ${default(map.get(args, "departmentCode"), "")}
+          # 과거 PARSED/DLQ 복구는 일반 변경분 동기화와 분리한다. 기본 실행에
+          # 섞으면 변경 1건이어도 전역 backlog 200건 때문에 수분씩 지연된다.
+          - run_recovery: ${default(map.get(args, "runRecovery"), false)}
           - drive_count: ${len(drive_ids)}
           - drive_index: 0
           - recover_limit: ${default(map.get(args, "recoverLimit"), 200)}
@@ -77,6 +81,7 @@ main:
                   - pending_page_token: ""
                   - pending_uris: []
                   - pending_file_ids: []
+                  - pending_items: []
                   - drive_listed: 0
                   - drive_gcs: 0
                   - drive_uris: 0
@@ -288,12 +293,22 @@ main:
                                           args:
                                             severity: "ERROR"
                                             text: ${"delete failed fileId=" + change.fileId + " " + json.encode_to_string(del_err)}
+                                      - log_delete_failed_item:
+                                          call: sys.log
+                                          args:
+                                            severity: "INFO"
+                                            text: ${"sync-file-result status=FAILED " + json.encode_to_string(change)}
                                       - del_continue:
                                           next: process_each_end
                               - del_ok:
                                   assign:
                                     - drive_deleted: ${drive_deleted + 1}
                                     - totals.deleted: ${totals.deleted + 1}
+                              - log_deleted_item:
+                                  call: sys.log
+                                  args:
+                                    severity: "INFO"
+                                    text: ${"sync-file-result status=DELETED " + json.encode_to_string(change)}
 
                           # === 대상 폴더 밖 — 집계에서 제외 ===
                           # SKIP(대상인데 처리 못 함)과 구분한다. reconcile 이
@@ -332,6 +347,11 @@ main:
                                   assign:
                                     - drive_excluded: ${drive_excluded + 1}
                                     - totals.excluded: ${totals.excluded + 1}
+                              - log_excluded_item:
+                                  call: sys.log
+                                  args:
+                                    severity: "INFO"
+                                    text: ${"sync-file-result status=EXCLUDED " + json.encode_to_string(change)}
 
                           # === 미지원 스킵 ===
                           - condition: ${change.route == "SKIP"}
@@ -384,6 +404,11 @@ main:
                                   assign:
                                     - drive_skipped: ${drive_skipped + 1}
                                     - totals.skipped: ${totals.skipped + 1}
+                              - log_skipped_item:
+                                  call: sys.log
+                                  args:
+                                    severity: "INFO"
+                                    text: ${"sync-file-result status=SKIPPED " + json.encode_to_string(change)}
 
                           # === HWP/HWPX · Google export · 원본 복사 → GCS ===
                           - condition: ${change.route == "HWP_PARSE" or change.route == "GOOGLE_EXPORT" or change.route == "FILE_COPY"}
@@ -437,10 +462,21 @@ main:
                                   switch:
                                     - condition: ${ingest_resp.body.status == "GCS_READY"}
                                       steps:
-                                        - collect_uri:
+                                        # list.concat 은 두 번째 인자를 한 항목으로 붙인다.
+                                        # gcsUris/list 와 [fileId] 를 그대로 넘기면 list[list]
+                                        # 가 되어 /sync/index-gcs 가 422 를 반환한다.
+                                        - collect_uris:
+                                            for:
+                                              value: pending_uri
+                                              in: ${ingest_resp.body.gcsUris}
+                                              steps:
+                                                - append_uri:
+                                                    assign:
+                                                      - pending_uris: ${list.concat(pending_uris, pending_uri)}
+                                        - tally_gcs_ready:
                                             assign:
-                                              - pending_uris: ${list.concat(pending_uris, ingest_resp.body.gcsUris)}
-                                              - pending_file_ids: ${list.concat(pending_file_ids, [change.fileId])}
+                                              - pending_file_ids: ${list.concat(pending_file_ids, change.fileId)}
+                                              - pending_items: ${list.concat(pending_items, change)}
                                               - drive_gcs: ${drive_gcs + 1}
                                               - drive_uris: ${drive_uris + len(ingest_resp.body.gcsUris)}
                                               - totals.gcsUploaded: ${totals.gcsUploaded + 1}
@@ -450,12 +486,22 @@ main:
                                             assign:
                                               - drive_unchanged: ${drive_unchanged + 1}
                                               - totals.unchanged: ${totals.unchanged + 1}
+                                        - log_unchanged_item:
+                                            call: sys.log
+                                            args:
+                                              severity: "INFO"
+                                              text: ${"sync-file-result status=UNCHANGED " + json.encode_to_string(change)}
                                     - condition: ${ingest_resp.body.status == "SKIPPED"}
                                       steps:
                                         - tally_skip2:
                                             assign:
                                               - drive_skipped: ${drive_skipped + 1}
                                               - totals.skipped: ${totals.skipped + 1}
+                                        - log_skipped_ingest_item:
+                                            call: sys.log
+                                            args:
+                                              severity: "INFO"
+                                              text: ${"sync-file-result status=SKIPPED " + json.encode_to_string(change)}
                                     # DLQ·SPLIT_QUEUED 는 '실패'가 아니라 **판정을 마치고
                                     # 별도 큐로 보낸 것**이다. failed 로 세면 아래
                                     # commit_token 이 막히는데, 다시 처리해도 같은 결과라
@@ -470,6 +516,11 @@ main:
                                               - drive_parked: ${drive_parked + 1}
                                               - totals.dlq: ${totals.dlq + 1}
                                               - totals.parked: ${totals.parked + 1}
+                                        - log_dlq_item:
+                                            call: sys.log
+                                            args:
+                                              severity: "INFO"
+                                              text: ${"sync-file-result status=DLQ " + json.encode_to_string(change)}
                                     - condition: ${ingest_resp.body.status == "SPLIT_QUEUED"}
                                       steps:
                                         - tally_split:
@@ -478,6 +529,11 @@ main:
                                               - drive_parked: ${drive_parked + 1}
                                               - totals.splitQueued: ${totals.splitQueued + 1}
                                               - totals.parked: ${totals.parked + 1}
+                                        - log_split_item:
+                                            call: sys.log
+                                            args:
+                                              severity: "INFO"
+                                              text: ${"sync-file-result status=SPLIT_QUEUED " + json.encode_to_string(change)}
                                     - condition: true
                                       steps:
                                         - tally_unknown:
@@ -520,21 +576,15 @@ main:
                           try:
                             call: http.post
                             args:
-                              url: ${sync_url + "/sync/index-gcs"}
+                              url: ${sync_url + "/sync/index-gcs-async"}
                               auth:
                                 type: OIDC
                               body:
+                                driveId: ${drive_id}
                                 gcsUris: ${pending_uris}
                                 fileIds: ${pending_file_ids}
-                              timeout: 900
-                            result: index_resp
-                          retry:
-                            predicate: ${http.default_retry_predicate}
-                            max_retries: 5
-                            backoff:
-                              initial_delay: 5
-                              max_delay: 120
-                              multiplier: 2
+                              timeout: 60
+                            result: index_enqueue_resp
                           except:
                             as: index_err
                             steps:
@@ -551,13 +601,66 @@ main:
                                   args:
                                     severity: "ERROR"
                                     text: ${"index-gcs failed drive=" + drive_id + " uris=" + string(len(pending_uris)) + " " + json.encode_to_string(index_err)}
+                              - log_index_failed_items:
+                                  for:
+                                    value: failed_item
+                                    in: ${pending_items}
+                                    steps:
+                                      - log_index_failed_item:
+                                          call: sys.log
+                                          args:
+                                            severity: "INFO"
+                                            text: ${"sync-file-result status=INDEX_FAILED " + json.encode_to_string(failed_item)}
                               # 색인 실패 시 pageToken 미커밋 → 다음 배치에서 재시도
                               - skip_commit_on_index_fail:
                                   next: reconcile_drive
+                      - init_index_poll:
+                          assign:
+                            - index_job_id: ${index_enqueue_resp.body.jobId}
+                            - index_poll_count: 0
+                      - poll_index_job:
+                          switch:
+                            - condition: ${index_poll_count >= 180}
+                              raise: ${"index job timeout jobId=" + index_job_id}
+                      - wait_index_job:
+                          call: sys.sleep
+                          args:
+                            seconds: 5
+                      - get_index_job:
+                          call: http.get
+                          args:
+                            url: ${sync_url + "/sync/index-jobs/" + index_job_id}
+                            auth:
+                              type: OIDC
+                            timeout: 60
+                          result: index_status_resp
+                      - route_index_job:
+                          switch:
+                            - condition: ${index_status_resp.body.status == "DONE"}
+                              next: index_poll_complete
+                            - condition: ${index_status_resp.body.status == "FAILED"}
+                              raise: ${"index job failed jobId=" + index_job_id + " error=" + default(index_status_resp.body.error, "unknown")}
+                      - continue_index_poll:
+                          assign:
+                            - index_poll_count: ${index_poll_count + 1}
+                          next: poll_index_job
+                      - index_poll_complete:
+                          assign:
+                            - index_resp: ${index_status_resp}
                       - index_ok:
                           assign:
-                            - drive_indexed: ${default(index_resp.body.count, len(pending_uris))}
-                            - totals.indexed: ${totals.indexed + default(index_resp.body.count, len(pending_uris))}
+                            - drive_indexed: ${default(index_resp.body.result.count, len(pending_uris))}
+                            - totals.indexed: ${totals.indexed + default(index_resp.body.result.count, len(pending_uris))}
+                      - log_indexed_items:
+                          for:
+                            value: indexed_item
+                            in: ${pending_items}
+                            steps:
+                              - log_indexed_item:
+                                  call: sys.log
+                                  args:
+                                    severity: "INFO"
+                                    text: ${"sync-file-result status=INDEXED " + json.encode_to_string(indexed_item)}
                   - condition: true
                     steps:
                       - no_index:
@@ -665,8 +768,14 @@ main:
                             severity: "WARNING"
                             text: ${"delta paging stopped with work remaining drive=" + drive_id + " page=" + string(drive_page) + " failed=" + string(drive_failed) + " reconciled=" + string(drive_reconciled) + " — resumes next run"}
 
-    # ----- 6) 자동 복구: 색인 누락(PARSED) → 재색인, 실패(FAILED/DLQ) → ingest 재시도 -----
-    # 워크플로우 본문이 실패해도 여기까지 오면 회수 시도. 복구 실패는 ERROR/failed로 기록.
+    # ----- 6) 명시적 복구: 색인 누락(PARSED) → 재색인, 실패(FAILED/DLQ) → ingest 재시도 -----
+    # 일반 변경분/백필 실행은 여기서 끝난다. 전역 backlog 복구는 runRecovery=true
+    # 로 별도 실행해야 현재 변경분의 소요 시간과 성공 여부를 오염시키지 않는다.
+    - check_recovery_enabled:
+        switch:
+          - condition: ${run_recovery == false}
+            next: return_summary
+
     - recover_pending_index:
         try:
           call: http.post

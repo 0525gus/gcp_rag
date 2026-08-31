@@ -15,6 +15,7 @@ import yaml
 
 import services.sync.main as sync_main
 from shared.drive import DriveClient
+from shared.models import DriveChange
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / "workflows" / "daily_sync.yaml"
@@ -217,6 +218,85 @@ def test_max_changes_defaults_to_settings_and_is_overridable(
     assert drive.max_changes == 50
 
 
+def test_delta_changes_identify_created_updated_and_deleted_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DriveWithChanges:
+        def list_changes(self, *_args: Any, **_kwargs: Any):
+            return [
+                DriveChange(
+                    file_id="created",
+                    drive_id="d",
+                    name="새 파일.txt",
+                    mime_type="text/plain",
+                    created_time="2026-08-31T00:00:00Z",
+                    modified_time="2026-08-31T00:00:00Z",
+                ),
+                # Uploading a local file can preserve its older filesystem mtime,
+                # making createdTime later than modifiedTime.  It is still a new
+                # Drive file and must not be presented as an update.
+                DriveChange(
+                    file_id="created-with-preserved-mtime",
+                    drive_id="d",
+                    name="로컬 업로드.txt",
+                    mime_type="text/plain",
+                    created_time="2026-08-31T00:00:10Z",
+                    modified_time="2026-08-31T00:00:00Z",
+                ),
+                DriveChange(
+                    file_id="updated",
+                    drive_id="d",
+                    name="수정 파일.txt",
+                    mime_type="text/plain",
+                    created_time="2026-08-01T00:00:00Z",
+                    modified_time="2026-08-31T00:00:00Z",
+                ),
+                DriveChange(file_id="deleted", drive_id="d", removed=True),
+            ], "next-token", False
+
+    _wire(monkeypatch, "t0", DriveWithChanges())
+
+    result = sync_main.list_changes(sync_main.ChangesBody(driveId="d"))
+
+    assert [item["operation"] for item in result["changes"]] == [
+        "CREATED",
+        "CREATED",
+        "UPDATED",
+        "DELETED",
+    ]
+
+
+def test_delta_changes_exclude_folder_notifications(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DriveWithFolderNotification:
+        def list_changes(self, *_args: Any, **_kwargs: Any):
+            return [
+                DriveChange(
+                    file_id="parent-folder",
+                    drive_id="d",
+                    name="교직원자료",
+                    mime_type="application/vnd.google-apps.folder",
+                    modified_time="2026-07-31T00:13:04Z",
+                ),
+                DriveChange(
+                    file_id="deleted-file",
+                    drive_id="d",
+                    name="변경분테스트.txt",
+                    mime_type="text/plain",
+                    removed=True,
+                ),
+            ], "next-token", False
+
+    _wire(monkeypatch, "t0", DriveWithFolderNotification())
+
+    result = sync_main.list_changes(sync_main.ChangesBody(driveId="d"))
+
+    assert result["count"] == 1
+    assert [item["fileId"] for item in result["changes"]] == ["deleted-file"]
+    assert result["pendingPageToken"] == "next-token"
+
+
 # ------------------------------------------------------------------ ③ workflow
 def _drive_steps() -> list[dict[str, Any]]:
     data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
@@ -235,6 +315,17 @@ def test_page_loop_target_exists_and_resets_accumulators() -> None:
 
     assert "sync_page" in names, "페이지 루프 진입점이 있어야 한다"
     assert names.index("reset_drive_state") < names.index("sync_page")
+
+
+def test_index_gcs_relies_on_service_retry_and_logs_failed_file_items() -> None:
+    steps = _drive_steps()
+    index_batch = _named(steps, "index_if_needed")["switch"][0]["steps"][0]["index_batch"]
+    assert "retry" not in index_batch
+
+    failure_steps = index_batch["except"]["steps"]
+    failed_item_log = _named(failure_steps, "log_index_failed_items")
+    log_step = failed_item_log["for"]["steps"][0]["log_index_failed_item"]
+    assert "status=INDEX_FAILED" in log_step["args"]["text"]
 
     assigned = {k for entry in _named(steps, "sync_page")["assign"] for k in entry}
     # 페이지마다 초기화돼야 직전 페이지 수치가 새 페이지 정합성 검사를 오염시키지 않는다

@@ -422,16 +422,24 @@ def test_workflow_yaml_parses_and_uses_uris_gate() -> None:
     assert "drive_reconciled == true" in txt
     assert "drive_indexed == drive_gcs" not in txt
     assert "uris: ${drive_uris}" in txt
+    assert "/sync/index-gcs-async" in txt
+    assert "/sync/index-jobs/" in txt
+    assert "index_status_resp.body.status == \"DONE\"" in txt
+    assert "index_status_resp.body.status == \"FAILED\"" in txt
 
 
-def test_workflow_runs_recovery_after_all_drives() -> None:
-    """자동 회수 단계가 드라이브 루프 뒤에 남아 있어야 DLQ가 고착되지 않는다."""
+def test_workflow_runs_explicit_recovery_after_all_drives() -> None:
+    """복구는 드라이브 처리 뒤에 있되 일반 동기화에서는 건너뛴다."""
     import yaml
 
     data = yaml.safe_load((ROOT / "workflows" / "daily_sync.yaml").read_text(encoding="utf-8"))
     names = [next(iter(step)) for step in data["main"]["steps"]]
 
     assert names.index("for_each_drive") < names.index("recover_pending_index")
+    assert names.index("for_each_drive") < names.index("check_recovery_enabled")
+    gate = next(step["check_recovery_enabled"] for step in data["main"]["steps"] if "check_recovery_enabled" in step)
+    assert gate["switch"][0]["condition"] == "${run_recovery == false}"
+    assert gate["switch"][0]["next"] == "return_summary"
     assert names.index("recover_pending_index") < names.index("recover_failed")
     assert names.index("recover_failed") < names.index("return_summary")
 
@@ -442,7 +450,58 @@ def test_workflow_recovery_calls_both_endpoints() -> None:
     assert "/sync/retry-failed" in txt
 
 
+def test_workflow_flattens_delta_index_payload() -> None:
+    txt = (ROOT / "workflows" / "daily_sync.yaml").read_text(encoding="utf-8")
+
+    assert "list.concat(pending_uris, pending_uri)" in txt
+    assert "list.concat(pending_file_ids, change.fileId)" in txt
+    assert "list.concat(pending_uris, ingest_resp.body.gcsUris)" not in txt
+    assert "list.concat(pending_file_ids, [change.fileId])" not in txt
+
+
 # ---------------------------------------------------------------- import 재시도
+def test_throttle_retry_unwraps_runtime_error_args(monkeypatch) -> None:
+    from google.api_core import exceptions as gcp_exceptions
+
+    calls: list[int] = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("wrapped", gcp_exceptions.ResourceExhausted("quota"))
+        return "ok"
+
+    monkeypatch.setattr(rag_engine.time, "sleep", lambda *_: None)
+    assert rag_engine._with_throttle_retry(flaky, what="list_files") == "ok"
+    assert len(calls) == 2
+
+
+def test_list_files_retries_lazy_pager_iteration(monkeypatch) -> None:
+    from google.api_core import exceptions as gcp_exceptions
+
+    calls = 0
+
+    def lazy_list_files(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            def failed_page():
+                raise gcp_exceptions.ResourceExhausted("quota")
+                yield None
+
+            return failed_page()
+        return iter(["rag-file"])
+
+    monkeypatch.setattr(rag_engine.rag, "list_files", lazy_list_files)
+    monkeypatch.setattr(rag_engine.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(rag_engine.random, "uniform", lambda _a, _b: 0)
+    client = object.__new__(rag_engine.RagEngineClient)
+    client.corpus_name = "corpus/test"
+
+    assert client.list_files() == ["rag-file"]
+    assert calls == 2
+
+
 def test_import_retries_on_corpus_busy(monkeypatch) -> None:
     """코퍼스 동시 작업(FailedPrecondition)은 기다리면 풀린다 — 재시도해야 한다.
 

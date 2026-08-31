@@ -107,6 +107,17 @@ $ALLOW_UNAUTH = Get-EnvOr ALLOW_UNAUTH "true"
 $INGEST_CONC = Get-EnvOr INGEST_CONCURRENCY "8"
 $RAG_DEL_PACE = Get-EnvOr RAG_DELETE_PACING_SECONDS "1.1"
 $RAG_DEL_CONC = Get-EnvOr RAG_DELETE_CONCURRENCY "1"
+$RAG_METADATA_BUCKET = Get-EnvOr RAG_METADATA_BUCKET ""
+$RAG_MAPPING_WRITE = Get-EnvOr RAG_MAPPING_WRITE_ENABLED "false"
+$RAG_MAPPING_READ = Get-EnvOr RAG_MAPPING_READ_ENABLED "false"
+$RAG_MAPPING_FALLBACK = Get-EnvOr RAG_MAPPING_FALLBACK_SCAN_ENABLED "true"
+$CLOUD_TASKS_ENABLED = Get-EnvOr CLOUD_TASKS_ENABLED "false"
+$TASK_QUEUE_LOCATION = Get-EnvOr TASK_QUEUE_LOCATION $REGION
+$TASK_QUEUE_FACULTY = Get-EnvOr TASK_QUEUE_FACULTY "faculty-rag-sync-queue"
+$TASK_QUEUE_STUDENT = Get-EnvOr TASK_QUEUE_STUDENT "student-rag-sync-queue"
+$TASK_SERVICE_ACCOUNT = Get-EnvOr TASK_SERVICE_ACCOUNT ""
+$SYNC_TASK_BASE_URL = Get-EnvOr SYNC_TASK_BASE_URL ""
+$INDEX_JOB_TIMEOUT = Get-EnvOr INDEX_JOB_TIMEOUT_SECONDS "900"
 $DOCAI = Get-EnvOr DOCAI_PROCESSOR_ID ""
 $SYNC_FOLDERS = Get-EnvOr SYNC_FOLDER_IDS ""
 $STUDENT_CORPUS = Get-EnvOr RAG_CORPUS_NAME_STUDENT ""
@@ -116,13 +127,22 @@ $GCS_SOURCE = $env:GCS_SOURCE_BUCKET
 $CORPUS = $env:RAG_CORPUS_NAME
 $DRIVE_IDS = $env:DRIVE_IDS
 
+if (-not $TASK_SERVICE_ACCOUNT) {
+  $PROJECT_NUMBER = (gcloud projects describe $PROJECT_ID --format="value(projectNumber)").Trim()
+  if (-not $PROJECT_NUMBER) { throw "프로젝트 번호를 조회하지 못했다: $PROJECT_ID" }
+  $TASK_SERVICE_ACCOUNT = "${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+}
+if (-not $SYNC_TASK_BASE_URL) {
+  $SYNC_TASK_BASE_URL = (gcloud run services describe rag-sync --region=$REGION --project=$PROJECT_ID --format="value(status.url)" 2>$null).Trim()
+}
+
 # ---- 1.5 Cloud Run env (배포와 -EnvOnly 가 같은 문자열을 쓴다) ----
 # --set-env-vars 는 env 를 통째로 치환한다. 여기 없는 값은 서비스에서 사라진다.
 # DRIVE_IDS / SYNC_FOLDER_IDS 에 콤마가 있어 구분자는 | (^|^...).
 $parserEnv = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|RAG_CORPUS_NAME=$CORPUS|DOCAI_PROCESSOR_ID=$DOCAI|QG_MODE=$QG_MODE|FIRESTORE_DATABASE=$FS_DB|DOC_STATE_COLLECTION=$FS_COL"
 # DEPARTMENTS_JSON 이 학과 라우팅 스위치다: 비거나 깨지면 sync 는 폴백해서 전 학과
 # 문서를 아래 RAG_CORPUS_NAME 하나에 몰아넣는다(단일 학과 동작).
-$syncEnv = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|RAG_CORPUS_NAME=$CORPUS|DRIVE_IDS=$DRIVE_IDS|SYNC_FOLDER_IDS=$SYNC_FOLDERS|DOC_STATE_COLLECTION=$FS_COL|FIRESTORE_DATABASE=$FS_DB|QG_MODE=$QG_MODE|INGEST_CONCURRENCY=$INGEST_CONC|RAG_DELETE_PACING_SECONDS=$RAG_DEL_PACE|RAG_DELETE_CONCURRENCY=$RAG_DEL_CONC|RAG_CORPUS_NAME_STUDENT=$STUDENT_CORPUS|STUDENT_FOLDER_IDS=$STUDENT_FOLDERS|DEPARTMENTS_JSON=$DEPARTMENTS_JSON"
+$syncEnv = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|RAG_CORPUS_NAME=$CORPUS|DRIVE_IDS=$DRIVE_IDS|SYNC_FOLDER_IDS=$SYNC_FOLDERS|DOC_STATE_COLLECTION=$FS_COL|FIRESTORE_DATABASE=$FS_DB|QG_MODE=$QG_MODE|INGEST_CONCURRENCY=$INGEST_CONC|RAG_DELETE_PACING_SECONDS=$RAG_DEL_PACE|RAG_DELETE_CONCURRENCY=$RAG_DEL_CONC|RAG_METADATA_BUCKET=$RAG_METADATA_BUCKET|RAG_MAPPING_WRITE_ENABLED=$RAG_MAPPING_WRITE|RAG_MAPPING_READ_ENABLED=$RAG_MAPPING_READ|RAG_MAPPING_FALLBACK_SCAN_ENABLED=$RAG_MAPPING_FALLBACK|CLOUD_TASKS_ENABLED=$CLOUD_TASKS_ENABLED|TASK_QUEUE_LOCATION=$TASK_QUEUE_LOCATION|TASK_QUEUE_FACULTY=$TASK_QUEUE_FACULTY|TASK_QUEUE_STUDENT=$TASK_QUEUE_STUDENT|TASK_SERVICE_ACCOUNT=$TASK_SERVICE_ACCOUNT|SYNC_TASK_BASE_URL=$SYNC_TASK_BASE_URL|INDEX_JOB_TIMEOUT_SECONDS=$INDEX_JOB_TIMEOUT|RAG_CORPUS_NAME_STUDENT=$STUDENT_CORPUS|STUDENT_FOLDER_IDS=$STUDENT_FOLDERS|DEPARTMENTS_JSON=$DEPARTMENTS_JSON"
 
 Write-Host "== 학과 $($DEPT_CODES.Count) 개: $($DEPT_CODES -join ', ') =="
 Write-Host "   parser/sync 기본값은 '$BASE_DEPT' · 드라이브는 전 학과 union"
@@ -161,6 +181,7 @@ gcloud services enable `
   artifactregistry.googleapis.com `
   secretmanager.googleapis.com `
   cloudbuild.googleapis.com `
+  cloudtasks.googleapis.com `
   --project=$PROJECT_ID
 Assert-LastExit
 
@@ -282,6 +303,57 @@ $PARSER_URL = gcloud run services describe rag-parser --region=$REGION --format=
 Assert-LastExit
 $SYNC_URL = gcloud run services describe rag-sync --region=$REGION --format="value(status.url)"
 Assert-LastExit
+
+# 첫 배포 때는 서비스 URL을 env 구성 시점에 알 수 없다. 조회 뒤 task target URL만
+# merge 갱신한다. 이후 -EnvOnly도 위의 describe 결과를 그대로 사용한다.
+if ($SYNC_TASK_BASE_URL -ne $SYNC_URL.Trim()) {
+  gcloud run services update rag-sync --region=$REGION --project=$PROJECT_ID `
+    --update-env-vars="SYNC_TASK_BASE_URL=$($SYNC_URL.Trim())"
+  Assert-LastExit
+  $SYNC_TASK_BASE_URL = $SYNC_URL.Trim()
+}
+
+# ---- 7.5 Cloud Tasks queues / IAM ----
+# 한 코퍼스는 동시에 import/delete를 받을 수 없으므로 queue별 동시 실행은 1이다.
+# 0.2/s는 시작 간격의 상한이고, 실제 처리(약 10~20초)가 더 느려 자연스럽게
+# 분당 3~6회 수준이 된다. 교직원/학생은 서로 다른 코퍼스라 두 큐가 병렬 가능하다.
+Write-Host "== Cloud Tasks queues =="
+$PROJECT_NUMBER = (gcloud projects describe $PROJECT_ID --format="value(projectNumber)").Trim()
+$TASKS_AGENT = "service-${PROJECT_NUMBER}@gcp-sa-cloudtasks.iam.gserviceaccount.com"
+gcloud projects add-iam-policy-binding $PROJECT_ID `
+  --member="serviceAccount:${TASK_SERVICE_ACCOUNT}" `
+  --role="roles/cloudtasks.enqueuer" --condition=None | Out-Null
+Assert-LastExit
+gcloud iam service-accounts add-iam-policy-binding $TASK_SERVICE_ACCOUNT `
+  --project=$PROJECT_ID `
+  --member="serviceAccount:${TASKS_AGENT}" `
+  --role="roles/iam.serviceAccountTokenCreator" | Out-Null
+Assert-LastExit
+gcloud run services add-iam-policy-binding rag-sync `
+  --region=$REGION --project=$PROJECT_ID `
+  --member="serviceAccount:${TASK_SERVICE_ACCOUNT}" `
+  --role="roles/run.invoker" | Out-Null
+Assert-LastExit
+
+foreach ($queue in @($TASK_QUEUE_FACULTY, $TASK_QUEUE_STUDENT)) {
+  gcloud tasks queues describe $queue --location=$TASK_QUEUE_LOCATION --project=$PROJECT_ID 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    gcloud tasks queues update $queue `
+      --location=$TASK_QUEUE_LOCATION --project=$PROJECT_ID `
+      --max-dispatches-per-second=0.2 --max-concurrent-dispatches=1 `
+      --max-attempts=5 --max-retry-duration=900s `
+      --min-backoff=2s --max-backoff=60s --max-doublings=5 `
+      --log-sampling-ratio=1.0
+  } else {
+    gcloud tasks queues create $queue `
+      --location=$TASK_QUEUE_LOCATION --project=$PROJECT_ID `
+      --max-dispatches-per-second=0.2 --max-concurrent-dispatches=1 `
+      --max-attempts=5 --max-retry-duration=900s `
+      --min-backoff=2s --max-backoff=60s --max-doublings=5 `
+      --log-sampling-ratio=1.0
+  }
+  Assert-LastExit
+}
 
 Write-Host "PARSER_URL=$PARSER_URL"
 Write-Host "SYNC_URL=$SYNC_URL"

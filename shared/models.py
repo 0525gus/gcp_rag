@@ -207,6 +207,7 @@ class DriveChange:
     drive_id: str
     name: str = ""
     mime_type: str = ""
+    created_time: str | None = None
     modified_time: str | None = None
     removed: bool = False
     trashed: bool = False

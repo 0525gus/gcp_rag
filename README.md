@@ -263,10 +263,12 @@ gcloud workflows run rag-daily-sync --location=$R --project=$P `
 |---|---|---|
 | `backfill` | `false` | `true` = 전체 재수집. **처음엔 이걸로** |
 | `maxChanges` | 200 | 델타 1페이지당 변경 수 (Workflows 변수 512KB 한도 대비) |
-| `indexBatchSize` | 50 | RAG import 배치 |
-| `recoverLimit` | 200 | DLQ 회수 상한 |
+| `indexBatchSize` | 24 | RAG import 배치(복구 API 상한 25 이하) |
+| `runRecovery` | `false` | `true`일 때 과거 미색인·실패 문서 복구 실행 |
+| `recoverLimit` | 200 | `runRecovery=true` 실행의 회수 상한 |
 
 - `backfill` 없이 돌리면 델타 모드다. 다만 **최초 토큰이 없으면 자동으로 백필 스냅샷**을 탄다
+- 과거 미색인·실패 문서 복구는 일반 동기화와 분리되어 있다. 필요할 때 `runRecovery:true`로 별도 실행한다
 - 콘솔에서도 된다: Workflows → `rag-daily-sync` → 실행 → 위 JSON 붙여넣기
 
 진행 확인:
@@ -275,6 +277,39 @@ gcloud workflows run rag-daily-sync --location=$R --project=$P `
 gcloud workflows executions list --workflow=rag-daily-sync --location=$R --project=$P --limit=3
 gcloud logging read 'resource.labels.service_name="rag-sync"' --project=$P --limit=30
 ```
+
+### RAG 파일 매핑과 삭제 성능
+
+`rag-sync`는 Vertex import 결과를 `doc_state/{driveFileId}/rag_files`에 기록한다.
+삭제·수정 시 이 매핑으로 RagFile resource name을 바로 찾아 코퍼스 전체 순회를
+피한다. `RAG_MAPPING_FALLBACK_SCAN_ENABLED=true`인 동안 매핑이 없는 파일만 기존
+전체 스캔으로 안전하게 보완한다.
+
+기존 코퍼스는 읽기 전환 전에 다음 관리 API를 `dryRun=true`로 확인한 뒤
+`false`로 한 번 backfill한다.
+
+```json
+{"driveId":"<공유드라이브ID>","dryRun":true}
+```
+
+호출 경로는 `POST /sync/backfill-rag-mappings`다. `listed == mappable`,
+`skipped == 0`을 확인한 뒤 적용한다. 운영 스위치는 다음과 같다.
+
+- `RAG_MAPPING_WRITE_ENABLED`: Vertex import result sink를 Firestore에 기록
+- `RAG_MAPPING_READ_ENABLED`: 삭제 시 Firestore 매핑을 우선 사용
+- `RAG_MAPPING_FALLBACK_SCAN_ENABLED`: 매핑 누락 시 코퍼스 스캔 허용
+- `RAG_METADATA_BUCKET`: import result NDJSON 임시 보관 버킷
+
+### 비동기 코퍼스 색인
+
+변경분 색인은 `POST /sync/index-gcs-async`가 job을 만든 뒤 교직원·학생 코퍼스를
+각각 `faculty-rag-sync-queue`, `student-rag-sync-queue`로 보낸다. 두 파트는 서로
+독립적으로 재시도되며 모두 성공한 뒤에만 job이 `DONE`, 문서가 `INDEXED`가 된다.
+Workflow는 `GET /sync/index-jobs/{jobId}`를 폴링하고 `DONE`일 때만 pageToken을
+커밋한다.
+
+큐 기본값은 코퍼스별 동시 실행 1, 시작률 0.2/s, 최대 5회, backoff 2~60초다.
+한 코퍼스가 동시 import/delete를 받지 않도록 동시성을 1로 유지한다.
 
 ---
 

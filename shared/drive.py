@@ -17,7 +17,7 @@ from shared.path_context import PathContext, build_path_context
 logger = logging.getLogger(__name__)
 
 FILE_FIELDS = (
-    "id,name,mimeType,modifiedTime,trashed,md5Checksum,"
+    "id,name,mimeType,createdTime,modifiedTime,trashed,md5Checksum,"
     # size 는 다운로드 '전에' 크기를 거르기 위해 필요하다. 받아 놓고 재면 이미
     # 메모리를 점유한 뒤라, 백필의 병렬 워커가 큰 파일을 동시에 물면 OOM 이다.
     # Google 네이티브(Docs/Sheets/Slides)는 blob 이 아니라서 이 필드가 없다.
@@ -318,6 +318,7 @@ class DriveClient:
             drive_id=file_meta.get("driveId") or drive_id,
             name=file_meta.get("name") or "",
             mime_type=file_meta.get("mimeType") or "",
+            created_time=file_meta.get("createdTime"),
             modified_time=file_meta.get("modifiedTime"),
             removed=removed or trashed,
             trashed=trashed,

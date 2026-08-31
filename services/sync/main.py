@@ -18,6 +18,7 @@ import re
 import sys
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -50,8 +51,14 @@ from shared.path_context import (  # noqa: E402
     PathContext,
     build_breadcrumb_markdown,
 )
-from shared.rag_engine import ImportOutcome, RagEngineClient  # noqa: E402
+from shared.rag_engine import (  # noqa: E402
+    ImportOutcome,
+    RagEngineClient,
+    RagImportThrottledError,
+)
+from shared.rag_mapping import RagFileMapping, RagFileMappingStore  # noqa: E402
 from shared.search_postprocess import extract_file_id  # noqa: E402
+from shared.task_queue import IndexTaskQueue  # noqa: E402
 
 setup_logging()
 logger = logging.getLogger("sync_service")
@@ -128,6 +135,18 @@ class IngestBody(BaseModel):
 class IndexGcsBody(BaseModel):
     gcs_uris: list[str] = Field(..., alias="gcsUris")
     file_ids: list[str] = Field(default_factory=list, alias="fileIds")
+    drive_id: str | None = Field(default=None, alias="driveId")
+
+    model_config = {"populate_by_name": True}
+
+
+class IndexGcsTaskBody(BaseModel):
+    job_id: str = Field(..., alias="jobId")
+    part_id: str = Field(..., alias="partId")
+    drive_id: str = Field(..., alias="driveId")
+    audience: str
+    gcs_uris: list[str] = Field(..., alias="gcsUris")
+    file_ids: list[str] = Field(..., alias="fileIds")
 
     model_config = {"populate_by_name": True}
 
@@ -137,6 +156,12 @@ class DeleteBody(BaseModel):
     drive_id: str | None = Field(default=None, alias="driveId")
 
     model_config = {"populate_by_name": True}
+
+
+class BackfillRagMappingsBody(DriveIdBody):
+    # 기본은 조회만 한다. 운영자가 결과 건수를 확인한 뒤 명시적으로 false를
+    # 보내야 Firestore를 변경하므로 잘못된 학과/코퍼스 선택을 조기에 잡을 수 있다.
+    dry_run: bool = Field(default=True, alias="dryRun")
 
 
 class ReconcileBody(BaseModel):
@@ -478,12 +503,27 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
                 )
             publish_progress("INDEXING", force=True)
             with index_lock:
-                indexed = _import_and_mark(store, uris, ids, rag=rag).imported
+                split_enabled = settings.audience_split_enabled
+                part = _import_and_mark(
+                    store,
+                    uris,
+                    ids,
+                    rag=rag,
+                    mark_indexed=not split_enabled,
+                    mapping_settings=settings,
+                    corpus_type="FACULTY",
+                )
+                indexed = part.imported
                 # 학생 코퍼스도 같은 배치에서 맞춘다. 델타 경로는 /sync/index-gcs
                 # 가 대신 해 주지만 백필은 그 엔드포인트를 거치지 않는다. 여기를
                 # 빼면 **초기 적재 직후 학생 코퍼스가 통째로 비어 있고**, 그 문서들은
                 # 이미 INDEXED 라 이후 델타에도 안 걸려 영영 안 채워진다.
-                _sync_student_corpus(uris, ids, settings, store)
+                student = _sync_student_corpus(uris, ids, settings, store)
+                if split_enabled:
+                    if not bool(student.get("ok", True)):
+                        raise RuntimeError("student corpus import incomplete")
+                    if part.ok:
+                        _mark_indexed_states(store, ids)
         except Exception:  # noqa: BLE001
             logger.exception("backfill index flush failed")
             return len(dict.fromkeys(ids))
@@ -667,6 +707,11 @@ def list_changes(body: ChangesBody) -> dict[str, Any]:
     routed: list[dict[str, Any]] = []
     skipped_out_of_scope = 0
     for ch in changes:
+        # Drive changes 피드는 파일 생성/삭제 시 상위 폴더의 변경 레코드도 함께
+        # 보낼 수 있다. 폴더 자체는 다운로드·색인·삭제할 대상이 아니므로 Workflow
+        # 집계로 넘기지 않는다. pageToken 은 응답 전체 기준으로 계속 전진한다.
+        if ch.mime_type == "application/vnd.google-apps.folder":
+            continue
         kind = classify_route(ch.mime_type, ch.name, removed=ch.removed)
         skip_reason: str | None = None
         if folder_ids and kind != RouteKind.DELETE:
@@ -685,6 +730,19 @@ def list_changes(body: ChangesBody) -> dict[str, Any]:
             "driveId": ch.drive_id,
             "name": ch.name,
             "mimeType": ch.mime_type,
+            "operation": (
+                "DELETED"
+                if kind == RouteKind.DELETE
+                else "CREATED"
+                # Drive uploads may preserve the local file's older mtime.  In that
+                # case createdTime is *later* than modifiedTime even though this is
+                # a brand-new Drive file (observed with desktop-uploaded TXT files).
+                # Exact equality therefore mislabels new uploads as UPDATED.
+                if ch.created_time
+                and ch.modified_time
+                and ch.created_time >= ch.modified_time
+                else "UPDATED"
+            ),
             "modifiedTime": ch.modified_time,
             "removed": ch.removed,
             "webViewLink": ch.web_view_link,
@@ -1799,6 +1857,17 @@ def _sync_student_corpus(
         outcome.imported if outcome else 0,
         len(gcs_uris),
     )
+    if outcome is None or outcome.ok:
+        _write_rag_mappings(
+            state_store=store,
+            settings=settings,
+            corpus_type="STUDENT",
+            corpus_name=settings.rag_corpus_name_student,
+            gcs_uris=student_uris,
+            file_ids=sorted(touched),
+            outcome=outcome or ImportOutcome([], 0, 0, 0),
+            clear_without_uri=True,
+        )
     return {
         "enabled": True,
         "imported": outcome.imported if outcome else 0,
@@ -1851,7 +1920,192 @@ def _merge_outcomes(a: ImportOutcome, b: ImportOutcome) -> ImportOutcome:
         imported=a.imported + b.imported,
         failed=a.failed + b.failed,
         skipped=a.skipped + b.skipped,
+        results=a.results + b.results,
+        result_sinks=a.result_sinks + b.result_sinks,
     )
+
+
+def _write_rag_mappings(
+    *,
+    state_store: DocStateStore,
+    settings: Settings,
+    corpus_type: str,
+    corpus_name: str,
+    gcs_uris: list[str],
+    file_ids: list[str],
+    outcome: ImportOutcome,
+    clear_without_uri: bool = False,
+) -> dict[str, int | bool]:
+    """성공한 import sink를 Firestore에 write-only로 반영한다.
+
+    sink가 늦거나 파싱할 수 없으면 기존 매핑을 보존한다. 매핑은 삭제 최적화용
+    보조 인덱스이므로, 관측 실패 때문에 이미 성공한 RAG import를 실패로 바꾸지
+    않는다. 학생 대상이 아닌 파일은 학생 코퍼스 삭제 성공 뒤 빈 목록으로 교체해
+    예전 매핑을 제거한다.
+    """
+    if not getattr(settings, "rag_mapping_write_enabled", False):
+        return {"enabled": False, "written": 0, "deferred": 0, "failed": 0}
+
+    try:
+        mapping_store = RagFileMappingStore(settings)
+    except Exception:  # mapping 관측 실패가 실제 색인을 실패시키면 안 된다.
+        logger.exception("RAG mapping store initialization failed")
+        return {"enabled": True, "written": 0, "deferred": len(file_ids), "failed": 1}
+
+    requested_by_file: dict[str, list[str]] = {}
+    for uri in gcs_uris:
+        fid = extract_file_id(uri)
+        if _FILE_ID_RE.match(fid):
+            requested_by_file.setdefault(fid, []).append(uri)
+
+    successful_by_uri: dict[str, list[Any]] = {}
+    for result in outcome.results:
+        if result.succeeded and result.gcs_uri and result.rag_file_name:
+            successful_by_uri.setdefault(result.gcs_uri, []).append(result)
+
+    targets = list(dict.fromkeys([*file_ids, *requested_by_file.keys()]))
+    written = 0
+    deferred = 0
+    failed = 0
+    for fid in targets:
+        expected = list(dict.fromkeys(requested_by_file.get(fid, [])))
+        if not expected:
+            if not clear_without_uri:
+                continue
+            rows: list[RagFileMapping] = []
+        else:
+            missing = [uri for uri in expected if not successful_by_uri.get(uri)]
+            if missing:
+                deferred += 1
+                logger.warning(
+                    "RAG mapping deferred corpus=%s fileId=%s missingSinkRows=%s",
+                    corpus_type,
+                    fid,
+                    len(missing),
+                )
+                continue
+            state = state_store.get(fid)
+            generation = str(state.content_hash or "") if state else ""
+            rows = [
+                RagFileMapping(
+                    file_id=fid,
+                    corpus_type=corpus_type,
+                    corpus_name=corpus_name,
+                    rag_file_name=result.rag_file_name,
+                    gcs_uri=result.gcs_uri,
+                    generation=generation,
+                    import_result_sink=result.import_result_sink,
+                )
+                for uri in expected
+                for result in successful_by_uri[uri]
+            ]
+        try:
+            mapping_store.replace_for_corpus(fid, corpus_type, rows)
+            written += len(rows)
+        except Exception:  # mapping 관측 실패가 실제 색인을 실패시키면 안 된다.
+            failed += 1
+            logger.exception(
+                "RAG mapping write failed corpus=%s fileId=%s",
+                corpus_type,
+                fid,
+            )
+    return {"enabled": True, "written": written, "deferred": deferred, "failed": failed}
+
+
+def _mapping_from_existing_rag_file(
+    rag_file: Any,
+    *,
+    corpus_type: str,
+    corpus_name: str,
+) -> RagFileMapping | None:
+    """기존 Vertex RagFile을 Firestore backfill 행으로 정규화한다."""
+    resource_name = str(getattr(rag_file, "name", "") or "").strip()
+    display_name = str(getattr(rag_file, "display_name", "") or "").strip()
+    source_uri = str(getattr(rag_file, "source_uri", "") or "").strip()
+    if not resource_name:
+        return None
+
+    identity = source_uri if source_uri.startswith("gs://") else display_name
+    file_id = extract_file_id(identity)
+    if not _FILE_ID_RE.fullmatch(file_id):
+        return None
+    # 일부 SDK의 list 응답에는 source_uri가 없다. 직접 삭제에는 resource_name만
+    # 필요하므로 빈 URI도 유효하며 mapping_id는 resource_name으로 안정화된다.
+    gcs_uri = source_uri if source_uri.startswith("gs://") else ""
+    if not gcs_uri and display_name.startswith("gs://"):
+        gcs_uri = display_name
+    return RagFileMapping(
+        file_id=file_id,
+        corpus_type=corpus_type,
+        corpus_name=corpus_name,
+        rag_file_name=resource_name,
+        gcs_uri=gcs_uri,
+        generation="",
+        status="BACKFILLED",
+    )
+
+
+@app.post("/sync/backfill-rag-mappings")
+def backfill_rag_mappings(body: BackfillRagMappingsBody) -> dict[str, Any]:
+    """기존 코퍼스를 각 1회 순회해 Firestore 삭제 인덱스를 채운다."""
+    settings = _settings_for_drive(get_settings(), body.drive_id)
+    if not settings.rag_mapping_write_enabled:
+        raise HTTPException(409, "RAG mapping write is disabled")
+
+    corpora: list[tuple[str, str]] = [("FACULTY", settings.rag_corpus_name)]
+    if settings.audience_split_enabled:
+        corpora.append(("STUDENT", settings.rag_corpus_name_student))
+
+    seen_corpora: set[tuple[str, str]] = set()
+    summaries: list[dict[str, Any]] = []
+    store = None if body.dry_run else RagFileMappingStore(settings)
+    for corpus_type, corpus_name in corpora:
+        key = (corpus_type, corpus_name)
+        if not corpus_name or key in seen_corpora:
+            continue
+        seen_corpora.add(key)
+
+        try:
+            rag_files = RagEngineClient(settings, corpus_name=corpus_name).list_files()
+        except RagImportThrottledError as exc:
+            # 관리 호출도 실제 쿼터 의미를 보존해야 호출자가 backoff할 수 있다.
+            # 500이면 Workflows/운영자가 즉시 재시도해 같은 분당 창을 더 두드린다.
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
+        mappings = [
+            mapping
+            for item in rag_files
+            if (
+                mapping := _mapping_from_existing_rag_file(
+                    item,
+                    corpus_type=corpus_type,
+                    corpus_name=corpus_name,
+                )
+            )
+            is not None
+        ]
+        written = 0 if store is None else store.upsert_many(mappings)
+        summaries.append(
+            {
+                "corpusType": corpus_type,
+                "corpusName": corpus_name,
+                "listed": len(rag_files),
+                "mappable": len(mappings),
+                "skipped": len(rag_files) - len(mappings),
+                "written": written,
+            }
+        )
+
+    return {
+        "driveId": body.drive_id,
+        "dryRun": body.dry_run,
+        "corpora": summaries,
+        "totals": {
+            "listed": sum(row["listed"] for row in summaries),
+            "mappable": sum(row["mappable"] for row in summaries),
+            "skipped": sum(row["skipped"] for row in summaries),
+            "written": sum(row["written"] for row in summaries),
+        },
+    }
 
 
 def _settings_for_drive(base: Settings, drive_id: str | None) -> Settings:
@@ -1923,6 +2177,9 @@ def _import_and_mark(
     file_ids: list[str],
     *,
     rag: Any | None = None,
+    mark_indexed: bool = True,
+    mapping_settings: Settings | None = None,
+    corpus_type: str = "FACULTY",
 ) -> ImportOutcome:
     """이번 배치의 기존 청크만 제거 → import → **전량 성공일 때만** INDEXED 전환.
 
@@ -1956,6 +2213,27 @@ def _import_and_mark(
             outcome.skipped,
         )
         return outcome
+    if mapping_settings is not None and getattr(
+        mapping_settings, "rag_mapping_write_enabled", False
+    ):
+        _write_rag_mappings(
+            state_store=store,
+            settings=mapping_settings,
+            corpus_type=corpus_type,
+            corpus_name=str(
+                getattr(client, "corpus_name", mapping_settings.rag_corpus_name)
+            ),
+            gcs_uris=gcs_uris,
+            file_ids=file_ids,
+            outcome=outcome,
+        )
+    if mark_indexed:
+        _mark_indexed_states(store, file_ids)
+    return outcome
+
+
+def _mark_indexed_states(store: DocStateStore, file_ids: list[str]) -> None:
+    """모든 필수 코퍼스 동기화가 끝난 뒤 문서 상태를 INDEXED로 확정한다."""
     for fid in dict.fromkeys(file_ids):
         existing = store.get(fid)
         if existing:
@@ -1963,7 +2241,6 @@ def _import_and_mark(
             store.upsert(existing)
         else:
             store.mark_indexed(fid)
-    return outcome
 
 
 @app.post("/sync/index-gcs")
@@ -1994,15 +2271,35 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
     for dept_settings, uris, ids in _split_by_drive(
         store, body.gcs_uris, file_ids, settings
     ):
-        part = _import_and_mark(
-            store, uris, ids, rag=RagEngineClient(dept_settings)
-        )
+        split_enabled = dept_settings.audience_split_enabled
+        try:
+            part = _import_and_mark(
+                store,
+                uris,
+                ids,
+                rag=RagEngineClient(dept_settings),
+                # 학생 코퍼스까지 모두 성공해야 INDEXED로 확정한다. 먼저 확정하면
+                # 학생 실패 뒤 재실행이 UNCHANGED로 빠져 누락을 영구화한다.
+                mark_indexed=not split_enabled,
+                mapping_settings=dept_settings,
+                corpus_type="FACULTY",
+            )
+            student = _sync_student_corpus(uris, ids, dept_settings, store)
+        except RagImportThrottledError as exc:
+            # 500으로 뭉개면 Workflow의 일반 5xx 재시도가 내부 backoff와 곱해져
+            # 쿼터 회복 전에 같은 요청을 여섯 번 반복한다. 호출자와 UI에 원인을
+            # 보존하고, 다음 delta 실행이 pageToken 미커밋 변경을 회수하게 한다.
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         outcome = _merge_outcomes(outcome, part)
 
-        # 교직원 코퍼스가 끝난 뒤에 학생 코퍼스를 맞춘다. 순서가 중요하다 — 학생
-        # 코퍼스가 실패해도 교직원 쪽 색인과 doc_state 는 이미 확정돼 있어야
-        # 다음 배치가 같은 일을 처음부터 다시 하지 않는다.
-        student = _sync_student_corpus(uris, ids, dept_settings, store)
+        if split_enabled:
+            if not bool(student.get("ok", True)):
+                raise HTTPException(
+                    status_code=502,
+                    detail="student corpus import incomplete",
+                )
+            if part.ok:
+                _mark_indexed_states(store, ids)
 
     return {
         # 하위 호환: 예전부터 '보낸 URI 목록'이었다. 성공 목록이 아니다.
@@ -2017,6 +2314,275 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
         "droppedFileIds": len(bad_ids),
         "student": student,
         "status": "INDEXED" if outcome.ok else "PARTIAL",
+    }
+
+
+def _index_job_refs(settings: Settings, job_id: str):
+    store = DocStateStore(settings)
+    job = store._db.collection(settings.sync_job_collection).document(job_id)  # noqa: SLF001
+    return store, job, job.collection("parts")
+
+
+def _finalize_index_job(settings: Settings, job_id: str) -> dict[str, Any]:
+    """Mark a split job DONE only after every required corpus part succeeds."""
+    from google.cloud import firestore
+
+    store, job_ref, parts_ref = _index_job_refs(settings, job_id)
+    snap = job_ref.get()
+    if not snap.exists:
+        raise HTTPException(404, "index job not found")
+    job = snap.to_dict() or {}
+    expected = [str(item) for item in job.get("expectedParts") or []]
+    parts: list[dict[str, Any]] = []
+    for part_id in expected:
+        part_snap = parts_ref.document(part_id).get()
+        parts.append(part_snap.to_dict() or {})
+    if not expected or any(part.get("status") != "DONE" for part in parts):
+        return {"status": str(job.get("status") or "RUNNING")}
+
+    # 학생 태스크가 먼저 성공해도 교직원 태스크까지 끝나기 전에는 이 상태 전이를
+    # 하지 않는다. 둘 중 하나라도 재시도 중이면 문서는 PARSED에 남는다.
+    file_ids = [str(fid) for fid in job.get("fileIds") or []]
+    _mark_indexed_states(store, file_ids)
+    faculty = [part for part in parts if part.get("audience") == "FACULTY"]
+    result = {
+        "count": sum(int(part.get("count") or 0) for part in faculty),
+        "failed": sum(int(part.get("failed") or 0) for part in parts),
+        "skipped": sum(int(part.get("skipped") or 0) for part in parts),
+        "student": next(
+            (part.get("result") for part in parts if part.get("audience") == "STUDENT"),
+            {"enabled": False},
+        ),
+    }
+    job_ref.set(
+        {
+            "status": "DONE",
+            "result": result,
+            "completedAt": firestore.SERVER_TIMESTAMP,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+    return {"status": "DONE", **result}
+
+
+@app.post("/sync/index-gcs-async", status_code=202)
+def index_gcs_async(body: IndexGcsBody) -> dict[str, Any]:
+    """Enqueue faculty/student indexing as independently retried tasks."""
+    from google.cloud import firestore
+
+    settings = get_settings()
+    if not settings.cloud_tasks_enabled:
+        raise HTTPException(409, "Cloud Tasks indexing is disabled")
+    if not body.gcs_uris:
+        return {"status": "DONE", "count": 0, "jobId": ""}
+    if not body.drive_id:
+        raise HTTPException(422, "driveId is required for async indexing")
+
+    dept_settings = _settings_for_drive(settings, body.drive_id)
+    file_ids, bad_ids = _clean_file_ids(body.file_ids)
+    if bad_ids:
+        raise HTTPException(422, f"malformed fileIds: {bad_ids[:5]}")
+    validation_store = DocStateStore(settings)
+    for fid in file_ids:
+        state = validation_store.get(fid)
+        if state and state.drive_id and state.drive_id != body.drive_id:
+            raise HTTPException(409, f"file belongs to another drive: {fid}")
+
+    job_id = uuid.uuid4().hex
+    parts: list[dict[str, Any]] = [
+        {
+            "partId": "faculty",
+            "audience": "FACULTY",
+            "queue": settings.task_queue_faculty,
+        }
+    ]
+    if dept_settings.audience_split_enabled:
+        parts.append(
+            {
+                "partId": "student",
+                "audience": "STUDENT",
+                "queue": settings.task_queue_student,
+            }
+        )
+
+    job_store, job_ref, parts_ref = _index_job_refs(settings, job_id)
+    deadline = datetime.now(UTC) + timedelta(
+        seconds=settings.index_job_timeout_seconds
+    )
+    batch = job_store._db.batch()  # noqa: SLF001
+    batch.set(
+        job_ref,
+        {
+            "jobId": job_id,
+            "kind": "INDEX_GCS",
+            "status": "RUNNING",
+            "driveId": body.drive_id,
+            "fileIds": file_ids,
+            "requestedUris": len(body.gcs_uris),
+            "expectedParts": [part["partId"] for part in parts],
+            "deadlineAt": deadline,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "updatedAt": firestore.SERVER_TIMESTAMP,
+        },
+    )
+    for part in parts:
+        batch.set(
+            parts_ref.document(part["partId"]),
+            {
+                "partId": part["partId"],
+                "audience": part["audience"],
+                "status": "QUEUED",
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            },
+        )
+    batch.commit()
+
+    producer = IndexTaskQueue(settings)
+    try:
+        for part in parts:
+            producer.enqueue(
+                queue=part["queue"],
+                task_id=f"{job_id}-{part['partId']}",
+                payload={
+                    "jobId": job_id,
+                    "partId": part["partId"],
+                    "driveId": body.drive_id,
+                    "audience": part["audience"],
+                    "gcsUris": body.gcs_uris,
+                    "fileIds": file_ids,
+                },
+            )
+    except Exception as exc:
+        job_ref.set(
+            {
+                "status": "FAILED",
+                "error": f"task enqueue failed: {exc}"[:2000],
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+        raise HTTPException(503, "failed to enqueue index tasks") from exc
+    return {
+        "jobId": job_id,
+        "status": "RUNNING",
+        "parts": [part["partId"] for part in parts],
+        "requestedUris": len(body.gcs_uris),
+    }
+
+
+@app.post("/sync/index-gcs-task")
+def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
+    """Cloud Tasks worker. A non-2xx response triggers queue-level retry."""
+    from google.cloud import firestore
+
+    settings = get_settings()
+    if not settings.cloud_tasks_enabled:
+        raise HTTPException(409, "Cloud Tasks indexing is disabled")
+    if body.audience not in {"FACULTY", "STUDENT"}:
+        raise HTTPException(422, "audience must be FACULTY or STUDENT")
+    dept_settings = _settings_for_drive(settings, body.drive_id)
+    store, job_ref, parts_ref = _index_job_refs(settings, body.job_id)
+    part_ref = parts_ref.document(body.part_id)
+    existing = part_ref.get()
+    if existing.exists and (existing.to_dict() or {}).get("status") == "DONE":
+        return {"status": "DONE", "idempotent": True}
+
+    part_ref.set(
+        {"status": "RUNNING", "updatedAt": firestore.SERVER_TIMESTAMP}, merge=True
+    )
+    try:
+        if body.audience == "FACULTY":
+            outcome = _import_and_mark(
+                store,
+                body.gcs_uris,
+                body.file_ids,
+                rag=RagEngineClient(dept_settings),
+                mark_indexed=False,
+                mapping_settings=dept_settings,
+                corpus_type="FACULTY",
+            )
+            if not outcome.ok:
+                raise RuntimeError(
+                    "faculty import incomplete "
+                    f"imported={outcome.imported} failed={outcome.failed} "
+                    f"skipped={outcome.skipped}"
+                )
+            result: dict[str, Any] = {
+                "count": outcome.imported,
+                "failed": outcome.failed,
+                "skipped": outcome.skipped,
+            }
+        else:
+            student = _sync_student_corpus(
+                body.gcs_uris, body.file_ids, dept_settings, store
+            )
+            if not bool(student.get("ok", True)):
+                raise RuntimeError("student corpus import incomplete")
+            result = {
+                "count": int(student.get("imported") or 0),
+                "failed": int(student.get("failed") or 0),
+                "skipped": int(student.get("skipped") or 0),
+                "result": student,
+            }
+        part_ref.set(
+            {
+                "status": "DONE",
+                "audience": body.audience,
+                **result,
+                "completedAt": firestore.SERVER_TIMESTAMP,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+                "error": None,
+            },
+            merge=True,
+        )
+        return _finalize_index_job(settings, body.job_id)
+    except Exception as exc:
+        part_ref.set(
+            {
+                "status": "RETRYING",
+                "error": str(exc)[:2000],
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+        raise
+
+
+@app.get("/sync/index-jobs/{job_id}")
+def index_job_status(job_id: str) -> dict[str, Any]:
+    from google.cloud import firestore
+
+    settings = get_settings()
+    _, job_ref, parts_ref = _index_job_refs(settings, job_id)
+    snap = job_ref.get()
+    if not snap.exists:
+        raise HTTPException(404, "index job not found")
+    data = snap.to_dict() or {}
+    status = str(data.get("status") or "RUNNING")
+    deadline = data.get("deadlineAt")
+    if status not in {"DONE", "FAILED"} and deadline and datetime.now(UTC) > deadline:
+        status = "FAILED"
+        data["error"] = "index tasks did not complete before deadline"
+        job_ref.set(
+            {
+                "status": status,
+                "error": data["error"],
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+    parts = []
+    for part_id in data.get("expectedParts") or []:
+        part = parts_ref.document(str(part_id)).get()
+        parts.append(part.to_dict() or {"partId": part_id, "status": "MISSING"})
+    return {
+        "jobId": job_id,
+        "status": status,
+        "requestedUris": int(data.get("requestedUris") or 0),
+        "result": data.get("result"),
+        "error": data.get("error"),
+        "parts": parts,
     }
 
 
