@@ -4585,11 +4585,24 @@ def _list_sync_execution_rows(
             )
         raise RuntimeError(message[:300] or "동기화 실행 이력을 조회하지 못했습니다.")
     records = [row for row in rows if isinstance(row, dict)]
+    # executions list 는 기본 뷰라 완료 실행의 argument/labels/result 를 주지 않는다.
+    # 이 상태로 이력 행을 만들면 수동 실행도 "자동 실행"이 되고 totals 는 전부 0,
+    # Workflow 가 정상 return 한 ok=false 도 잃어버려 SUCCEEDED=완료로 오표시된다.
     needs_detail = [
         row
         for row in records
-        if str(row.get("state") or "") == "ACTIVE"
-        and (not row.get("argument") or not row.get("labels"))
+        if (
+            not row.get("argument")
+            or not row.get("labels")
+            or (
+                str(row.get("state") or "") == "SUCCEEDED"
+                and not row.get("result")
+            )
+            or (
+                str(row.get("state") or "") == "FAILED"
+                and not row.get("error")
+            )
+        )
     ]
 
     def describe(row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -4642,6 +4655,198 @@ def _sync_execution_records(
         )
         for row in rows
     ]
+
+
+def _sync_log_stage(text: str) -> str:
+    lowered = text.lower()
+    for needle, label in (
+        ("fetch-changes", "Drive 변경 조회"),
+        ("backfill", "전체 적재"),
+        ("index-gcs", "RAG 색인"),
+        ("reindex-pending", "미색인 복구"),
+        ("retry-failed", "실패 문서 복구"),
+        ("ingest", "파일 변환·업로드"),
+        ("delete", "삭제"),
+        ("reconcile", "정합성 검사"),
+        ("commit-token", "변경 토큰 저장"),
+    ):
+        if needle in lowered:
+            return label
+    return "Workflow"
+
+
+def _sync_log_file_ids(text: str) -> list[str]:
+    found: list[str] = []
+    patterns = (
+        r"gs://[^/\s\"']+/([A-Za-z0-9_-]{10,})(?:\.[A-Za-z0-9.]+)",
+        r"fileId(?:=|\\?\"\s*:\s*\\?\")([A-Za-z0-9_-]{10,})",
+    )
+    for pattern in patterns:
+        for file_id in re.findall(pattern, text):
+            if file_id not in found:
+                found.append(file_id)
+    return found[:50]
+
+
+def _sync_log_message(text: str) -> str:
+    prefix, marker, encoded = text.partition(" {")
+    if not marker:
+        return text[:1000]
+    try:
+        payload = json.loads("{" + encoded)
+    except json.JSONDecodeError:
+        return text[:1000]
+    if not isinstance(payload, dict):
+        return text[:1000]
+    code = payload.get("code")
+    body = payload.get("body")
+    details = (body.get("detail") or []) if isinstance(body, dict) else []
+    messages = list(
+        dict.fromkeys(
+            str(item.get("msg") or "").strip()
+            for item in details
+            if isinstance(item, dict) and item.get("msg")
+        )
+    )
+    if isinstance(details, str) and details.strip():
+        messages.append(details.strip())
+    if isinstance(body, str) and body.strip():
+        messages.append(body.strip())
+    suffix = " · ".join(messages[:3])
+    if code:
+        suffix = f"HTTP {code}" + (f" · {suffix}" if suffix else "")
+    return (prefix.strip() + (f" · {suffix}" if suffix else ""))[:1000]
+
+
+def _sync_file_item(text: str, timestamp: str) -> dict[str, Any] | None:
+    match = re.fullmatch(r"sync-file-result status=([A-Z_]+) (\{.*\})", text)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(2))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    file_id = str(payload.get("fileId") or "")
+    if not file_id:
+        return None
+    return {
+        "eventType": "file",
+        "timestamp": timestamp,
+        "status": match.group(1),
+        "operation": str(payload.get("operation") or "UPDATED"),
+        "fileId": file_id,
+        "name": str(payload.get("name") or ""),
+        "mimeType": str(payload.get("mimeType") or ""),
+        "modifiedTime": str(payload.get("modifiedTime") or ""),
+        "route": str(payload.get("route") or ""),
+    }
+
+
+def _sync_workflow_logs(
+    project: str,
+    execution_id: str,
+    token: str = "",
+    start_time: str = "",
+    end_time: str = "",
+) -> list[dict[str, Any]]:
+    log_filter = (
+        'resource.type="workflows.googleapis.com/Workflow" '
+        'AND resource.labels.workflow_id="rag-daily-sync" '
+        f'AND labels.execution_id="{execution_id}" '
+        'AND (severity>=WARNING OR textPayload:"sync-file-result status=")'
+    )
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T[^\s]+Z", start_time):
+        log_filter += f' AND timestamp>="{start_time}"'
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}T[^\s]+Z", end_time):
+        log_filter += f' AND timestamp<="{end_time}"'
+    if token:
+        status, body, _ = _http_post_json(
+            "https://logging.googleapis.com/v2/entries:list",
+            {
+                "resourceNames": [f"projects/{project}"],
+                "filter": log_filter,
+                "orderBy": "timestamp asc",
+                "pageSize": 500,
+            },
+            token,
+            timeout=15,
+        )
+        if status != 200 or not isinstance(body, dict):
+            detail = str(((body or {}).get("error") or {}).get("message") or "")
+            raise RuntimeError(
+                detail[:300] or f"Workflow 로그 조회 실패 (HTTP {status or 'timeout'})"
+            )
+        rows = body.get("entries") or []
+    else:
+        ok, rows = _gcloud_json(
+            [
+                "logging",
+                "read",
+                log_filter,
+                f"--project={project}",
+                "--limit=500",
+                "--order=asc",
+            ],
+            timeout=30,
+        )
+        if not ok or not isinstance(rows, list):
+            raise RuntimeError(str(rows)[:300] or "Workflow 로그를 조회하지 못했습니다.")
+    logs: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw = str(row.get("textPayload") or "").strip()
+        if not raw:
+            continue
+        file_item = _sync_file_item(raw, str(row.get("timestamp") or ""))
+        if file_item:
+            logs.append(file_item)
+            continue
+        logs.append(
+            {
+                "eventType": "log",
+                "timestamp": str(row.get("timestamp") or ""),
+                "severity": str(row.get("severity") or "WARNING"),
+                "stage": _sync_log_stage(raw),
+                "message": _sync_log_message(raw),
+                "fileIds": _sync_log_file_ids(raw),
+                "raw": raw[:4000],
+            }
+        )
+    return logs
+
+
+def _firestore_document_summaries(
+    project: str,
+    database: str,
+    token: str,
+    file_ids: list[str],
+) -> dict[str, dict[str, str]]:
+    def load(file_id: str) -> tuple[str, dict[str, str]]:
+        url = (
+            "https://firestore.googleapis.com/v1/projects/"
+            f"{quote(project, safe='')}/databases/{quote(database, safe='')}/documents/"
+            f"doc_state/{quote(file_id, safe='')}"
+        )
+        status, body, _ = _http_json(url, token, timeout=10)
+        if status != 200 or not isinstance(body, dict):
+            return file_id, {}
+        fields = body.get("fields") or {}
+        decoded = {key: _firestore_value(value) for key, value in fields.items()}
+        return file_id, {
+            "fileId": file_id,
+            "name": str(decoded.get("name") or file_id),
+            "path": str(decoded.get("path") or ""),
+            "status": str(decoded.get("status") or ""),
+        }
+
+    unique_ids = list(dict.fromkeys(file_ids))[:50]
+    if not unique_ids:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(unique_ids))) as executor:
+        return dict(executor.map(load, unique_ids))
 
 
 def _start_manual_sync(code: str, mode: str) -> dict[str, Any]:
@@ -6057,6 +6262,85 @@ def sync_runs(limit: int = 20) -> JSONResponse:
             "departments": list(departments.values()),
             "workflow": SYNC_WORKFLOW_NAME,
             "workflowStatus": "READY",
+        }
+    )
+
+
+@app.get("/api/v1/sync-runs/{execution_id}")
+def sync_run_detail(execution_id: str) -> JSONResponse:
+    if not re.fullmatch(
+        r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", execution_id
+    ):
+        raise HTTPException(status_code=404, detail="sync execution not found")
+    try:
+        common = _common()
+        project = str(common.get("GCP_PROJECT_ID") or "")
+        region = str(common.get("GCP_REGION") or "asia-northeast3")
+        database = str(common.get("FIRESTORE_DATABASE") or "rag-sync-state")
+        ok, row = _gcloud_json(
+            [
+                "workflows",
+                "executions",
+                "describe",
+                execution_id,
+                f"--workflow={SYNC_WORKFLOW_NAME}",
+                f"--location={region}",
+                f"--project={project}",
+            ],
+            timeout=20,
+        )
+        if not ok or not isinstance(row, dict):
+            raise FileNotFoundError(execution_id)
+        departments, drive_owners = _sync_department_targets()
+        token = _sync_access_token()
+        run_id = _execution_run_id(row)
+        progress = (
+            _firestore_sync_progress(project, database, token, run_id)
+            if run_id
+            else {}
+        )
+        run = _sync_execution_record(row, departments, drive_owners, progress)
+        log_lookup_error = ""
+        try:
+            events = _sync_workflow_logs(
+                project,
+                execution_id,
+                token,
+                str(row.get("startTime") or ""),
+                str(row.get("endTime") or ""),
+            )
+        except RuntimeError as exc:
+            events = []
+            log_lookup_error = str(exc)[:300]
+        logs = [item for item in events if item.get("eventType") != "file"]
+        items = [item for item in events if item.get("eventType") == "file"]
+        file_ids = [file_id for item in logs for file_id in item["fileIds"]]
+        file_ids.extend(item["fileId"] for item in items)
+        files = _firestore_document_summaries(project, database, token, file_ids)
+        for item in logs:
+            item["files"] = [
+                files.get(file_id) or {"fileId": file_id, "name": file_id, "path": "", "status": ""}
+                for file_id in item.pop("fileIds")
+            ]
+        for item in items:
+            file = files.get(item["fileId"]) or {}
+            item["name"] = item["name"] or str(file.get("name") or item["fileId"])
+            item["path"] = str(file.get("path") or "")
+            item["documentStatus"] = str(file.get("status") or "")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="sync execution not found") from None
+    except (OSError, RuntimeError, TypeError, UnicodeError, yaml.YAMLError) as exc:
+        return JSONResponse(
+            {"error": {"code": "SYNC_LOG_LOOKUP_FAILED", "message": str(exc)[:400]}},
+            status_code=503,
+        )
+    return JSONResponse(
+        {
+            "run": run,
+            "logs": logs,
+            "items": items,
+            "files": list(files.values()),
+            "logLookupError": log_lookup_error,
         }
     )
 

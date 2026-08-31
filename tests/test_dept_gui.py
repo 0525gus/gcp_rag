@@ -1849,6 +1849,266 @@ def test_active_sync_rows_are_described_before_duplicate_check(
     assert any(call[:3] == ["workflows", "executions", "describe"] for call in calls)
 
 
+def test_completed_sync_rows_are_described_for_result_and_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_gcloud(args, timeout=12):
+        calls.append(args)
+        if args[:3] == ["workflows", "executions", "list"]:
+            return True, [
+                {
+                    "name": "projects/p/locations/r/workflows/w/executions/ex-done",
+                    "state": "SUCCEEDED",
+                }
+            ]
+        return True, {
+            "name": "projects/p/locations/r/workflows/w/executions/ex-done",
+            "state": "SUCCEEDED",
+            "argument": '{"driveIds":["DRIVE_CS_123456"],"departmentCode":"cs"}',
+            "labels": {"department": "cs", "mode": "delta"},
+            "result": '{"ok":false,"totals":{"listed":25,"indexed":0,"indexFailed":2}}',
+        }
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+    rows = dept_gui._list_sync_execution_rows("project-test", "asia-northeast3")
+    record = dept_gui._sync_execution_record(
+        rows[0], {"cs": {"name": "컴퓨터공학부"}}, {"DRIVE_CS_123456": "cs"}
+    )
+
+    assert record["departmentName"] == "컴퓨터공학부"
+    assert record["ok"] is False
+    assert record["totals"] == {"listed": 25, "indexed": 0, "indexFailed": 2}
+    assert any(call[:3] == ["workflows", "executions", "describe"] for call in calls)
+
+
+def test_sync_workflow_logs_normalizes_stage_message_and_file_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = (
+        'index-gcs failed drive=DRIVE uris=1 {"body":{"detail":['
+        '{"input":["gs://bucket/1YUj8gsDZcRuU4b0Pb_jqr_LYVoKai6kW.md"],'
+        '"msg":"Input should be a valid string"}]},"code":422}'
+    )
+    captured: dict[str, object] = {}
+
+    def fake_post(url, payload, token="", timeout=10):
+        captured.update(url=url, payload=payload, token=token)
+        return (
+            200,
+            {
+                "entries": [
+                {
+                    "timestamp": "2026-08-30T14:51:17Z",
+                    "severity": "ERROR",
+                    "textPayload": raw,
+                }
+                ]
+            },
+            12,
+        )
+
+    monkeypatch.setattr(dept_gui, "_http_post_json", fake_post)
+
+    logs = dept_gui._sync_workflow_logs(
+        "project-test",
+        "52c4c7ab-da3d-4263-9693-bbd83da8b071",
+        "caller-token",
+        "2026-08-30T14:50:22Z",
+        "2026-08-30T14:56:46Z",
+    )
+
+    assert captured["url"] == "https://logging.googleapis.com/v2/entries:list"
+    assert captured["token"] == "caller-token"
+    assert 'timestamp>="2026-08-30T14:50:22Z"' in captured["payload"]["filter"]
+    assert logs[0]["stage"] == "RAG 색인"
+    assert logs[0]["message"].endswith("HTTP 422 · Input should be a valid string")
+    assert logs[0]["fileIds"] == ["1YUj8gsDZcRuU4b0Pb_jqr_LYVoKai6kW"]
+
+
+def test_sync_log_message_accepts_plain_text_http_body() -> None:
+    raw = (
+        'delete failed fileId=12xOd1V0C0egiYrTHxDptbffRoIiBUkfA '
+        '{"body":"Internal Server Error","code":500,'
+        '"message":"HTTP server responded with error code 500"}'
+    )
+
+    assert dept_gui._sync_log_message(raw).endswith(
+        "HTTP 500 · Internal Server Error"
+    )
+
+
+def test_sync_log_message_accepts_http_detail_string() -> None:
+    raw = (
+        'index-gcs failed drive=DRIVE uris=1 '
+        '{"body":{"detail":"Vertex RAG quota still exhausted"},"code":429}'
+    )
+
+    assert dept_gui._sync_log_message(raw).endswith(
+        "HTTP 429 · Vertex RAG quota still exhausted"
+    )
+
+
+def test_sync_workflow_logs_parses_file_result_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = (
+        'sync-file-result status=INDEXED {"fileId":"FILE_1234567890",'
+        '"name":"안내.xlsx","mimeType":"application/vnd.test",'
+        '"operation":"UPDATED","route":"FILE_COPY"}'
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_http_post_json",
+        lambda *args, **kwargs: (
+            200,
+            {
+                "entries": [
+                    {
+                        "timestamp": "2026-08-30T16:18:03Z",
+                        "severity": "INFO",
+                        "textPayload": raw,
+                    }
+                ]
+            },
+            5,
+        ),
+    )
+
+    events = dept_gui._sync_workflow_logs(
+        "project-test", "8439af79-218b-4dea-8c13-58a0f14e30f0", "token"
+    )
+
+    assert events == [
+        {
+            "eventType": "file",
+            "timestamp": "2026-08-30T16:18:03Z",
+            "status": "INDEXED",
+            "operation": "UPDATED",
+            "fileId": "FILE_1234567890",
+            "name": "안내.xlsx",
+            "mimeType": "application/vnd.test",
+            "modifiedTime": "",
+            "route": "FILE_COPY",
+        }
+    ]
+
+
+def test_sync_workflow_logs_parses_failed_delete_as_file_item(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw = (
+        'sync-file-result status=FAILED {"fileId":"12xOd1V0C0egiYrTHxDptbffRoIiBUkfA",'
+        '"name":"변경분테스트.txt","mimeType":"text/plain",'
+        '"operation":"DELETED","route":"DELETE"}'
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_http_post_json",
+        lambda *args, **kwargs: (
+            200,
+            {
+                "entries": [
+                    {
+                        "timestamp": "2026-08-31T04:51:00Z",
+                        "severity": "INFO",
+                        "textPayload": raw,
+                    }
+                ]
+            },
+            1,
+        ),
+    )
+
+    events = dept_gui._sync_workflow_logs(
+        "project-test", "0d18dbfd-3c85-4774-acb9-d4da5cbbc84f", "token"
+    )
+
+    assert events[0]["status"] == "FAILED"
+    assert events[0]["route"] == "DELETE"
+    assert events[0]["fileId"] == "12xOd1V0C0egiYrTHxDptbffRoIiBUkfA"
+
+
+def test_sync_run_detail_returns_result_logs_and_file_names(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _headers = _client()
+    execution_id = "52c4c7ab-da3d-4263-9693-bbd83da8b071"
+    row = {
+        "name": f"projects/p/locations/r/workflows/w/executions/{execution_id}",
+        "state": "SUCCEEDED",
+        "argument": '{"driveIds":["DRIVE_CS_123456"],"departmentCode":"cs"}',
+        "labels": {"department": "cs", "mode": "delta"},
+        "result": '{"ok":false,"totals":{"listed":25,"indexed":0,"indexFailed":2}}',
+    }
+    monkeypatch.setattr(
+        dept_gui,
+        "_common",
+        lambda: {
+            "GCP_PROJECT_ID": "project-test",
+            "GCP_REGION": "asia-northeast3",
+            "FIRESTORE_DATABASE": "rag-sync-state",
+        },
+    )
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *args, **kwargs: (True, row))
+    monkeypatch.setattr(
+        dept_gui,
+        "_sync_department_targets",
+        lambda: ({"cs": {"name": "컴퓨터공학부"}}, {"DRIVE_CS_123456": "cs"}),
+    )
+    monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "caller-token")
+    monkeypatch.setattr(dept_gui, "_firestore_sync_progress", lambda *args: {})
+    monkeypatch.setattr(
+        dept_gui,
+        "_sync_workflow_logs",
+        lambda *args: [
+            {
+                "timestamp": "2026-08-30T14:51:17Z",
+                "severity": "ERROR",
+                "stage": "RAG 색인",
+                "message": "HTTP 422",
+                "fileIds": ["FILE_1234567890"],
+                "raw": "index-gcs failed",
+            },
+            {
+                "eventType": "file",
+                "timestamp": "2026-08-30T14:52:00Z",
+                "status": "INDEXED",
+                "operation": "UPDATED",
+                "fileId": "FILE_1234567890",
+                "name": "",
+                "mimeType": "text/plain",
+                "modifiedTime": "2026-08-30T14:49:58Z",
+                "route": "FILE_COPY",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_firestore_document_summaries",
+        lambda *args: {
+            "FILE_1234567890": {
+                "fileId": "FILE_1234567890",
+                "name": "변경분_테스트.txt.txt",
+                "path": "Drive/변경분_테스트.txt.txt",
+                "status": "PARSED",
+            }
+        },
+    )
+
+    response = client.get(f"/api/v1/sync-runs/{execution_id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["run"]["ok"] is False
+    assert body["run"]["totals"]["indexFailed"] == 2
+    assert body["logs"][0]["stage"] == "RAG 색인"
+    assert body["logs"][0]["files"][0]["name"] == "변경분_테스트.txt.txt"
+    assert body["items"][0]["name"] == "변경분_테스트.txt.txt"
+    assert body["items"][0]["path"] == "Drive/변경분_테스트.txt.txt"
+
+
 def _bootstrap(monkeypatch: pytest.MonkeyPatch, project: str = "project-test") -> None:
     monkeypatch.setattr(
         dept_gui,

@@ -78,10 +78,6 @@
           <div class="validation-banner hidden" id="setupValidationBanner"></div>
           <button type="submit" class="button primary setup-submit" id="createCommonConfig">설정 저장하고 시작</button>
         </form>
-        <div class="setup-login-actions hidden" id="setupLoginActions">
-          <button type="button" class="button secondary" id="skipGcloudLogin">로그인 없이 둘러보기</button>
-          <p>학과 설정 목록과 편집은 로그인 없이도 열립니다. 검사·배포·GCP 리소스 조회만 로그인 뒤에 동작합니다.</p>
-        </div>
       </div>
     </section>
 
@@ -738,6 +734,33 @@
           <button type="button" class="button ghost" data-close-sync-modal>취소</button>
           <button type="button" class="button primary" id="confirmManualSync">전체 다시 적재 시작</button>
         </footer>
+      </div>
+    </aside>
+
+    <aside class="resource-modal" id="syncRunDetailModal" aria-hidden="true" aria-labelledby="syncRunDetailTitle">
+      <div class="resource-modal-backdrop" data-close-sync-detail></div>
+      <div class="resource-modal-panel sync-run-detail-panel" role="dialog" aria-modal="true">
+        <header>
+          <div><span class="eyebrow">SYNC EXECUTION</span><h2 id="syncRunDetailTitle">실행 상세</h2><p id="syncRunDetailDescription">실행 결과와 경고·오류 로그를 확인합니다.</p></div>
+          <button type="button" class="icon-button" data-close-sync-detail aria-label="실행 상세 닫기">×</button>
+        </header>
+        <div class="resource-modal-body">
+          <div class="sync-detail-loading" id="syncRunDetailLoading">실행 결과와 로그를 불러오고 있습니다.</div>
+          <div class="hidden" id="syncRunDetailContent">
+            <div class="sync-detail-summary" id="syncRunDetailSummary"></div>
+            <div class="sync-metric-grid sync-detail-metrics" id="syncRunDetailMetrics"></div>
+            <section class="sync-detail-item-section">
+              <header><div><b>파일 처리 내역</b><span>이 실행에서 처리한 파일별 결과</span></div><em id="syncRunDetailItemCount">0건</em></header>
+              <div class="sync-detail-item-list" id="syncRunDetailItems"></div>
+            </section>
+            <section class="sync-detail-log-section">
+              <header><div><b>경고·오류 내역</b><span>Workflow 실행 ID로 조회한 로그</span></div><em id="syncRunDetailLogCount">0건</em></header>
+              <div class="sync-detail-log-list" id="syncRunDetailLogs"></div>
+            </section>
+          </div>
+          <div class="validation-banner hidden" id="syncRunDetailError"></div>
+        </div>
+        <footer><button type="button" class="button ghost" data-close-sync-detail>닫기</button></footer>
       </div>
     </aside>
 

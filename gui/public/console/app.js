@@ -69,7 +69,12 @@
     syncPollTimer: null,
     syncRequest: 0,
     syncPreferredDepartment: "",
+    syncDetailRequest: 0,
   };
+
+  // 상태 검사는 학과별로 병렬 완료된다. 짧은 간격으로 완료 결과를 가져와
+  // 각 행이 전체 실행 종료를 기다리지 않고 바로 갱신되게 한다.
+  const STATUS_RUN_POLL_MS = 200;
 
   const statusLabels = {
     OK: "정상",
@@ -436,7 +441,7 @@
       return `<tr data-code="${escapeHtml(dept.code)}" data-cloud-only="${dept.cloudOnly ? "true" : "false"}">
         <td><div class="department-cell"><span class="department-avatar">${escapeHtml(initials)}</span><span><b>${escapeHtml(dept.name)}</b><small>${escapeHtml(dept.code)}${dept.cloudOnly ? ' · <em class="cloud-only-mark">CLOUD</em>' : ""}</small></span></div></td>
         <td>${badge(overall)}</td>
-        ${layers.map((layer) => `<td>${badge(layerStatus(result, layer))}</td>`).join("")}
+        ${layers.map((layer) => `<td>${badge(overall === "CHECKING" ? "CHECKING" : layerStatus(result, layer))}</td>`).join("")}
         <td class="time-cell" title="${escapeHtml(checkedAt || "")}">${overall === "CHECKING" ? "확인 중" : relativeTime(checkedAt)}</td>
         <td><div class="row-actions"><button class="row-button" data-action="check" title="${dept.cloudOnly ? "Cloud 메타데이터 항목" : "다시 확인"}" aria-label="${escapeHtml(dept.name)} 다시 확인" ${dept.cloudOnly ? "disabled" : ""}>↻</button><button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세">›</button></div></td>
       </tr>`;
@@ -679,17 +684,129 @@
     $("#syncHistoryMeta").textContent = `${rows.length}개 실행 · ${rows.filter((item) => item.state === "ACTIVE").length}개 진행 중`;
     $("#syncHistoryRows").innerHTML = rows.length ? rows.map((run) => {
       const totals = Object.keys(run.totals || {}).length ? run.totals : (run.progress?.totals || {});
-      const processed = syncNumber(run.progress?.processed) || syncNumber(totals.listed);
+      const detected = syncNumber(run.progress?.processed) || syncNumber(totals.listed);
+      const processed = Math.max(0, detected - syncNumber(totals.unchanged));
       const failed = syncNumber(totals.failed) + syncNumber(totals.indexFailed);
-      const stateLabel = ({ ACTIVE: "진행 중", SUCCEEDED: "완료", FAILED: "실패", CANCELLED: "취소" })[run.state] || run.state;
-      return `<tr>
+      const outcomeState = syncOutcomeState(run);
+      const stateLabel = syncOutcomeLabel(outcomeState);
+      return `<tr class="sync-history-row" data-sync-execution="${escapeHtml(run.executionId)}" tabindex="0" role="button" aria-label="${escapeHtml(run.departmentName || run.departmentCode || "자동 실행")} 실행 상세 로그 보기">
         <td><div class="department-cell"><span class="department-avatar">${escapeHtml((run.departmentCode || "WF").slice(0, 2).toUpperCase())}</span><span><b>${escapeHtml(run.departmentName || run.departmentCode || "자동 실행")}</b><small>${escapeHtml(run.executionId)}</small></span></div></td>
         <td>${run.mode === "delta" && run.effectiveMode === "backfill" ? "변경분 → 전체" : run.effectiveMode === "backfill" ? "전체 적재" : "변경분"}</td>
-        <td><span class="sync-history-state ${escapeHtml(run.state.toLowerCase())}">${escapeHtml(stateLabel)}</span></td>
+        <td><span class="sync-history-state ${escapeHtml(outcomeState.toLowerCase())}">${escapeHtml(stateLabel)}</span></td>
         <td>${processed.toLocaleString()}</td><td>${syncNumber(totals.indexed).toLocaleString()}</td><td>${failed.toLocaleString()}</td>
         <td>${escapeHtml(syncStartedAt(run.startTime))}</td><td>${escapeHtml(syncDuration(run.startTime, run.endTime))}</td>
       </tr>`;
     }).join("") : '<tr><td colspan="8" class="sync-history-empty">아직 동기화 실행 이력이 없습니다.</td></tr>';
+  }
+
+  function syncOutcomeState(run) {
+    return run.state === "SUCCEEDED" && run.ok === false ? "ATTENTION" : run.state;
+  }
+
+  function syncOutcomeLabel(outcomeState) {
+    return ({
+      ACTIVE: "진행 중",
+      SUCCEEDED: "완료",
+      ATTENTION: "완료 · 확인 필요",
+      FAILED: "실행 오류",
+      CANCELLED: "취소",
+    })[outcomeState] || outcomeState;
+  }
+
+  function syncItemLabel(item) {
+    if (item.status === "INDEXED") return item.operation === "CREATED" ? "생성 · 색인" : "수정 · 색인";
+    if (item.status === "FAILED" && item.route === "DELETE") return "삭제 실패";
+    if (item.status === "SKIPPED" && item.mimeType === "application/vnd.google-apps.folder") return "폴더 · 색인 대상 아님";
+    return ({
+      FAILED: "처리 실패",
+      INDEX_FAILED: "색인 실패",
+      DELETED: "삭제",
+      UNCHANGED: "변경 없음",
+      EXCLUDED: "범위 밖 제외",
+      SKIPPED: "미지원 · 색인 대상 아님",
+      DLQ: "처리 보류",
+      SPLIT_QUEUED: "분할 대기",
+    })[item.status] || item.status || "처리됨";
+  }
+
+  function closeSyncRunDetail() {
+    state.syncDetailRequest += 1;
+    const modal = $("#syncRunDetailModal");
+    modal.classList.remove("open");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  function renderSyncRunDetail(payload) {
+    const run = payload.run || {};
+    const totals = Object.keys(run.totals || {}).length ? run.totals : (run.progress?.totals || {});
+    const detected = syncNumber(run.progress?.processed) || syncNumber(totals.listed);
+    const processed = Math.max(0, detected - syncNumber(totals.unchanged));
+    const failed = syncNumber(totals.failed) + syncNumber(totals.indexFailed);
+    const outcomeState = syncOutcomeState(run);
+    $("#syncRunDetailTitle").textContent = run.departmentName || run.departmentCode || "자동 실행";
+    $("#syncRunDetailDescription").textContent = run.executionId || "실행 ID 없음";
+    $("#syncRunDetailSummary").innerHTML = `
+      <div><span>실행 결과</span><b><i class="sync-history-state ${escapeHtml(outcomeState.toLowerCase())}">${escapeHtml(syncOutcomeLabel(outcomeState))}</i></b></div>
+      <div><span>실행 방식</span><b>${run.mode === "delta" && run.effectiveMode === "backfill" ? "변경분 → 전체" : run.effectiveMode === "backfill" ? "전체 적재" : "변경분"}</b></div>
+      <div><span>시작 시각</span><b>${escapeHtml(syncStartedAt(run.startTime))}</b></div>
+      <div><span>소요 시간</span><b>${escapeHtml(syncDuration(run.startTime, run.endTime))}</b></div>`;
+    $("#syncRunDetailMetrics").innerHTML = `
+      <div class="sync-metric"><span>변경 감지</span><b>${processed.toLocaleString()}</b></div>
+      <div class="sync-metric"><span>GCS 업로드</span><b>${syncNumber(totals.gcsUploaded).toLocaleString()}</b></div>
+      <div class="sync-metric"><span>색인</span><b>${syncNumber(totals.indexed).toLocaleString()}</b></div>
+      <div class="sync-metric fail"><span>실패</span><b>${failed.toLocaleString()}</b></div>`;
+    const items = (payload.items || []).filter((item) => (
+      item.status !== "UNCHANGED"
+      && !(
+        item.status === "SKIPPED"
+        && item.mimeType === "application/vnd.google-apps.folder"
+      )
+    ));
+    $("#syncRunDetailItemCount").textContent = `${items.length}건`;
+    $("#syncRunDetailItems").innerHTML = items.length ? items.map((item) => `
+      <article class="sync-detail-item" data-status="${escapeHtml(String(item.status || "").toLowerCase())}">
+        <i>${escapeHtml(syncItemLabel(item))}</i>
+        <div><b>${escapeHtml(item.name || item.fileId)}</b><small>${escapeHtml(item.path || item.mimeType || "경로 정보 없음")}</small><code>${escapeHtml(item.fileId)}</code></div>
+        <time>${escapeHtml(syncStartedAt(item.timestamp))}</time>
+      </article>`).join("") : `<div class="sync-detail-item-empty">${processed ? "이 실행은 파일별 기록 기능 적용 전 실행입니다." : "처리된 파일이 없습니다."}</div>`;
+    const logs = payload.logs || [];
+    $("#syncRunDetailLogCount").textContent = `${logs.length}건`;
+    $("#syncRunDetailLogs").innerHTML = logs.length ? logs.map((item) => {
+      const files = item.files || [];
+      const filesHtml = files.length ? `<div class="sync-detail-files"><span>영향받은 파일</span>${files.map((file) => `<div><b>${escapeHtml(file.name || file.fileId)}</b>${file.path ? `<small>${escapeHtml(file.path)}</small>` : ""}<code>${escapeHtml(file.fileId)}</code></div>`).join("")}</div>` : "";
+      return `<article class="sync-detail-log" data-severity="${escapeHtml(String(item.severity || "WARNING").toLowerCase())}">
+        <header><div><b>${escapeHtml(item.stage || "Workflow")}</b><span>${escapeHtml(item.severity || "WARNING")}</span></div><time>${escapeHtml(syncStartedAt(item.timestamp))}</time></header>
+        <p>${escapeHtml(item.message || "오류 상세 없음")}</p>${filesHtml}
+        <details><summary>원본 로그 보기</summary><pre>${escapeHtml(item.raw || item.message || "")}</pre></details>
+      </article>`;
+    }).join("") : `<div class="sync-detail-log-empty">${run.ok === false ? "집계상 확인이 필요하지만 Workflow 경고·오류 로그가 없습니다." : "기록된 경고·오류가 없습니다."}</div>`;
+    if (payload.logLookupError) {
+      $("#syncRunDetailLogs").insertAdjacentHTML("beforeend", `<div class="sync-detail-log-warning">일부 로그를 불러오지 못했습니다: ${escapeHtml(payload.logLookupError)}</div>`);
+    }
+  }
+
+  async function openSyncRunDetail(executionId) {
+    if (!executionId) return;
+    const requestId = ++state.syncDetailRequest;
+    const modal = $("#syncRunDetailModal");
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden", "false");
+    $("#syncRunDetailLoading").classList.remove("hidden");
+    $("#syncRunDetailContent").classList.add("hidden");
+    $("#syncRunDetailError").classList.add("hidden");
+    try {
+      const payload = await api(`/api/v1/sync-runs/${encodeURIComponent(executionId)}`);
+      if (requestId !== state.syncDetailRequest) return;
+      renderSyncRunDetail(payload);
+      $("#syncRunDetailLoading").classList.add("hidden");
+      $("#syncRunDetailContent").classList.remove("hidden");
+    } catch (error) {
+      if (requestId !== state.syncDetailRequest) return;
+      $("#syncRunDetailLoading").classList.add("hidden");
+      const banner = $("#syncRunDetailError");
+      banner.textContent = error.message;
+      banner.classList.remove("hidden");
+    }
   }
 
   function renderSyncManagement() {
@@ -1503,7 +1620,6 @@
     const loginOnly = mode === "login";
     $("#setupGate").dataset.mode = mode;
     $("#commonSetupForm").classList.toggle("hidden", loginOnly);
-    $("#setupLoginActions").classList.toggle("hidden", !loginOnly);
     $("#setupEyebrow").textContent = loginOnly ? "SIGN IN REQUIRED" : "FIRST RUN SETUP";
     $("#setupTitle").textContent = loginOnly ? "gcloud 로그인" : "공통 환경 설정";
     $("#setupStep").textContent = loginOnly ? "" : "01 / 01";
@@ -1539,15 +1655,6 @@
     if (env?.commonValid) {
       await Promise.all([reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
     }
-  }
-
-  // 로그인이 없어도 학과 목록·설정은 전부 로컬 YAML 이라 읽고 고칠 수 있다.
-  // 로그인을 미루는 선택을 막지 않는다 — 막히는 건 gcloud 를 타는 작업뿐이다.
-  async function dismissGcloudLoginGate() {
-    window.clearTimeout(state.authPollTimer);
-    state.authLoginPending = false;
-    await closeLoginOnlySetup(state.environment);
-    toast("gcloud 로그인 없이 계속합니다", "검사·배포는 상단 gcloud 카드에서 로그인한 뒤 쓸 수 있습니다.");
   }
 
   async function pollGcloudLogin(attempt = 0) {
@@ -1687,7 +1794,7 @@
       if (state.checkingCodes.delete(result.code)) changed = true;
     });
     // polling 응답은 완료된 학과를 누적해서 돌려준다. 새 결과가 없는데도 매번
-    // tbody 를 다시 만들면 CHECKING spinner 애니메이션이 0.7초마다 재시작된다.
+    // tbody 를 다시 만들면 CHECKING spinner 애니메이션이 폴링마다 재시작된다.
     if (changed) {
       renderDepartments();
       if (state.selectedCode) openDrawer(state.selectedCode, false);
@@ -1700,11 +1807,12 @@
       const run = await api(`/api/v1/status-runs/${runId}`);
       runResultToDepartments(run.departments || []);
       const completed = (run.departments || []).length;
-      $("#runProgress").textContent = run.currentDepartment
-        ? `${run.currentDepartment} 확인 중 · ${completed}/${run.scope.length}`
-        : `${completed}/${run.scope.length}`;
+      const remaining = Math.max(0, run.scope.length - completed);
+      $("#runProgress").textContent = remaining
+        ? `${completed}/${run.scope.length} 완료 · ${remaining}개 확인 중`
+        : `${completed}/${run.scope.length} 완료`;
       if (run.status === "RUNNING") {
-        state.pollTimer = window.setTimeout(() => pollRun(runId), 700);
+        state.pollTimer = window.setTimeout(() => pollRun(runId), STATUS_RUN_POLL_MS);
         return;
       }
       state.activeRunId = null;
@@ -1712,6 +1820,7 @@
       $("#runStrip").classList.add("hidden");
       $("#lastChecked").textContent = `마지막 확인 ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`;
       renderDepartments();
+      if (state.selectedCode) openDrawer(state.selectedCode, false);
       toast(
         run.status === "COMPLETED" ? "상태 확인 완료" : "상태 확인 중단",
         `${completed}개 학과 결과를 반영했습니다.`,
@@ -1723,6 +1832,7 @@
       state.checkingCodes.clear();
       $("#runStrip").classList.add("hidden");
       renderDepartments();
+      if (state.selectedCode) openDrawer(state.selectedCode, false);
       toast("상태 확인에 실패했습니다", error.message, "fail");
     }
   }
@@ -1739,6 +1849,7 @@
     }
     scope.forEach((code) => state.checkingCodes.add(code));
     renderDepartments();
+    if (state.selectedCode && scope.includes(state.selectedCode)) openDrawer(state.selectedCode, false);
     $("#runStrip").classList.remove("hidden");
     $("#runProgress").textContent = `${scope.length}개 학과 준비 중`;
     try {
@@ -1752,6 +1863,7 @@
       state.checkingCodes.clear();
       $("#runStrip").classList.add("hidden");
       renderDepartments();
+      if (state.selectedCode) openDrawer(state.selectedCode, false);
       toast("상태 확인을 시작하지 못했습니다", error.message, "fail");
     }
   }
@@ -1783,7 +1895,9 @@
       ["학생 폴더", (metadata.drive?.studentFolderIds || []).join(", ") || "—"],
     ] : [];
     const metadataHtml = metadataRows.length ? `<section class="check-layer cloud-metadata-layer"><h3>CLOUD METADATA</h3><div class="cloud-metadata-grid">${metadataRows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><code>${escapeHtml(value)}</code></div>`).join("")}</div></section>` : "";
-    if (!result?.checks?.length) {
+    if (overall === "CHECKING") {
+      $("#drawerContent").innerHTML = metadataHtml + '<div class="empty-state"><h3>상태 확인 중</h3><p>로컬 설정부터 GCP 리소스, 배포, 런타임, 동기화 상태까지 다시 확인하고 있습니다.</p></div>';
+    } else if (!result?.checks?.length) {
       $("#drawerContent").innerHTML = metadataHtml + `<div class="empty-state"><h3>아직 검사 결과가 없습니다</h3><p>이 학과의 상태를 확인하면 단계별 결과가 표시됩니다.</p></div>`;
     } else {
       $("#drawerContent").innerHTML = metadataHtml + Object.entries(layerLabels).map(([layer, label]) => {
@@ -3390,7 +3504,6 @@
     $("#departmentForm").addEventListener("submit", submitDepartment);
     $("#commonSetupForm").addEventListener("submit", submitCommonSetup);
     $("#refreshGcloudAuth").addEventListener("click", refreshGcloudSetup);
-    $("#skipGcloudLogin").addEventListener("click", dismissGcloudLoginGate);
     $("#confirmDriveSaRepair").addEventListener("click", confirmDriveSaAction);
     $$("[data-close-drive-sa]").forEach((item) => item.addEventListener("click", closeDriveSaModal));
     $("#planCommonResources").addEventListener("click", planCommonResources);
@@ -3442,6 +3555,17 @@
     $("#checkDriveIds").addEventListener("click", checkDriveIds);
     $("#lookupFolderNames").addEventListener("click", lookupFolderNames);
     $("#refreshSyncRuns").addEventListener("click", () => loadSyncRuns());
+    $("#syncHistoryRows").addEventListener("click", (event) => {
+      const row = event.target.closest("[data-sync-execution]");
+      if (row) openSyncRunDetail(row.dataset.syncExecution);
+    });
+    $("#syncHistoryRows").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const row = event.target.closest("[data-sync-execution]");
+      if (!row) return;
+      event.preventDefault();
+      openSyncRunDetail(row.dataset.syncExecution);
+    });
     $("#syncDepartment").addEventListener("change", renderSyncControls);
     $$('[data-sync-mode]').forEach((button) => button.addEventListener("click", () => {
       state.syncMode = button.dataset.syncMode;
@@ -3450,6 +3574,7 @@
     $("#startManualSync").addEventListener("click", requestManualSync);
     $("#confirmManualSync").addEventListener("click", submitManualSync);
     $$('[data-close-sync-modal]').forEach((item) => item.addEventListener("click", closeSyncConfirmModal));
+    $$('[data-close-sync-detail]').forEach((item) => item.addEventListener("click", closeSyncRunDetail));
     $("#confirmDriveConflict").addEventListener("click", confirmDuplicateDriveIds);
     $$('[data-close-drive-conflict]').forEach((item) => item.addEventListener("click", closeDriveConflictModal));
     $("#environmentGrid").addEventListener("click", (event) => {
@@ -3533,6 +3658,7 @@
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
       if ($("#teardownModal").classList.contains("open")) closeTeardownModal();
+      else if ($("#syncRunDetailModal").classList.contains("open")) closeSyncRunDetail();
       else if ($("#syncConfirmModal").classList.contains("open")) closeSyncConfirmModal();
       else if ($("#commonRuntimeDeploymentModal").classList.contains("open")) closeCommonRuntimeDeployment();
       else if ($("#mcpDeploymentModal").classList.contains("open")) closeMcpDeployment();

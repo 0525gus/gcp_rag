@@ -17,3 +17,5 @@ service-account*.json
 .idea/
 .vscode/
 agent-transcripts/
+gui/node_modules/
+gui/dist/
