@@ -466,13 +466,14 @@ def test_both_audience_keys_are_exported(tmp_path, monkeypatch):
         assert env["MCP_API_KEY"] == env[f"MCP_API_KEY_{audience.upper()}"]
 
 
-def test_deployment_metadata_is_complete_and_contains_no_secret(tmp_path, monkeypatch):
-    """Cloud Run 주석은 YAML 대체용 설정만 담고 MCP 키는 절대 담지 않는다."""
+def test_deployment_metadata_contains_the_complete_department_yaml(tmp_path, monkeypatch):
+    """Cloud Run 주석은 allowlist 없이 학과 YAML 전체를 보존한다."""
     body = _dept_body(
         "x",
         name="엑스학과",
         minInstances={"staff": 1, "student": 0},
     )
+    body["futureOption"] = {"enabled": True, "labels": ["a", "b"]}
     _write_depts(tmp_path, monkeypatch, {"x": body})
 
     staff_env = build_env("x", "staff")
@@ -495,14 +496,14 @@ def test_deployment_metadata_is_complete_and_contains_no_secret(tmp_path, monkey
         "managedBy": "gcp-rag",
         "minInstances": {"staff": 1, "student": 0},
         "name": "엑스학과",
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "yaml": body,
     }
     encoded_text = base64.urlsafe_b64decode(
         staff_env["DEPLOYMENT_METADATA_B64"]
     ).decode("utf-8")
-    assert staff_env["MCP_API_KEY"] not in encoded_text
-    assert student_env["MCP_API_KEY"] not in encoded_text
-    assert "MCP_API_KEY" not in encoded_text
+    assert staff_env["MCP_API_KEY"] in encoded_text
+    assert student_env["MCP_API_KEY"] in encoded_text
     student_metadata = json.loads(
         base64.urlsafe_b64decode(student_env["DEPLOYMENT_METADATA_B64"]).decode("utf-8")
     )

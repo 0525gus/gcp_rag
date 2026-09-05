@@ -107,15 +107,18 @@ def _deployment_metadata_b64(
     staff_corpus: str,
     student_corpus: str,
 ) -> str:
-    """다른 운영 환경이 YAML 없이 복원할 수 있는 비밀값 없는 배포 메타데이터."""
+    """다른 운영 환경이 YAML 없이 복원할 수 있는 전체 배포 설정."""
     drive = dept_cfg.get("drive") or {}
     metadata = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "managedBy": "gcp-rag",
         "code": dept,
         "name": str(dept_cfg.get("name") or dept),
         "audience": audience,
         "corpusMode": "split" if student_corpus else "single",
+        # 필드별 allowlist를 두면 YAML에 옵션을 추가할 때 Cloud 쪽 사본에서
+        # 조용히 빠진다. 원본 매핑 전체를 함께 실어 새 필드와 keys까지 보존한다.
+        "yaml": dept_cfg,
         "corpora": {"staff": staff_corpus, "student": student_corpus},
         "buckets": {
             "hwpOriginal": env.get("GCS_HWP_ORIGINAL_BUCKET", ""),
@@ -136,6 +139,18 @@ def _deployment_metadata_b64(
 
 
 def build_env(dept: str, audience: str) -> dict[str, str]:
+    """로컬 학과 yaml → 환경변수."""
+    return build_env_from_config(dept, audience, _load_yaml(DEPT_DIR / f"{dept}.yaml"))
+
+
+def build_env_from_config(dept: str, audience: str, dept_cfg: dict) -> dict[str, str]:
+    """학과 설정 매핑 → 환경변수. **파일을 읽지 않는다.**
+
+    설정의 출처가 둘이기 때문에 나눠 뒀다: 로컬 `config/departments/*.yaml` 과
+    Cloud Run v2 주석(`_deployment_metadata_b64` 의 `yaml` 필드)이다. 후자는
+    로컬 YAML 을 두지 않는 운영 환경의 유일한 원본이다. 병합·거부 규칙이 여기
+    한 벌뿐이어야 두 출처가 서로 다른 설정을 배포하는 일이 없다.
+    """
     if audience not in AUDIENCES:
         raise SystemExit(f"audience 는 {AUDIENCES} 중 하나여야 한다: {audience}")
 
@@ -147,8 +162,6 @@ def build_env(dept: str, audience: str) -> dict[str, str]:
             env[key] = _fmt(val)
 
     # 2) 학과. 같은 키는 학과가 이긴다.
-    dept_cfg = _load_yaml(DEPT_DIR / f"{dept}.yaml")
-
     corpora = dept_cfg.get("corpora") or {}
     staff_corpus = str(corpora.get("staff") or "").strip()
     student_corpus = str(corpora.get("student") or "").strip()
@@ -267,22 +280,28 @@ _MAP_FIELDS: tuple[tuple[str, str, bool], ...] = (
 _SECRET_ENV_KEYS = ("MCP_API_KEY", "MCP_API_KEY_STAFF", "MCP_API_KEY_STUDENT")
 
 
-def build_departments_map() -> dict[str, dict[str, object]]:
-    """전 학과 → sync 라우팅 맵. **시크릿은 담지 않는다.**
+def departments_map_from_configs(
+    configs: dict[str, dict],
+) -> dict[str, dict[str, object]]:
+    """{학과코드: 학과 설정} → sync 라우팅 맵. **시크릿은 담지 않는다.**
 
-    값은 build_env 를 거쳐 뽑는다 — common.yaml + 학과 yaml 병합 규칙과 거부
-    조건(코퍼스 동일·버킷 반쪽 등)을 한 벌만 두기 위해서다. 여기서 따로
-    yaml 을 읽으면 배포 env 와 sync 맵이 서로 다른 규칙으로 갈라진다.
+    값은 build_env_from_config 를 거쳐 뽑는다 — common.yaml + 학과 설정 병합
+    규칙과 거부 조건(코퍼스 동일·버킷 반쪽 등)을 한 벌만 두기 위해서다. 여기서
+    따로 설정을 해석하면 배포 env 와 sync 맵이 서로 다른 규칙으로 갈라진다.
+
+    설정을 **받아서** 쓰는 이유는 원본이 둘이기 때문이다: 로컬 YAML 과 Cloud
+    Run v2 주석. 이 함수가 파일을 직접 읽던 시절에는 YAML 없는 운영 환경에서
+    맵을 만들 방법이 아예 없어, MCP 는 배포됐는데 rag-sync 라우팅에는 그 학과가
+    영영 안 들어가는 구멍이 있었다(실측 — cs 가 그렇게 누락됐다).
     """
-    codes = list_departments()
-    if not codes:
-        raise SystemExit("config/departments 에 학과 yaml 이 없다")
+    if not configs:
+        raise SystemExit("학과 설정이 하나도 없다")
 
     out: dict[str, dict[str, object]] = {}
     drive_owner: dict[str, str] = {}
-    for code in codes:
-        # staff 로 한 번만 부른다 — build_env 가 학생 코퍼스까지 같이 내보낸다.
-        env = build_env(code, "staff")
+    for code in sorted(configs):
+        # staff 로 한 번만 부른다 — 학생 코퍼스까지 같이 나온다.
+        env = build_env_from_config(code, "staff", configs[code])
         entry: dict[str, object] = {}
         for field, env_key, is_list in _MAP_FIELDS:
             raw = env.get(env_key, "")
@@ -315,7 +334,17 @@ def build_departments_map() -> dict[str, dict[str, object]]:
     return out
 
 
-def departments_json() -> str:
+def build_departments_map() -> dict[str, dict[str, object]]:
+    """로컬 YAML 전 학과 → sync 라우팅 맵."""
+    codes = list_departments()
+    if not codes:
+        raise SystemExit("config/departments 에 학과 yaml 이 없다")
+    return departments_map_from_configs(
+        {code: _load_yaml(DEPT_DIR / f"{code}.yaml") for code in codes}
+    )
+
+
+def _departments_json(mapping: dict[str, dict[str, object]]) -> str:
     """한 줄 JSON.
 
     공백을 넣지 않는다 — 이 값은 `--set-env-vars` 인자에 실려 명령줄로 나간다.
@@ -323,7 +352,17 @@ def departments_json() -> str:
     비ASCII 도 이스케이프한다(ensure_ascii 기본값) — 한국어 Windows 콘솔은
     cp949 라 학과명 같은 값이 파이프를 타면서 깨질 수 있다.
     """
-    return json.dumps(build_departments_map(), separators=(",", ":"), sort_keys=True)
+    return json.dumps(mapping, separators=(",", ":"), sort_keys=True)
+
+
+def departments_json() -> str:
+    """로컬 YAML 기준 DEPARTMENTS_JSON."""
+    return _departments_json(build_departments_map())
+
+
+def departments_json_from_configs(configs: dict[str, dict]) -> str:
+    """받은 학과 설정 기준 DEPARTMENTS_JSON."""
+    return _departments_json(departments_map_from_configs(configs))
 
 
 # --- 로컬 스크립트용 로더 --------------------------------------------------

@@ -1,8 +1,4 @@
-<<<<<<< Updated upstream
-# MCP 서버 Cloud Run 배포 (FactChat MCP 커넥터용)
-=======
-﻿# MCP 서버만 Cloud Run 배포 (FactChat MCP 커넥터용)
->>>>>>> Stashed changes
+﻿# MCP 서버 Cloud Run 배포 (FactChat MCP 커넥터용)
 #
 # deploy.ps1 도 MCP 를 올리지만 --no-allow-unauthenticated (IAM 전용)라 FactChat 이
 # 못 붙는다. 공개 URL 은 여기서만 나온다(ALLOW_UNAUTH, 기본 true).
@@ -122,22 +118,9 @@ if (-not $SkipBuild) {
   Assert-LastExit
 }
 
-<<<<<<< Updated upstream
 # 태그가 아니라 digest 로 배포한다. :latest 는 다음 빌드에서 다른 이미지를 가리키게
 # 되고, 그러면 학과마다 배포 시점이 달라 서로 다른 코드가 돌아도 아무도 모른다.
 $DIGEST = gcloud artifacts docker images describe $TAG --format="value(image_summary.digest)"
-=======
-$envVars = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|RAG_CORPUS_NAME=$($env:RAG_CORPUS_NAME)|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|FIRESTORE_DATABASE=$FS_DB|DOC_STATE_COLLECTION=$FS_COL|MCP_API_KEY=$MCP_API_KEY|TOP_K_DEFAULT=$TOP_K|SEARCH_FETCH_MULTIPLIER=$FETCH_MULT|SEARCH_FETCH_MAX=$FETCH_MAX"
-
-# min-instances=0 은 deploy.ps1 과 같은 값 - 어긋나면 재배포 쪽으로 조용히 뒤집힌다.
-gcloud run deploy $SERVICE `
-  --image=$IMAGE `
-  --region=$REGION `
-  @authArgs `
-  --set-env-vars=$envVars `
-  --memory=1Gi --cpu=1 --timeout=60 --concurrency=$MCP_CONCURRENCY `
-  --min-instances=0
->>>>>>> Stashed changes
 Assert-LastExit
 if ([string]::IsNullOrWhiteSpace($DIGEST)) { throw "이미지 digest 조회 실패: $TAG" }
 $IMAGE = "$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/mcp@$DIGEST"
@@ -174,13 +157,14 @@ foreach ($t in $targets) {
   if ($ALLOW_UNAUTH -ne "true") { $authArgs = @("--no-allow-unauthenticated") }
 
   # 다른 운영 PC가 로컬 YAML 없이도 Cloud Run에서 학과 설정을 복원한다.
-  # annotation 값은 비밀을 뺀 JSON의 base64url이고 쉼표가 없어 gcloud 인자에 안전하다.
+  # annotation 값은 학과 YAML 전체를 담은 JSON의 base64url이고 쉼표가 없어
+  # gcloud 인자에 안전하다. keys도 포함되므로 Cloud Run 조회 권한을 제한해야 한다.
   if ([string]::IsNullOrWhiteSpace($env:DEPT_CODE) -or
       [string]::IsNullOrWhiteSpace($env:MCP_AUDIENCE) -or
       [string]::IsNullOrWhiteSpace($env:DEPLOYMENT_METADATA_B64)) {
     throw "$SERVICE : Cloud Run 관리 메타데이터를 만들지 못했다"
   }
-  $managementLabels = "gcp-rag-managed=true,gcp-rag-dept=$($env:DEPT_CODE),gcp-rag-audience=$($env:MCP_AUDIENCE),gcp-rag-schema=v1"
+  $managementLabels = "gcp-rag-managed=true,gcp-rag-dept=$($env:DEPT_CODE),gcp-rag-audience=$($env:MCP_AUDIENCE),gcp-rag-schema=v2"
   $managementAnnotation = "gcp-rag.dev/department-metadata=$($env:DEPLOYMENT_METADATA_B64)"
 
   $envVars = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|RAG_CORPUS_NAME=$($env:RAG_CORPUS_NAME)|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|FIRESTORE_DATABASE=$FS_DB|DOC_STATE_COLLECTION=$FS_COL|MCP_API_KEY=$MCP_API_KEY|TOP_K_DEFAULT=$TOP_K|SEARCH_FETCH_MULTIPLIER=$FETCH_MULT|SEARCH_FETCH_MAX=$FETCH_MAX"

@@ -177,6 +177,7 @@ def test_mcp_deploy_attaches_cloud_management_metadata() -> None:
     assert "--update-labels=$managementLabels" in source
     assert "--update-annotations=$managementAnnotation" in source
     assert "$env:DEPLOYMENT_METADATA_B64" in source
+    assert "gcp-rag-schema=v2" in source
 
 
 def test_full_deploy_accepts_real_values() -> None:
@@ -729,4 +730,3 @@ def test_no_target_argument_is_rejected() -> None:
     )
     assert p.returncode == 0, p.stderr or p.stdout
     assert "THROWN" in p.stdout, p.stdout
-

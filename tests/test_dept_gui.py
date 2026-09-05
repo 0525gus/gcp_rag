@@ -5,11 +5,11 @@ from __future__ import annotations
 import base64
 import io
 import json
-from datetime import UTC, datetime, timedelta
 import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -71,10 +71,13 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dept_gui._SA_REPAIR_PLANS.clear()
     dept_gui._SA_REPAIR_RUNS.clear()
     dept_gui._MCP_DEPLOY_RUNS.clear()
+    dept_gui._MCP_DEPLOY_CONFIGS.clear()
     dept_gui._COMMON_RUNTIME_DEPLOY_RUNS.clear()
     dept_gui._TEARDOWN_RUNS.clear()
     dept_gui._SYNC_AUTH_TOKEN = ""
     dept_gui._SYNC_AUTH_TOKEN_EXPIRES = 0.0
+    dept_gui._SYNC_TARGET_CACHE.clear()
+    dept_gui._CLOUD_DEPARTMENT_CONFIG_CACHE.clear()
     return dept_dir
 
 
@@ -110,8 +113,21 @@ def _client() -> tuple[TestClient, dict[str, str]]:
 
 
 def _cloud_metadata(code: str, audience: str) -> str:
+    cloud_yaml = {
+        "name": "전자공학과",
+        "corpora": {"staff": "corpus-staff", "student": "corpus-student"},
+        "keys": {"staff": "cloud-staff-key", "student": "cloud-student-key"},
+        "buckets": {"hwpOriginal": "bucket-hwp", "source": "bucket-source"},
+        "drive": {
+            "driveIds": ["drive-1"],
+            "syncFolderIds": ["folder-1"],
+            "studentFolderIds": ["folder-student"],
+        },
+        "minInstances": {"staff": 1, "student": 0},
+        "futureOption": {"enabled": True},
+    }
     payload = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "managedBy": "gcp-rag",
         "code": code,
         "name": "전자공학과",
@@ -125,6 +141,7 @@ def _cloud_metadata(code: str, audience: str) -> str:
             "studentFolderIds": ["folder-student"],
         },
         "minInstances": {"staff": 1, "student": 0},
+        "yaml": cloud_yaml,
     }
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
@@ -187,12 +204,201 @@ def test_cloud_mcp_endpoint_restores_department_without_local_yaml(
     assert record["lastStatus"] == "OK"
     assert record["metadata"]["corpora"]["student"] == "corpus-student"
     assert record["metadata"]["drive"]["driveIds"] == ["drive-1"]
+    assert record["metadata"]["futureOption"] == {"enabled": True}
     assert {item["audience"] for item in record["cloudServices"]} == {
         "staff",
         "student",
     }
     assert all(item["status"] == "READY" for item in record["cloudServices"])
     assert "must-not-leak" not in json.dumps(body, ensure_ascii=False)
+    assert "cloud-staff-key" not in json.dumps(body, ensure_ascii=False)
+
+
+def _cloud_v2_service(code: str = "ee") -> tuple[dict, dict]:
+    config = {
+        "name": "전자공학과",
+        "corpora": {
+            "staff": "projects/project-test/locations/asia-northeast3/ragCorpora/staff-1",
+            "student": "projects/project-test/locations/asia-northeast3/ragCorpora/student-1",
+        },
+        "keys": {"staff": "cloud-staff-secret-key-value", "student": "cloud-student-secret-key-value"},
+        "buckets": {"hwpOriginal": "rag-ee-hwp-project-test", "source": "rag-ee-source-project-test"},
+        "drive": {
+            "driveIds": ["DRIVE-1"],
+            "syncFolderIds": ["STAFF-1", "STUDENT-1"],
+            "studentFolderIds": ["STUDENT-1"],
+        },
+        "minInstances": {"staff": 1, "student": 0},
+        "futureOption": {"enabled": True},
+    }
+    metadata = {
+        "schemaVersion": 2,
+        "managedBy": "gcp-rag",
+        "code": code,
+        "name": config["name"],
+        "audience": "staff",
+        "corpusMode": "split",
+        "yaml": config,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(metadata, ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+    service = {
+        "metadata": {"name": f"rag-mcp-{code}-staff"},
+        "spec": {"template": {"metadata": {"annotations": {dept_gui.DEPLOYMENT_METADATA_ANNOTATION: encoded}}}},
+        "status": {"url": f"https://rag-mcp-{code}-staff.example.run"},
+    }
+    return config, service
+
+
+class _DeferredThread:
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def start(self) -> None:
+        pass
+
+
+class _DeferredThreading:
+    """dept_gui 가 보는 threading 만 갈아끼운다.
+
+    `threading.Thread` 자체를 덮으면 ThreadPoolExecutor 의 일꾼까지 안 떠서
+    학과 주석을 병렬로 읽는 코드가 as_completed 에서 영원히 멈춘다.
+    """
+
+    Thread = _DeferredThread
+
+
+def _stub_cloud_run(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_services: dict[str, dict],
+    sync_env: dict[str, str] | None = None,
+) -> list[list[str]]:
+    """rag-mcp-* 주석 조회와 rag-sync 갱신을 흉내낸다. 실행된 gcloud 인자를 준다."""
+    calls: list[list[str]] = []
+
+    def fake_gcloud(args, timeout=12):
+        if args[:3] == ["run", "services", "list"]:
+            return True, [{"metadata": {"name": name}} for name in mcp_services]
+        if args[:3] == ["run", "services", "describe"]:
+            name = args[3]
+            if name == dept_gui.SYNC_SERVICE:
+                return True, _sync_service(sync_env or {})
+            return True, mcp_services.get(name, {})
+        return True, {}
+
+    def fake_run(args, timeout=12):
+        # 학과 맵은 명령줄이 아니라 flags-file 로 나간다. 테스트도 같은 자리를 본다.
+        record: dict = {"args": list(args), "flags": {}}
+        for arg in args:
+            if arg.startswith("--flags-file="):
+                content = Path(arg.split("=", 1)[1]).read_text(encoding="utf-8")
+                for entry in yaml.safe_load(content) or []:
+                    record["flags"].update(entry)
+        calls.append(record)
+        return True, ""
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
+    monkeypatch.setattr(dept_gui, "_run_command", fake_run)
+    return calls
+
+
+def test_cloud_config_can_be_edited_without_creating_local_yaml(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, service = _cloud_v2_service()
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *args, **kwargs: (True, service))
+
+    monkeypatch.setattr(dept_gui, "threading", _DeferredThreading)
+    client, headers = _client()
+    public = client.get("/api/v1/departments/ee/config")
+
+    assert public.status_code == 200
+    assert public.json()["source"] == "cloud"
+    assert "keys" not in public.text
+
+    payload = public.json()
+    payload["name"] = "전자·AI공학과"
+    updated = client.put("/api/v1/departments/ee", headers=headers, json=payload)
+
+    assert updated.status_code == 202
+    run = updated.json()["deployment"]
+    stored = dept_gui._MCP_DEPLOY_CONFIGS[run["runId"]]
+    assert stored["name"] == "전자·AI공학과"
+    assert stored["keys"] == config["keys"]
+    assert stored["futureOption"] == {"enabled": True}
+    assert not (isolated_config / "ee.yaml").exists()
+    assert config["keys"]["staff"] not in updated.text
+
+
+def test_cloud_config_update_writes_full_yaml_annotation_without_logging_key(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _service = _cloud_v2_service()
+    calls: list[list[str]] = []
+    logs: list[str] = []
+    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
+
+    def fake_run(args, timeout=12):
+        calls.append(args)
+        return True, "updated"
+
+    monkeypatch.setattr(dept_gui, "_run_command", fake_run)
+    updated = dept_gui._update_cloud_department_config("ee", config, on_line=logs.append)
+
+    assert updated == ["rag-mcp-ee-staff", "rag-mcp-ee-student"]
+    assert all(call[1:4] == ["run", "services", "update"] for call in calls)
+    annotation_arg = next(arg for arg in calls[0] if arg.startswith("--update-annotations="))
+    encoded = annotation_arg.split("=", 2)[2]
+    metadata = json.loads(base64.urlsafe_b64decode(encoded).decode("utf-8"))
+    assert metadata["schemaVersion"] == 2
+    assert metadata["yaml"] == config
+    assert config["keys"]["staff"] not in "\n".join(logs)
+
+
+def test_cloud_mcp_redeploy_does_not_require_local_yaml(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, service = _cloud_v2_service()
+
+    monkeypatch.setattr(dept_gui, "threading", _DeferredThreading)
+    run = dept_gui.start_mcp_deployment("ee", cloud_config=config)
+    _stub_cloud_run(monkeypatch, {"rag-mcp-ee-staff": service})
+    monkeypatch.setattr(
+        dept_gui,
+        "_run_mcp_deploy_script",
+        lambda *args, **kwargs: pytest.fail("Cloud 재배포가 로컬 YAML 스크립트를 호출했습니다."),
+    )
+    monkeypatch.setattr(
+        dept_gui, "_update_cloud_department_config", lambda code, cfg, on_line: ["staff", "student"]
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "department_mcp_servers",
+        lambda code: {
+            "servers": [
+                {
+                    "serviceName": "rag-mcp-ee-staff",
+                    "status": "READY",
+                    "healthUrl": "https://staff.example/health",
+                },
+                {
+                    "serviceName": "rag-mcp-ee-student",
+                    "status": "READY",
+                    "healthUrl": "https://student.example/health",
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(dept_gui, "_http_json", lambda *args, **kwargs: (200, {}, 1))
+
+    dept_gui._execute_mcp_deployment(run["runId"])
+
+    result = dept_gui._MCP_DEPLOY_RUNS[run["runId"]]
+    assert result["status"] == "COMPLETED"
+    assert run["runId"] not in dept_gui._MCP_DEPLOY_CONFIGS
+    assert not (isolated_config / "ee.yaml").exists()
 
 
 def test_preview_normalises_ids_and_never_returns_secret(isolated_config: Path) -> None:
@@ -399,19 +605,9 @@ def test_mcp_deployment_tracks_steps_and_redacts_key(
     saved = yaml.safe_load((isolated_config / "ee.yaml").read_text(encoding="utf-8"))
     secret = saved["keys"]["staff"]
 
-    class DeferredThread:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-        def start(self) -> None:
-            pass
-
-    class DeferredThreading:
-        Thread = DeferredThread
-
-    monkeypatch.setattr(dept_gui, "threading", DeferredThreading)
+    monkeypatch.setattr(dept_gui, "threading", _DeferredThreading)
     run = dept_gui.start_mcp_deployment("ee")
-    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *args, **kwargs: (True, {}))
+    _stub_cloud_run(monkeypatch, {"rag-mcp-ee-staff": _cloud_v2_service()[1]})
 
     def fake_deploy(code: str, *, skip_build: bool, on_line) -> int:
         assert code == "ee"
@@ -450,17 +646,7 @@ def test_common_runtime_deployment_tracks_steps_and_follow_up_department(
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
 
-    class DeferredThread:
-        def __init__(self, *args, **kwargs) -> None:
-            pass
-
-        def start(self) -> None:
-            pass
-
-    class DeferredThreading:
-        Thread = DeferredThread
-
-    monkeypatch.setattr(dept_gui, "threading", DeferredThreading)
+    monkeypatch.setattr(dept_gui, "threading", _DeferredThreading)
     run = dept_gui.start_common_runtime_deployment("ee")
 
     def fake_deploy(*, on_line, env_only=False) -> int:
@@ -1208,6 +1394,57 @@ def test_offline_status_run_completes_without_gcloud(isolated_config: Path) -> N
     assert any(item["status"] == "SKIP" for item in result["checks"])
 
 
+def test_cloud_only_department_status_uses_annotation_config_without_local_yaml(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _service = _cloud_v2_service()
+    revision = dept_gui._mapping_revision(config)
+    monkeypatch.setattr(
+        dept_gui,
+        "cloud_department_status_config",
+        lambda code: (config, revision, True),
+    )
+
+    result = dept_gui._run_department_status("ee", offline=True)
+
+    assert result["configRevision"] == revision
+    assert any(
+        item["name"] == "cloud-metadata" and item["status"] == "OK"
+        for item in result["checks"]
+    )
+    assert any(item["name"] == "offline" for item in result["checks"])
+
+
+def test_status_run_endpoint_accepts_cloud_only_department(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, _service = _cloud_v2_service()
+    revision = dept_gui._mapping_revision(config)
+    monkeypatch.setattr(
+        dept_gui,
+        "cloud_department_status_config",
+        lambda code: (config, revision, True),
+    )
+    client, headers = _client()
+
+    started = client.post(
+        "/api/v1/status-runs",
+        headers=headers,
+        json={"departments": ["ee"], "offline": True},
+    )
+
+    assert started.status_code == 202
+    run_id = started.json()["runId"]
+    for _ in range(50):
+        run = client.get(f"/api/v1/status-runs/{run_id}").json()
+        if run["status"] != "RUNNING":
+            break
+        time.sleep(0.02)
+    assert run["status"] == "COMPLETED"
+    assert run["scope"] == ["ee"]
+    assert run["departments"][0]["code"] == "ee"
+
+
 def test_status_run_cache_deduplicates_concurrent_gcloud_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1355,7 +1592,9 @@ def test_drive_preflight_checks_unsaved_ids(
 ) -> None:
     client, headers = _client()
     monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
-    monkeypatch.setattr(dept_gui, "_run_command", lambda args: (True, "caller-token"))
+    monkeypatch.setattr(
+        dept_gui, "_run_command", lambda args, timeout=12: (True, "caller-token")
+    )
     monkeypatch.setattr(
         dept_gui,
         "_drive_service_account_status",
@@ -1712,7 +1951,9 @@ def test_start_manual_sync_scopes_workflow_to_selected_department(
         )
     monkeypatch.setattr(dept_gui, "_list_sync_execution_rows", lambda *a, **k: [])
     monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud")
-    monkeypatch.setattr(dept_gui, "_run_command", lambda args: (True, "caller-token"))
+    monkeypatch.setattr(
+        dept_gui, "_run_command", lambda args, timeout=12: (True, "caller-token")
+    )
     monkeypatch.setattr(
         dept_gui,
         "_drive_service_account_status",
@@ -1748,6 +1989,96 @@ def test_start_manual_sync_scopes_workflow_to_selected_department(
     assert argument["runId"] == "b" * 32
     assert result["state"] == "ACTIVE"
     assert result["departmentCode"] == "ee"
+
+
+def test_sync_targets_fall_back_to_deployed_departments_json_without_local_yaml(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deployed_map = {
+        "ee": {
+            "driveIds": ["DRIVE_EE_123456"],
+            "syncFolderIds": ["FOLDER_EE_123456"],
+            "studentFolderIds": ["STUDENT_EE_123456"],
+            "staffCorpus": "corpus-ee-staff",
+            "studentCorpus": "corpus-ee-student",
+        }
+    }
+
+    def fake_gcloud(args, timeout=12):
+        assert args[:4] == ["run", "services", "describe", "rag-sync"]
+        return True, {
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {
+                                "env": [
+                                    {
+                                        "name": "DEPARTMENTS_JSON",
+                                        "value": json.dumps(deployed_map),
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    departments, drive_owners = dept_gui._sync_department_targets()
+
+    assert departments == {
+        "ee": {
+            "code": "ee",
+            "name": "ee",
+            "driveIds": ["DRIVE_EE_123456"],
+            "syncFolderIds": ["FOLDER_EE_123456"],
+            "studentFolderIds": ["STUDENT_EE_123456"],
+            "corpora": {
+                "staff": "corpus-ee-staff",
+                "student": "corpus-ee-student",
+            },
+            "source": "cloud-run-env",
+        }
+    }
+    assert drive_owners == {"DRIVE_EE_123456": "ee"}
+
+
+def test_sync_target_cloud_map_is_cached(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def fake_gcloud(args, timeout=12):
+        nonlocal calls
+        calls += 1
+        return True, {
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [
+                            {
+                                "env": [
+                                    {
+                                        "name": "DEPARTMENTS_JSON",
+                                        "value": '{"ee":{"driveIds":["DRIVE_EE_123456"]}}',
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    dept_gui._sync_department_targets()
+    dept_gui._sync_department_targets()
+
+    assert calls == 1
 
 
 def test_start_sync_run_endpoint_returns_conflict(
@@ -3484,3 +3815,166 @@ def test_env_only_run_skips_build_workflow_and_scheduler_steps(
     assert run["envOnly"] is True
     assert [step["key"] for step in run["steps"]] == ["config", "cloudRun", "ready"]
 
+
+# ---- rag-sync 학과 라우팅 맵 -------------------------------------------------
+# MCP 주석과 rag-sync 의 DEPARTMENTS_JSON 이 갈라지면 그 학과는 동기화 탭에
+# 나타나지도 않고 실행해도 UnknownDriveError 로 건너뛴다. 조용히 어긋나는 값이라
+# 배포가 끝날 때마다 맞추고, 어긋난 상태는 드리프트로 보이게 한다.
+
+
+def test_mcp_deployment_refreshes_the_sync_department_map(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """학과를 올리면 rag-sync 라우팅 맵도 같이 갱신된다.
+
+    MCP 만 올리고 끝내던 시절에는 rag-sync 가 새 학과의 드라이브를 몰라
+    동기화 대상에서 통째로 빠졌다. 사람이 기억해야 하는 수동 절차였다.
+    """
+    config, service = _cloud_v2_service()
+    monkeypatch.setattr(dept_gui, "threading", _DeferredThreading)
+    run = dept_gui.start_mcp_deployment("ee", cloud_config=config)
+    calls = _stub_cloud_run(
+        monkeypatch,
+        {"rag-mcp-ee-staff": service},
+        sync_env={"DEPARTMENTS_JSON": "{}"},
+    )
+    monkeypatch.setattr(
+        dept_gui, "_update_cloud_department_config", lambda code, cfg, on_line: ["staff"]
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "department_mcp_servers",
+        lambda code: {
+            "servers": [
+                {
+                    "serviceName": "rag-mcp-ee-staff",
+                    "status": "READY",
+                    "healthUrl": "https://staff.example/health",
+                },
+                {
+                    "serviceName": "rag-mcp-ee-student",
+                    "status": "READY",
+                    "healthUrl": "https://student.example/health",
+                },
+            ]
+        },
+    )
+    monkeypatch.setattr(dept_gui, "_http_json", lambda *args, **kwargs: (200, {}, 1))
+
+    dept_gui._execute_mcp_deployment(run["runId"])
+    result = dept_gui._MCP_DEPLOY_RUNS[run["runId"]]
+    step = next(item for item in result["steps"] if item["key"] == "syncMap")
+
+    assert result["status"] == "COMPLETED"
+    assert step["status"] == "COMPLETE"
+
+    update = next(
+        call for call in calls if call["args"][1:4] == ["run", "services", "update"]
+    )
+    assert update["args"][4] == dept_gui.SYNC_SERVICE
+    # --set-env-vars 는 env 를 통째로 치환한다. 여기서 그것을 쓰면 버킷·코퍼스·
+    # Cloud Tasks 설정이 한꺼번에 사라진다.
+    assert not any(arg.startswith("--set-env-vars=") for arg in update["args"])
+    # 값이 명령줄에 실리면 Windows 의 gcloud.cmd 가 콤마마다 끊어 죽는다.
+    assert not any("DEPARTMENTS_JSON" in arg for arg in update["args"])
+    departments = json.loads(update["flags"]["--update-env-vars"]["DEPARTMENTS_JSON"])
+    assert departments["ee"]["driveIds"] == ["DRIVE-1"]
+    assert departments["ee"]["syncFolderIds"] == ["STAFF-1", "STUDENT-1"]
+    assert "cloud-staff-secret-key-value" not in json.dumps(departments)
+
+
+def test_sync_department_map_is_left_alone_when_it_already_matches(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """같은 값을 다시 씌우면 쓸데없는 리비전만 하나 더 뜬다."""
+    _config, service = _cloud_v2_service()
+    expected = dept_config.departments_json_from_configs({"ee": _cloud_v2_service()[0]})
+    calls = _stub_cloud_run(
+        monkeypatch,
+        {"rag-mcp-ee-staff": service},
+        sync_env={"DEPARTMENTS_JSON": expected},
+    )
+
+    codes = dept_gui.update_sync_department_map()
+
+    assert codes == "ee"
+    assert calls == []
+
+
+def test_sync_department_map_refuses_to_drop_a_department_without_v2_metadata(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """v1 학과를 빼고 맵을 씌우면 그 학과 문서가 조용히 처리되지 않는다."""
+    _config, service = _cloud_v2_service()
+    calls = _stub_cloud_run(
+        monkeypatch,
+        {"rag-mcp-ee-staff": service, "rag-mcp-cs-staff": {"metadata": {"name": "rag-mcp-cs-staff"}}},
+        sync_env={"DEPARTMENTS_JSON": "{}"},
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        dept_gui.update_sync_department_map()
+
+    assert "cs" in str(excinfo.value)
+    assert calls == []
+
+
+def test_runtime_env_drift_sees_a_stale_department_map_without_local_yaml(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """로컬 YAML 이 없어도 학과 맵이 낡았으면 드리프트로 보여야 한다.
+
+    로컬 YAML 만 보던 시절에는 이 환경에서 검사가 통째로 UNKNOWN 으로 빠져,
+    rag-sync 에 학과가 빠져 있어도 경고 한 줄 없었다.
+    """
+    _config, service = _cloud_v2_service()
+    mcp_services = {"rag-mcp-ee-staff": service}
+
+    def fake_gcloud(args, timeout=12):
+        if args[:3] == ["run", "services", "list"]:
+            return True, [{"metadata": {"name": name}} for name in mcp_services]
+        if args[:3] == ["run", "services", "describe"]:
+            name = args[3]
+            if name in mcp_services:
+                return True, mcp_services[name]
+            return True, _sync_service({"DEPARTMENTS_JSON": "{}"})
+        return True, {}
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+    report = dept_gui.runtime_env_drift()
+    by_service = {item["serviceName"]: item for item in report["services"]}
+
+    assert report["status"] == "DRIFT"
+    assert report["baseDepartment"] == "ee"
+    assert "DEPARTMENTS_JSON" in [
+        item["key"] for item in by_service["rag-sync"]["staleKeys"]
+    ]
+
+
+def test_env_only_refresh_without_local_yaml_updates_the_department_map(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """YAML 없는 환경에서 deploy.ps1 -EnvOnly 는 학과 맵을 만들지 못해 죽는다."""
+    _config, service = _cloud_v2_service()
+    monkeypatch.setattr(dept_gui, "threading", _DeferredThreading)
+    run = dept_gui.start_common_runtime_deployment(env_only=True)
+    calls = _stub_cloud_run(
+        monkeypatch,
+        {"rag-mcp-ee-staff": service},
+        sync_env={"DEPARTMENTS_JSON": "{}"},
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_run_common_runtime_deploy_script",
+        lambda **kwargs: pytest.fail("로컬 YAML 이 없는데 배포 스크립트를 불렀습니다."),
+    )
+    monkeypatch.setattr(dept_gui, "_verify_common_runtime_deployment", lambda: [])
+
+    dept_gui._execute_common_runtime_deployment(run["runId"])
+    result = dept_gui._COMMON_RUNTIME_DEPLOY_RUNS[run["runId"]]
+
+    assert result["status"] == "COMPLETED"
+    update = next(
+        call for call in calls if call["args"][1:4] == ["run", "services", "update"]
+    )
+    assert update["args"][4] == dept_gui.SYNC_SERVICE
