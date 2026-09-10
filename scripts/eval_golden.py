@@ -42,6 +42,8 @@ if str(ROOT) not in sys.path:
 
 from scripts.dept_config import build_env  # noqa: E402
 
+from shared.search_response import response_documents  # noqa: E402
+
 DEFAULT_TOP_K = 5
 
 
@@ -73,16 +75,7 @@ def call_search(url: str, key: str, query: str, top_k: int) -> list[dict[str, An
             raw = line[5:].strip()
             break
 
-    hits: list[dict[str, Any]] = []
-    for block in json.loads(raw).get("result", {}).get("content", []):
-        if block.get("type") != "text":
-            continue
-        try:
-            hits.append(json.loads(block["text"]))
-        except json.JSONDecodeError:
-            # 툴이 에러 문자열을 그대로 실어 보낸 경우 — 히트로 세지 않는다
-            pass
-    return hits
+    return response_documents(json.loads(raw).get("result", {}))
 
 
 def _rank(seq: list[Any], want: Any) -> int | None:
@@ -159,7 +152,7 @@ def main() -> int:
 
         # 거리 임계값 조정 판단에 쓰려면 점수가 필요하다. 정답이 임계값
         # 바로 아래에 몰려 있으면 질의 표현이 조금만 달라져도 통째로 잘린다.
-        scores = [h.get("score") for h in hits]
+        scores = [h.get("score", (h.get("chunks") or [{}])[0].get("score")) for h in hits]
         hit_score = next(
             (s for s, f in zip(scores, ids) if f in
              {g["file_id"], *g.get("also_accept", [])}), None

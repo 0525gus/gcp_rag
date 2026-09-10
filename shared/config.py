@@ -7,7 +7,6 @@ import logging
 import os
 from dataclasses import dataclass, replace
 from functools import lru_cache
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -66,48 +65,94 @@ class Department:
 
 
 def _departments_from_json(raw: str) -> tuple[Department, ...]:
-    """DEPARTMENTS_JSON 파싱. 깨졌으면 **비운다**(=단일 학과 동작).
-
-    여기서 예외를 올리면 설정 오타 하나로 sync 가 기동조차 못 한다. 반대로
-    잘못된 맵을 반쯤 들고 도는 것이 더 위험하므로, 파싱 실패는 전부 버리고
-    경고를 남긴 뒤 기존 단일 코퍼스 경로로 간다.
-    """
+    """명시된 학과 맵은 완전해야 한다. 오류를 단일 학과 모드로 바꾸지 않는다."""
     raw = (raw or "").strip()
     if not raw:
         return ()
+
+    def _unique_mapping(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("DEPARTMENTS_JSON contains a duplicate key")
+            result[key] = value
+        return result
+
     try:
-        data = json.loads(raw)
-    except Exception:
-        logger.exception("DEPARTMENTS_JSON 파싱 실패 — 단일 학과로 동작한다")
-        return ()
-    if not isinstance(data, dict):
-        logger.error("DEPARTMENTS_JSON 이 매핑이 아니다 — 단일 학과로 동작한다")
-        return ()
+        data = json.loads(raw, object_pairs_hook=_unique_mapping)
+    except ValueError as exc:
+        raise ValueError("DEPARTMENTS_JSON must be valid JSON") from exc
+    if not isinstance(data, dict) or not data:
+        raise ValueError("DEPARTMENTS_JSON must be a nonempty mapping")
 
     def _tuple(v: object) -> tuple[str, ...]:
         if isinstance(v, str):
             return tuple(x.strip() for x in v.split(",") if x.strip())
         if isinstance(v, (list, tuple)):
-            return tuple(str(x).strip() for x in v if str(x).strip())
+            if any(not isinstance(x, str) or not x.strip() for x in v):
+                raise ValueError("DEPARTMENTS_JSON IDs must be nonempty strings")
+            return tuple(x.strip() for x in v)
+        if v is not None:
+            raise ValueError("DEPARTMENTS_JSON IDs must be a list or comma-separated string")
         return ()
+
+    def _string(v: object) -> str:
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            raise ValueError("DEPARTMENTS_JSON resource names must be strings")
+        return v.strip()
 
     out = []
     for code, d in data.items():
         if not isinstance(d, dict):
-            continue
+            raise ValueError(f"DEPARTMENTS_JSON department {code} must be a mapping")
         out.append(
             Department(
                 code=str(code),
                 drive_ids=_tuple(d.get("driveIds")),
-                staff_corpus=str(d.get("staffCorpus") or ""),
-                student_corpus=str(d.get("studentCorpus") or ""),
-                hwp_bucket=str(d.get("hwpBucket") or ""),
-                source_bucket=str(d.get("sourceBucket") or ""),
+                staff_corpus=_string(d.get("staffCorpus")),
+                student_corpus=_string(d.get("studentCorpus")),
+                hwp_bucket=_string(d.get("hwpBucket")),
+                source_bucket=_string(d.get("sourceBucket")),
                 student_folder_ids=_tuple(d.get("studentFolderIds")),
                 sync_folder_ids=_tuple(d.get("syncFolderIds")),
             )
         )
-    return tuple(out)
+    result = tuple(out)
+    _validate_departments(result)
+    return result
+
+
+def _validate_departments(departments: tuple[Department, ...]) -> None:
+    drives: set[str] = set()
+    codes: set[str] = set()
+    corpora: set[str] = set()
+    for dept in departments:
+        required = (dept.code, dept.staff_corpus, dept.hwp_bucket, dept.source_bucket)
+        if any(not isinstance(value, str) or not value.strip() for value in required):
+            raise ValueError(f"department {dept.code}: code, staffCorpus and both buckets required")
+        if not dept.drive_ids or not dept.sync_folder_ids:
+            raise ValueError(f"department {dept.code}: driveIds and syncFolderIds required")
+        for ids in (dept.drive_ids, dept.sync_folder_ids, dept.student_folder_ids):
+            if any(not isinstance(value, str) or not value.strip() for value in ids):
+                raise ValueError(f"department {dept.code}: invalid folder/Drive ID")
+            if len(ids) != len(set(ids)):
+                raise ValueError(f"department {dept.code}: duplicate folder/Drive ID")
+        if dept.code in codes or drives.intersection(dept.drive_ids):
+            raise ValueError(f"department {dept.code}: duplicate department or Drive ID")
+        codes.add(dept.code)
+        drives.update(dept.drive_ids)
+        if bool(dept.student_corpus) != bool(dept.student_folder_ids):
+            raise ValueError(
+                f"department {dept.code}: studentCorpus and studentFolderIds required together"
+            )
+        for corpus in (dept.staff_corpus, dept.student_corpus):
+            if corpus:
+                normalized = corpus.rstrip("/")
+                if normalized in corpora:
+                    raise ValueError(f"department {dept.code}: duplicate corpus")
+                corpora.add(normalized)
 
 
 @dataclass(frozen=True)
@@ -134,9 +179,9 @@ class Settings:
     # 런타임에 비면 드라이브 전체 — 테스트/우회용이지 운영 기본이 아니다.
     sync_folder_ids: str = ""
 
-    # 학과 맵. 비어 있으면 **지금까지와 똑같이** 단일 학과로 동작한다 —
-    # 이 필드가 도입돼도 기존 배포가 달라지지 않게 하는 장치다.
+    # 완전한 학과 맵. sync 운영 이미지는 departments_required=True로 기동한다.
     departments: tuple[Department, ...] = ()
+    departments_required: bool = False
 
     # 이 폴더 트리 아래 문서만 학생 코퍼스에 실린다. sync_folder_ids 의 부분집합이며
     # 여기 없는 문서는 전부 교직원 전용이다(판정 불가도 교직원 — 안전한 쪽).
@@ -259,6 +304,11 @@ class Settings:
     # ~174KB 로 안전 마진이 남는다. 초과분은 hasMore 로 알리고 다음 호출에서 잇는다.
     sync_max_changes: int = 200
 
+    def __post_init__(self) -> None:
+        if self.departments_required and not self.departments:
+            raise ValueError("DEPARTMENTS_JSON is required in multi-department mode")
+        _validate_departments(self.departments)
+
     @property
     def drive_id_list(self) -> list[str]:
         return [d.strip() for d in self.drive_ids.split(",") if d.strip()]
@@ -295,8 +345,7 @@ class Settings:
         GcsClient, 폴더 스코프)이 전부 학과 값을 쓴다 — 25곳을 각각 고치지
         않아도 되는 이유다.
 
-        학과가 값을 안 적었으면 공용값(common.yaml)을 그대로 둔다. 기존 학과를
-        옮기지 않고 새 학과만 자기 버킷을 갖는 이관 방식을 그대로 따른다.
+        배포 시 병합을 마친 완전한 학과 맵만 받는다. 공용 설정을 상속하지 않는다.
         """
         if not self.departments:
             return self
@@ -304,20 +353,15 @@ class Settings:
         if dept is None:
             raise UnknownDriveError(f"학과 맵에 없는 드라이브: {drive_id}")
 
-        changed: dict[str, Any] = {}
-        if dept.staff_corpus:
-            changed["rag_corpus_name"] = dept.staff_corpus
-        if dept.student_corpus:
-            changed["rag_corpus_name_student"] = dept.student_corpus
-        if dept.hwp_bucket:
-            changed["gcs_hwp_original_bucket"] = dept.hwp_bucket
-        if dept.source_bucket:
-            changed["gcs_source_bucket"] = dept.source_bucket
-        if dept.student_folder_ids:
-            changed["student_folder_ids"] = ",".join(dept.student_folder_ids)
-        if dept.sync_folder_ids:
-            changed["sync_folder_ids"] = ",".join(dept.sync_folder_ids)
-        return replace(self, **changed) if changed else self
+        return replace(
+            self,
+            rag_corpus_name=dept.staff_corpus,
+            rag_corpus_name_student=dept.student_corpus,
+            gcs_hwp_original_bucket=dept.hwp_bucket,
+            gcs_source_bucket=dept.source_bucket,
+            student_folder_ids=",".join(dept.student_folder_ids),
+            sync_folder_ids=",".join(dept.sync_folder_ids),
+        )
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -325,6 +369,9 @@ class Settings:
         if mode not in {"log", "reject", "fallback"}:
             mode = "log"
         return cls(
+            departments_required=(
+                _env_bool("DEPARTMENTS_REQUIRED") or "DEPARTMENTS_JSON" in os.environ
+            ),
             gcp_project_id=_env("GCP_PROJECT_ID"),
             gcp_region=os.environ.get("GCP_REGION", "asia-northeast3"),
             gcs_hwp_original_bucket=_env("GCS_HWP_ORIGINAL_BUCKET"),

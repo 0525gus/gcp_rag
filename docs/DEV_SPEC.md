@@ -20,7 +20,7 @@ FactChat이 MCP를 통해 문서를 검색할 수 있게 한다.
 - Cloud Tasks 기반 코퍼스별 비동기 색인과 재시도
 - Firestore 기반 문서 상태, 실행 상태, Drive file ID ↔ RagFile 매핑
 - 벡터 검색, 어휘 재정렬, 문서·청크 단위 후처리
-- MCP의 `search`, `answer` 도구
+- MCP의 단일 `search` 도구
 - 학과 설정과 운영 상태를 확인하는 로컬 관리 콘솔
 
 제외 범위:
@@ -308,13 +308,17 @@ MCP 서비스 하나는 배포 시 정해진 코퍼스 하나만 조회한다. �
 1. 요청 `top_k`를 1~20으로 제한한다. 기본값은 5다.
 2. 후보 청크를 `min(60, max(top_k × 3, top_k))`개 가져온다.
 3. 벡터 거리 0.30을 초과한 후보를 제거한다.
-4. 남은 후보에서 BM25 순위와 벡터 순위를 RRF로 결합해 재정렬한다.
-5. `doc_state`가 `INDEXED`가 아닌 문서와 대상 코퍼스에 맞지 않는 문서를 제거한다.
-6. 파일별 최대 3청크, 전체 최대 15청크로 병합한다.
+4. HTML 원본 후보를 정제한 뒤 BM25 순위와 벡터 순위를 RRF로 결합해 재정렬한다.
+5. 삭제·제외·스킵 상태와 폴더 밖 정리 실패 문서를 제거하고, 요청된 drive_id를 적용한다.
+6. 파일별 최대 3청크, 전체 최대 15청크를 선택하되 청크 경계를 보존한다.
+   top_k가 전체 청크 상한보다 크면 반환 문서 수도 그 상한 이하가 된다.
 7. 파일명, Drive 링크, 수정 시각과 함께 반환한다.
 
-RAG 청킹 기본값은 chunk size 1024, overlap 256이다. `answer` 도구는 검색 결과를
-답변 생성용 payload로 정리할 뿐 자체 LLM 답변을 만들지 않는다.
+RAG 청킹 기본값은 chunk size 1024, overlap 256이다. 검색 결과는 문서별 본문 청크와
+출처·citationId를 한 번에 반환한다. 공개 `answer` 도구와 답변 가능성처럼 읽히던
+키워드 `coverage`는 제거했다. 서버는 최종 LLM 답변을 생성하지 않는다.
+HTML은 수집 시 제목·표 관계를 보존하는 텍스트로 변환하며 기존 HTML 색인도 응답에서 정제한다.
+응답 계약과 배포 시 전환 절차는 [MCP_SEARCH_V2.md](MCP_SEARCH_V2.md)를 따른다.
 
 ## 8. API 계약
 
@@ -353,8 +357,7 @@ RAG 청킹 기본값은 chunk size 1024, overlap 256이다. `answer` 도구는 �
 
 | 도구 | 용도 |
 |---|---|
-| `search(query, top_k?)` | 근거 문서와 청크 검색 |
-| `answer(query, top_k?)` | 답변 생성기가 사용할 검색 payload 반환 |
+| `search(query, top_k?, drive_id?)` | 문서별 청크·출처·인용 ID와 실제 문서/청크 수 반환 |
 
 MCP는 FactChat 연결을 위해 기본적으로 공개 Cloud Run URL을 사용하며, 애플리케이션
 계층에서 `Authorization: Bearer` 또는 `X-API-Key`를 확인한다.

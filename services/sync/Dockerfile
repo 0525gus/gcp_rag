@@ -9,6 +9,7 @@ COPY shared /app/shared
 COPY services /app/services
 
 ENV PYTHONPATH=/app
+ENV DEPARTMENTS_REQUIRED=true
 ENV PORT=8080
 
 EXPOSE 8080

@@ -34,6 +34,10 @@ def test_sync_always_gets_the_department_map() -> None:
     코퍼스 하나로 들어가고, 되돌리려면 코퍼스에서 파일을 골라 지워야 한다.
     """
     assert "DEPARTMENTS_JSON" in _env_names_sent_by("deploy.ps1", "syncEnv")
+    assert "DEPARTMENTS_REQUIRED" in _env_names_sent_by("deploy.ps1", "syncEnv")
+    assert "ENV DEPARTMENTS_REQUIRED=true" in (
+        ROOT / "services/sync/Dockerfile"
+    ).read_text(encoding="utf-8")
 
 
 # `.env` 와 함께 지운 키들. 배포는 이 값들을 Cloud Run 에 넘긴 적이 없어서

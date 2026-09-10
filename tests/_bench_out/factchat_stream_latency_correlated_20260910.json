@@ -1,0 +1,194 @@
+{
+  "url": "https://factchat-cloud.mindlogic.ai/v1/gateway/chatbots/51767/chat/completions",
+  "rows": [
+    {
+      "id": "Q1",
+      "query": "선후배 멘토링을 팀으로 신청하려면 어떤 서식을 써야 하나요?",
+      "started_utc": "2026-09-10T08:13:17.387250+00:00",
+      "stream": true,
+      "headers_s": 0.821,
+      "http_status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "first_event_s": 0.904,
+      "model": "gpt-5.6-luna",
+      "first_content_s": 8.913,
+      "finish_reason": "stop",
+      "completion_s": 11.009,
+      "status": "ok",
+      "elapsed_s": 11.009,
+      "ended_utc": "2026-09-10T08:13:28.396650+00:00",
+      "answer_chars": 407,
+      "events": 223,
+      "mcp_calls": [
+        {
+          "search_log": "2026-09-10T08:13:24 INFO [mcp_server] search query='선후배 멘토링 팀으로 신청 신청 서식 팀 신청서 양식' top_k=5 drive_id=None",
+          "request_offset_s": 7.447,
+          "latency_s": 1.592,
+          "end_offset_s": 9.039
+        }
+      ],
+      "raw_cross_clock_end_to_content_s": -0.126,
+      "approx_before_first_mcp_range_s": [
+        5.476,
+        6.476
+      ],
+      "approx_last_mcp_to_first_content_range_s": [
+        0.845,
+        1.845
+      ]
+    },
+    {
+      "id": "Q2",
+      "query": "엔지니어링하우스를 새로 열고 싶은 교수는 언제까지 신청해야 하나요?",
+      "started_utc": "2026-09-10T08:13:28.397954+00:00",
+      "stream": true,
+      "headers_s": 0.875,
+      "http_status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "first_event_s": 0.875,
+      "model": "gpt-5.6-luna",
+      "first_content_s": 8.094,
+      "finish_reason": "stop",
+      "completion_s": 9.838,
+      "status": "ok",
+      "elapsed_s": 9.838,
+      "ended_utc": "2026-09-10T08:13:38.237115+00:00",
+      "answer_chars": 198,
+      "events": 102,
+      "mcp_calls": [
+        {
+          "search_log": "2026-09-10T08:13:35 INFO [mcp_server] search query='엔지니어링하우스 신규 개설 교수 신청 기한 언제까지 신청해야 하나요' top_k=5 drive_id=None",
+          "request_offset_s": 6.877,
+          "latency_s": 1.381,
+          "end_offset_s": 8.258
+        }
+      ],
+      "raw_cross_clock_end_to_content_s": -0.164,
+      "approx_before_first_mcp_range_s": [
+        4.906,
+        5.906
+      ],
+      "approx_last_mcp_to_first_content_range_s": [
+        0.807,
+        1.807
+      ]
+    },
+    {
+      "id": "Q3",
+      "query": "넷클래스 프로그램을 쓰려면 컴퓨터 사양이 어느 정도여야 하나요?",
+      "started_utc": "2026-09-10T08:13:38.238118+00:00",
+      "stream": true,
+      "headers_s": 0.91,
+      "http_status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "first_event_s": 0.91,
+      "model": "gpt-5.6-luna",
+      "first_content_s": 7.448,
+      "finish_reason": "stop",
+      "completion_s": 9.802,
+      "status": "ok",
+      "elapsed_s": 9.802,
+      "ended_utc": "2026-09-10T08:13:48.040764+00:00",
+      "answer_chars": 406,
+      "events": 211,
+      "mcp_calls": [
+        {
+          "search_log": "2026-09-10T08:13:44 INFO [mcp_server] search query='넷클래스 프로그램 사용을 위한 컴퓨터 최소 사양 권장 사양 운영체제 CPU 메모리' top_k=5 drive_id=None",
+          "request_offset_s": 6.288,
+          "latency_s": 1.376,
+          "end_offset_s": 7.664
+        }
+      ],
+      "raw_cross_clock_end_to_content_s": -0.216,
+      "approx_before_first_mcp_range_s": [
+        4.317,
+        5.317
+      ],
+      "approx_last_mcp_to_first_content_range_s": [
+        0.755,
+        1.755
+      ]
+    },
+    {
+      "id": "Q4",
+      "query": "2학기 TU인턴십에 참여하면 실습지원비를 얼마나 받나요?",
+      "started_utc": "2026-09-10T08:13:48.040764+00:00",
+      "stream": true,
+      "headers_s": 0.68,
+      "http_status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "first_event_s": 0.755,
+      "model": "gpt-5.6-luna",
+      "first_content_s": 7.687,
+      "finish_reason": "stop",
+      "completion_s": 9.971,
+      "status": "ok",
+      "elapsed_s": 9.972,
+      "ended_utc": "2026-09-10T08:13:58.013206+00:00",
+      "answer_chars": 335,
+      "events": 173,
+      "mcp_calls": [
+        {
+          "search_log": "2026-09-10T08:13:54 INFO [mcp_server] search query='2학기 TU인턴십 실습지원비 금액' top_k=5 drive_id=None",
+          "request_offset_s": 6.472,
+          "latency_s": 1.171,
+          "end_offset_s": 7.643
+        }
+      ],
+      "raw_cross_clock_end_to_content_s": 0.044,
+      "approx_before_first_mcp_range_s": [
+        4.501,
+        5.501
+      ],
+      "approx_last_mcp_to_first_content_range_s": [
+        1.015,
+        2.015
+      ]
+    },
+    {
+      "id": "Q6",
+      "query": "연구교수도 외국어 교육비를 지원받을 수 있나요?",
+      "started_utc": "2026-09-10T08:13:58.015206+00:00",
+      "stream": true,
+      "headers_s": 1.309,
+      "http_status": 200,
+      "content_type": "text/event-stream; charset=utf-8",
+      "first_event_s": 1.309,
+      "model": "gpt-5.6-luna",
+      "first_content_s": 8.652,
+      "finish_reason": "stop",
+      "completion_s": 10.893,
+      "status": "ok",
+      "elapsed_s": 10.894,
+      "ended_utc": "2026-09-10T08:14:08.909358+00:00",
+      "answer_chars": 311,
+      "events": 168,
+      "mcp_calls": [
+        {
+          "search_log": "2026-09-10T08:14:05 INFO [mcp_server] search query='연구교수 외국어 교육비 지원 대상 지원 가능 여부' top_k=5 drive_id=None",
+          "request_offset_s": 7.55,
+          "latency_s": 1.237,
+          "end_offset_s": 8.787
+        }
+      ],
+      "raw_cross_clock_end_to_content_s": -0.135,
+      "approx_before_first_mcp_range_s": [
+        5.579,
+        6.579
+      ],
+      "approx_last_mcp_to_first_content_range_s": [
+        0.836,
+        1.836
+      ]
+    }
+  ],
+  "correlation_note": "Cloud Run timestamps associated by benchmark window and unique same-instance request interval; client/server clocks may differ slightly.",
+  "clock_check": {
+    "method": "Three unauthenticated MCP /health HTTP Date samples after run; second-resolution Date and request window bound offset",
+    "estimated_server_minus_local_range_s": [
+      0.971,
+      1.971
+    ],
+    "limitation": "HTTP Date is an approximate clock reference, not distributed tracing. Do not interpret raw cross-clock differences as elapsed duration."
+  }
+}

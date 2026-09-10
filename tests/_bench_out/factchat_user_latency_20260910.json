@@ -1,0 +1,63 @@
+{
+  "service": "rag-mcp-cs-staff",
+  "revision": "rag-mcp-cs-staff-search-v2-0910",
+  "period_kst": "2026-09-10 17:07:00-17:09:10",
+  "user_reported_durations_s": {
+    "Q1": 7,
+    "Q2": 8,
+    "Q3": 9,
+    "Q4": 8,
+    "Q6": 6
+  },
+  "records": [
+    {
+      "search_timestamp_utc": "2026-09-10T08:07:08.658405Z",
+      "search_log": "2026-09-10T08:07:08 INFO [mcp_server] search query='선후배 멘토링 팀 신청 서식 신청서 양식' top_k=5 drive_id=None",
+      "request_timestamp_utc": "2026-09-10T08:07:08.651674Z",
+      "request_latency_s": 1.304807213,
+      "request_trace": "projects/tuk-mcp-rag/traces/53705e0cfe148cc92b9044dbcde7dd58",
+      "association": "same instance, query log inside unique request interval; app log has no trace ID"
+    },
+    {
+      "search_timestamp_utc": "2026-09-10T08:07:36.992774Z",
+      "search_log": "2026-09-10T08:07:36 INFO [mcp_server] search query='엔지니어링하우스 신규 개설 교수 신청 기한 언제까지 신청해야 하나요' top_k=5 drive_id=None",
+      "request_timestamp_utc": "2026-09-10T08:07:36.986449Z",
+      "request_latency_s": 1.184803814,
+      "request_trace": "projects/tuk-mcp-rag/traces/6d3e107f938bead0604aa27faf20e96c",
+      "association": "same instance, query log inside unique request interval; app log has no trace ID"
+    },
+    {
+      "search_timestamp_utc": "2026-09-10T08:07:58.424711Z",
+      "search_log": "2026-09-10T08:07:58 INFO [mcp_server] search query='넷클래스 프로그램 사용을 위한 컴퓨터 최소 권장 사양 운영체제 CPU 메모리 저장공간' top_k=5 drive_id=None",
+      "request_timestamp_utc": "2026-09-10T08:07:58.419528Z",
+      "request_latency_s": 1.410513734,
+      "request_trace": "projects/tuk-mcp-rag/traces/a0e535289fe80a822434f12419af49f1",
+      "association": "same instance, query log inside unique request interval; app log has no trace ID"
+    },
+    {
+      "search_timestamp_utc": "2026-09-10T08:08:22.286892Z",
+      "search_log": "2026-09-10T08:08:22 INFO [mcp_server] search query='2학기 TU인턴십 실습지원비 금액' top_k=5 drive_id=None",
+      "request_timestamp_utc": "2026-09-10T08:08:22.281255Z",
+      "request_latency_s": 0.995235751,
+      "request_trace": "projects/tuk-mcp-rag/traces/08adfb8e2ed50419dbf5be6e53bcae64",
+      "association": "same instance, query log inside unique request interval; app log has no trace ID"
+    },
+    {
+      "search_timestamp_utc": "2026-09-10T08:08:46.867386Z",
+      "search_log": "2026-09-10T08:08:46 INFO [mcp_server] search query='연구교수 외국어 교육비 지원 대상 자격' top_k=5 drive_id=None",
+      "request_timestamp_utc": "2026-09-10T08:08:46.859472Z",
+      "request_latency_s": 1.034718673,
+      "request_trace": "projects/tuk-mcp-rag/traces/e9ac1021d9e2207caee5abf5deefce91",
+      "association": "same instance, query log inside unique request interval; app log has no trace ID"
+    },
+    {
+      "search_timestamp_utc": "2026-09-10T08:08:49.446021Z",
+      "search_log": "2026-09-10T08:08:49 INFO [mcp_server] search query='외국어 교육비 지원 교원 연구교수 비전임교원 교육비' top_k=10 drive_id=None",
+      "request_timestamp_utc": "2026-09-10T08:08:49.435501Z",
+      "request_latency_s": 1.312973745,
+      "request_trace": "projects/tuk-mcp-rag/traces/19adebde1e718cecaee5abf5deefcf1d",
+      "association": "same instance, query log inside unique request interval; app log has no trace ID"
+    }
+  ],
+  "caveat": "UI timing endpoint (first token vs completion) not specified. Request logs exclude client-side and model processing. Questions associated by topic and sequence, not a shared FactChat request ID."
+}

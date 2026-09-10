@@ -1,0 +1,23 @@
+{
+  "service": "rag-mcp-cs-staff",
+  "url": "https://rag-mcp-cs-staff-42w47ff6ba-du.a.run.app",
+  "previous_revision": "rag-mcp-cs-staff-00002-q5x",
+  "revision": "rag-mcp-cs-staff-search-v2-0910",
+  "image": "asia-northeast3-docker.pkg.dev/tuk-mcp-rag/rag-mcp/mcp@sha256:a7a1afcbfc92dd7eab44b51a663a64349462829e1237c1686ce8b095b7038681",
+  "environment_and_identity_preserved": true,
+  "tools": [
+    "search"
+  ],
+  "html_scholarship_markup_removed": true,
+  "html_query_same_ranked_documents": true,
+  "html_query_before_has_15_credits": false,
+  "html_query_after_has_15_credits": false,
+  "html_text_matches_cleanup_of_original": true,
+  "html_query_before_chars": 1933,
+  "html_query_after_chars": 450,
+  "before_mean_search_s": 1.631,
+  "after_mean_search_s": 1.292,
+  "before_mean_total_s": 2.016,
+  "after_mean_total_s": 1.923,
+  "note": "Six sequential requests each; cache/load differ. Not proof of latency improvement."
+}

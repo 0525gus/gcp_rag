@@ -1,0 +1,92 @@
+{
+  "url": "https://rag-mcp-cs-staff-42w47ff6ba-du.a.run.app/mcp",
+  "top_k": 5,
+  "timeout_s": 120,
+  "cache_state": "unknown; identical recent queries may be cached",
+  "rows": [
+    {
+      "id": "Q1",
+      "query": "선후배 멘토링을 팀으로 신청하려면 어떤 서식을 써야 하나요?",
+      "started_utc": "2026-09-10T07:54:08.295809+00:00",
+      "initialize_s": 0.99,
+      "search_s": 1.205,
+      "response_complete_s": 2.194,
+      "status": "ok",
+      "response_chars": 7504,
+      "response_bytes": 23221,
+      "document_count": 5,
+      "chunk_count": 5,
+      "elapsed_including_close_s": 2.195
+    },
+    {
+      "id": "Q2",
+      "query": "엔지니어링하우스를 새로 열고 싶은 교수는 언제까지 신청해야 하나요?",
+      "started_utc": "2026-09-10T07:54:10.492623+00:00",
+      "initialize_s": 0.684,
+      "search_s": 1.171,
+      "response_complete_s": 1.856,
+      "status": "ok",
+      "response_chars": 10326,
+      "response_bytes": 33088,
+      "document_count": 5,
+      "chunk_count": 6,
+      "elapsed_including_close_s": 1.857
+    },
+    {
+      "id": "Q3",
+      "query": "넷클래스 프로그램을 쓰려면 컴퓨터 사양이 어느 정도여야 하나요?",
+      "started_utc": "2026-09-10T07:54:12.349769+00:00",
+      "initialize_s": 0.461,
+      "search_s": 1.353,
+      "response_complete_s": 1.814,
+      "status": "ok",
+      "response_chars": 12043,
+      "response_bytes": 36144,
+      "document_count": 2,
+      "chunk_count": 5,
+      "elapsed_including_close_s": 1.815
+    },
+    {
+      "id": "Q4",
+      "query": "2학기 TU인턴십에 참여하면 실습지원비를 얼마나 받나요?",
+      "started_utc": "2026-09-10T07:54:14.166815+00:00",
+      "initialize_s": 0.656,
+      "search_s": 1.407,
+      "response_complete_s": 2.063,
+      "status": "ok",
+      "response_chars": 9287,
+      "response_bytes": 30135,
+      "document_count": 5,
+      "chunk_count": 6,
+      "elapsed_including_close_s": 2.064
+    },
+    {
+      "id": "Q5",
+      "query": "3월 컴퓨터공학부 행사일정 중 MT가 있나요?",
+      "started_utc": "2026-09-10T07:54:16.230704+00:00",
+      "initialize_s": 0.535,
+      "search_s": 1.293,
+      "response_complete_s": 1.828,
+      "status": "ok",
+      "response_chars": 12107,
+      "response_bytes": 35061,
+      "document_count": 5,
+      "chunk_count": 7,
+      "elapsed_including_close_s": 1.829
+    },
+    {
+      "id": "Q6",
+      "query": "연구교수도 외국어 교육비를 지원받을 수 있나요?",
+      "started_utc": "2026-09-10T07:54:18.050792+00:00",
+      "initialize_s": 0.458,
+      "search_s": 1.324,
+      "response_complete_s": 1.783,
+      "status": "ok",
+      "response_chars": 12857,
+      "response_bytes": 48714,
+      "document_count": 5,
+      "chunk_count": 9,
+      "elapsed_including_close_s": 1.783
+    }
+  ]
+}

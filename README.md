@@ -42,7 +42,7 @@ flowchart TB
 |---|---|---|
 | `rag-parser` | HWP/HWPX → MD | IAM |
 | `rag-sync` | Drive 변경 감지, GCS 적재, RAG 작업 생성·처리 | IAM |
-| `MCP_SERVICE_NAME_STAFF` | 교직원 `search` / `answer` | URL + 키 |
+| `MCP_SERVICE_NAME_STAFF` | 교직원 `search` | URL + 키 |
 | `MCP_SERVICE_NAME_STUDENT` | 학생 (분리 켠 뒤) | URL + 키 |
 
 변경분 처리 순서:

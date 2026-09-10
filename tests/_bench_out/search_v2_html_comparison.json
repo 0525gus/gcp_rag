@@ -1,0 +1,15 @@
+{
+  "scope": "Offline HTML cleanup of first complete document in user-provided response; not live latency or corpus recall",
+  "before_chars": 4452,
+  "after_chars": 1285,
+  "reduction_percent": 71.1,
+  "preserved_facts": {
+    "2025학번 이후": true,
+    "15학점": true,
+    "3.5": true,
+    "12학점": true,
+    "350만원": true,
+    "250만원": true,
+    "등록 휴학": true
+  }
+}

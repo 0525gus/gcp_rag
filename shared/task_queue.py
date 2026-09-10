@@ -47,6 +47,9 @@ class IndexTaskQueue:
         )
         task = tasks_v2.Task(
             name=name,
+            dispatch_deadline={
+                "seconds": min(1800, max(60, self.settings.index_job_timeout_seconds))
+            },
             http_request=tasks_v2.HttpRequest(
                 http_method=tasks_v2.HttpMethod.POST,
                 url=f"{base_url}/sync/index-gcs-task",

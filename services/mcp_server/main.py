@@ -1,7 +1,7 @@
 """
 MCP 서버 (Cloud Run) — FactChat 등 원격 MCP 커넥터용 Streamable HTTP.
 
-tool: search / answer
+tool: search
 인증: MCP_API_KEY 설정 시 Authorization: Bearer <key> 또는 X-API-Key 필수
 """
 
@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -29,13 +30,17 @@ if str(_ROOT) not in sys.path:
 from shared.config import get_settings  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
-from shared.lexical_rerank import query_terms, rrf_rerank, term_coverage  # noqa: E402
+from shared.lexical_rerank import rrf_rerank  # noqa: E402
 from shared.models import DocStatus  # noqa: E402
 from shared.rag_engine import RagEngineClient  # noqa: E402
 from shared.search_postprocess import (  # noqa: E402
-    build_answer_payload,
     citation_label,
     postprocess_hits,
+)
+
+from shared.html_text import clean_html_evidence  # noqa: E402
+from shared.search_response import (  # noqa: E402
+    EvidenceDocument, SearchResponse, build_search_response,
 )
 
 setup_logging()
@@ -103,11 +108,11 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
 _CACHE_TTL = float(os.environ.get("SEARCH_CACHE_TTL_SECONDS", "60"))
 _CACHE_MAX = int(os.environ.get("SEARCH_CACHE_MAX_ENTRIES", "128"))
 _CacheKey = tuple[str, int, str | None]
-_cache: OrderedDict[_CacheKey, tuple[float, list[dict[str, Any]]]] = OrderedDict()
+_cache: OrderedDict[_CacheKey, tuple[float, SearchResponse]] = OrderedDict()
 _cache_lock = threading.Lock()
 
 
-def _cache_get(key: _CacheKey) -> list[dict[str, Any]] | None:
+def _cache_get(key: _CacheKey) -> SearchResponse | None:
     if _CACHE_TTL <= 0:
         return None
     with _cache_lock:
@@ -123,7 +128,7 @@ def _cache_get(key: _CacheKey) -> list[dict[str, Any]] | None:
     return copy.deepcopy(value)
 
 
-def _cache_put(key: _CacheKey, value: list[dict[str, Any]]) -> None:
+def _cache_put(key: _CacheKey, value: SearchResponse) -> None:
     if _CACHE_TTL <= 0:
         return
     with _cache_lock:
@@ -138,37 +143,22 @@ def search(
     query: str,
     top_k: int | None = None,
     drive_id: str | None = None,
-) -> list[dict[str, Any]]:
-    """사내/공공 문서 벡터스토어에서 관련 청크를 검색합니다.
+) -> SearchResponse:
+    """질문과 관련된 근거 문서를 검색해 본문 청크와 출처를 함께 반환합니다.
 
-    반환된 청크는 **서로 독립적인 문서**입니다. 같은 사실을 함께 뒷받침한다는
-    보장이 없으므로, 여러 청크의 내용을 하나의 서술로 합치지 마세요.
-    문장마다 근거가 된 문서를 구분하고, 청크에 적혀 있지 않은 관계
-    (예: 어느 문서의 인물이 다른 문서의 업무 담당자라는 연결)를 지어내지 마세요.
-
-    각 청크의 `missingTerms` 는 그 청크 본문에 **없는** 질의어입니다.
-    질문의 핵심어가 `missingTerms` 에 들어 있으면, 그 청크는 그 부분에 대한
-    근거가 아닙니다. 어떤 청크도 질문에 답하지 못할 때는 주변 정보를 나열하는
-    대신 '확인되지 않는다'는 결론을 먼저 밝혀 주세요.
-
-    **같은 의도로 다시 검색하지 마세요.** `missingTerms` 는 '그 내용이 코퍼스에
-    없다'는 뜻이지 다시 찾으라는 뜻이 아닙니다. 표현을 바꿔 재질의하거나 top_k 를
-    올려도 없는 문서가 생기지는 않으며, 호출마다 수만 토큰이 누적됩니다.
-    한 질문에는 원칙적으로 **한 번만** 호출하고, 다시 부를 때는 앞선 결과로는
-    답할 수 없는 **새로운 정보**를 찾을 때로 한정하세요.
-    기본 top_k 로 충분합니다 — 결과가 부족하면 값을 키우지 말고 없다고 답하세요.
-
-    반환 배열의 한 항목은 청크 하나가 아니라 **문서 하나**입니다. 한 문서에서
-    여러 청크가 걸리면 `[...]` 로 이어 붙여 한 항목으로 옵니다.
+    이 도구 한 번으로 검색과 인용 정보 수집이 완료됩니다. 최종 답변은 호출 LLM이
+    작성합니다. documents의 각 항목은 fileId로 구분한 문서이고, chunks는 그
+    문서에서 검색된 부분입니다. 청크는 원문 전체나 연속된 구간을 보장하지 않습니다.
+    citationId와 source를 사용해 인용하고, 문서 사이의 관계를 근거 없이 추론하지
+    마세요. 검색 결과만으로 답할 수 없으면 확인되지 않은 부분을 밝혀 주세요.
+    같은 정보를 얻기 위해 표현만 바꿔 반복 호출할 필요는 없습니다.
 
     Args:
-        query: 검색 질의 (자연어)
-        top_k: 반환할 최대 **문서** 수 (기본 5, 청크 수가 아님).
-            문서마다 청크가 여러 개 붙을 수 있어 실제 청크 수는 이 값보다
-            많습니다(top_k=5 면 대략 5~15청크). 총 청크 수에는 별도 상한이
-            있어, top_k 를 올려도 받는 본문 양은 그만큼 늘지 않고 **문서가
-            얕게 여러 건 오는 쪽으로만** 바뀝니다.
-        drive_id: 특정 공유 드라이브로 필터 (선택)
+        query: 검색 질문 또는 검색어.
+        top_k: 반환할 최대 문서 수(기본 5). 청크 수가 아닙니다. documentCount와
+            chunkCount는 실제 반환된 문서 수와 청크 수입니다. 청크 점수는 Vertex
+            원값이며 답변 확률이 아닙니다. 결과 배열 순서가 문서 관련도 순위입니다.
+        drive_id: 특정 공유 드라이브로 필터(선택).
     """
     k = top_k or settings.top_k_default
     k = max(1, min(k, settings.search_top_k_max))
@@ -195,12 +185,6 @@ def search(
         top_k=fetch_k,
         vector_distance_threshold=threshold if threshold > 0 else None,
     )
-    # 어휘 순위를 섞어 상위를 다시 세운다(후보 안에서만, recall 불변).
-    # postprocess_hits 는 들어온 순서를 그대로 존중하므로 여기서 정렬해 넘긴다.
-    if settings.search_lexical_rerank and len(raw_hits) > 1:
-        order = rrf_rerank(query, [h.text for h in raw_hits])
-        raw_hits = [raw_hits[i] for i in order]
-
     store = DocStateStore(settings)
     # 상태·드라이브 필터는 **postprocess 앞**에 둔다. 뒤에 두면 postprocess 가 이미
     # k 개 문서로 잘라 놓은 뒤라, 걸러낸 자리가 빈 채로 남아 top_k 보다 적게 나간다.
@@ -229,6 +213,25 @@ def search(
             return False
         return True
 
+    # 기존 HTML 색인도 응답 단계에서 정제한다. 원본 MIME/파일명으로 한정해
+    # 프로그래밍 문서의 HTML 예제 등 일반 텍스트를 임의로 지우지 않는다.
+    cleaned = []
+    for hit in raw_hits:
+        meta = _meta(hit.source.file_id)
+        name = (meta.name if meta and meta.name else hit.source.name) or ""
+        if (meta and meta.mime_type == "text/html") or name.lower().endswith((".html", ".htm")):
+            hit = replace(hit, text=clean_html_evidence(hit.text))
+        if hit.text.strip():
+            cleaned.append(hit)
+    raw_hits = cleaned
+
+    # 어휘 순위를 섞어 상위를 다시 세운다(후보 안에서만, recall 불변).
+    # postprocess_hits 는 들어온 순서를 그대로 존중하므로 여기서 정렬해 넘긴다.
+    if settings.search_lexical_rerank and len(raw_hits) > 1:
+        order = rrf_rerank(query, [h.text for h in raw_hits])
+        raw_hits = [raw_hits[i] for i in order]
+
+
     raw_hits = [h for h in raw_hits if _servable(h)]
 
     hits = postprocess_hits(
@@ -244,11 +247,7 @@ def search(
             query, len(raw_hits), threshold,
         )
 
-    # 질의어별 근거 유무를 청크마다 붙인다. 지시문은 무시당해도 데이터는
-    # 남으므로, 호출 LLM 이 '이 문서는 질의의 어느 부분을 덮는가'를 스스로
-    # 판단할 수 있어야 서로 다른 문서를 하나로 합치는 답이 줄어든다.
-    terms = query_terms(query)
-    results: list[dict[str, Any]] = []
+    documents: list[EvidenceDocument] = []
     for hit in hits:
         # 상태·드라이브 필터는 postprocess 전에 이미 걸렀다(_servable). 여기서는
         # 그때 읽어 둔 메타를 재사용만 한다 — 같은 문서를 두 번 조회하지 않는다.
@@ -282,43 +281,20 @@ def search(
         # content.txt, 게시글당 첨부 중앙값 2개) 자료묶음을 붙인 표시용 이름을
         # 함께 싣는다. name 은 원래 파일명 그대로 둔다.
         source["label"] = citation_label(source)
-        matched, missing = term_coverage(terms, hit.text)
-        results.append(
+        documents.append(
             {
-                "text": hit.text,
-                # Vertex 원값. 거리/유사도 여부가 확정되지 않아 정규화하지 않는다.
-                # 관련도 순위는 배열 순서(rank)가 기준.
-                "score": round(hit.score, 6),
-                "scoreType": "vertex_raw",
-                "rank": len(results) + 1,
-                "matchedTerms": matched,
-                "missingTerms": missing,
+                "citationId": len(documents) + 1,
                 "source": source,
+                "chunks": [
+                    {"text": chunk.text, "score": round(chunk.score, 6),
+                     "scoreType": "vertex_raw"}
+                    for chunk in hit.chunks
+                ],
             }
         )
-    _cache_put(cache_key, results)
-    return results
-
-
-@mcp.tool()
-def answer(query: str, top_k: int | None = None) -> dict[str, Any]:
-    """검색 청크+출처를 묶어 반환합니다. 최종 답변 생성은 호출 LLM이 담당합니다.
-
-    `context` 는 문서마다 `[n] 파일명` 라벨이 붙은 블록입니다. 인용은 그 번호를
-    따르고, **블록 경계를 넘어 내용을 합치지 마세요.** 라벨이 없던 이전 형식에서는
-    어느 문장이 어느 문서에서 왔는지 복원할 수 없었습니다.
-
-    - `uncoveredTerms` 가 비어 있지 않으면, 그 검색어를 담은 근거가 하나도
-      없다는 뜻입니다. 답을 지어내지 말고 확인되지 않음을 밝히거나 되물으세요.
-    - `coverage="partial"` 은 어떤 문서 하나도 질의 전체를 덮지 못했다는 뜻이며,
-      여러 문서를 이어 붙여 답을 만들면 근거 없는 결합이 됩니다.
-
-    Args:
-        query: 검색 질의 (자연어)
-        top_k: 근거로 쓸 최대 **문서** 수 (기본 5, 청크 수가 아님).
-            자세한 의미는 `search` 의 같은 인자 설명을 참고하세요.
-    """
-    return build_answer_payload(search(query=query, top_k=top_k), query)
+    response = build_search_response(documents)
+    _cache_put(cache_key, response)
+    return response
 
 
 @mcp.custom_route("/health", methods=["GET"])

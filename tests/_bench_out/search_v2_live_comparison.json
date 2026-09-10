@@ -1,0 +1,200 @@
+{
+  "before": {
+    "tools": [
+      "search",
+      "answer"
+    ],
+    "rows": [
+      {
+        "id": "Q1",
+        "file_ids": [
+          "1H6JinW82xAPh_PIA8GVI1Er5KVqjYDEQ",
+          "1s6WpXtCdtk98JJwDpdxf98SfY55sCFjy",
+          "1hBHoeexR7QnEyv4ciNIBGAafULpjetIt",
+          "1gbrzCAR44U6MQEpbUSLJuej4ScDMtbsR",
+          "1GzYbClcjrtx3IgF9ZT9q6BC9ZdXb9Gca"
+        ],
+        "search_s": 1.326,
+        "response_bytes": 24204,
+        "chunk_count": null
+      },
+      {
+        "id": "Q2",
+        "file_ids": [
+          "1MQBIMSbFwEFst-aZAjEY4c9zLqt6zsqq",
+          "1vZKfVv6SDUofRbrxjZBtWs-qcbjHj9U0",
+          "1QhEb4TMH0XGhpZ8gFvfwinJ1LeWSCxky",
+          "14AnwPlnfJcQJpu8kwGqzs3BKljO2NZxJ",
+          "1NQk9mE7uZwprgObdBsAn8Lfm1wi7ApF_"
+        ],
+        "search_s": 1.083,
+        "response_bytes": 34039,
+        "chunk_count": null
+      },
+      {
+        "id": "Q3",
+        "file_ids": [
+          "1LDT0Hi-IYrYjRq_X2LYG2s_fiGs-Mbsf",
+          "1CtJaBo4KUH53RZYERA4YNrVda2C5QGh_"
+        ],
+        "search_s": 1.152,
+        "response_bytes": 35989,
+        "chunk_count": null
+      },
+      {
+        "id": "Q4",
+        "file_ids": [
+          "1qzkEuTPD1ls2JCLKvGMnzOtKAqWIMOEJ",
+          "17XKCnGGsIzLEqt1mtMBkOMbz_REAC664",
+          "1DZJ75LDPjUu5zfwAHF7NHRlqKFxqjxWO",
+          "1OlFiThQ-kJKFpVrMaAJjzuftlUQewh4r",
+          "1aPWuhai9MH5OPLMS-a1jx26VVket5Vy9"
+        ],
+        "search_s": 1.228,
+        "response_bytes": 30822,
+        "chunk_count": null
+      },
+      {
+        "id": "Q5",
+        "file_ids": [
+          "1nS2-aq_CzNJaQPpfzR7DqZLUKeap89yP",
+          "1FOsccORPkynbFh3Y57hhsFTEbueknhw1",
+          "17cOaGF5xrSL1WbKWgfDOKBMsc5pYJRSn",
+          "1vgdvBxa9rt8uwvKE49y57fQFIo74ogei",
+          "19pKMci-8orjKoLbrTjPDFmTCJxTCU-xD"
+        ],
+        "search_s": 1.229,
+        "response_bytes": 35098,
+        "chunk_count": null
+      },
+      {
+        "id": "Q6",
+        "file_ids": [
+          "1MzxoX9c6xMTJKJ634rlyVXxPt5g4TUoR",
+          "1rS5pEfqIJ8pPGTrsLwB5w1hUmr8NLPA5",
+          "1PoTjhXiNDzo4TwlgFw24wfNd0zNrfPh8",
+          "13sH1v-glyEsNd48Oit4JTU5rOHU7nuAQ",
+          "1z8_jBvrRqAN547WJ3BXfQiq84LP6Zd6T"
+        ],
+        "search_s": 1.296,
+        "response_bytes": 48677,
+        "chunk_count": null
+      }
+    ]
+  },
+  "after": {
+    "tools": [
+      "search"
+    ],
+    "rows": [
+      {
+        "id": "Q1",
+        "file_ids": [
+          "1H6JinW82xAPh_PIA8GVI1Er5KVqjYDEQ",
+          "1s6WpXtCdtk98JJwDpdxf98SfY55sCFjy",
+          "1hBHoeexR7QnEyv4ciNIBGAafULpjetIt",
+          "1gbrzCAR44U6MQEpbUSLJuej4ScDMtbsR",
+          "1GzYbClcjrtx3IgF9ZT9q6BC9ZdXb9Gca"
+        ],
+        "search_s": 1.231,
+        "response_bytes": 23221,
+        "chunk_count": 5
+      },
+      {
+        "id": "Q2",
+        "file_ids": [
+          "1MQBIMSbFwEFst-aZAjEY4c9zLqt6zsqq",
+          "1vZKfVv6SDUofRbrxjZBtWs-qcbjHj9U0",
+          "1QhEb4TMH0XGhpZ8gFvfwinJ1LeWSCxky",
+          "14AnwPlnfJcQJpu8kwGqzs3BKljO2NZxJ",
+          "1NQk9mE7uZwprgObdBsAn8Lfm1wi7ApF_"
+        ],
+        "search_s": 1.027,
+        "response_bytes": 33088,
+        "chunk_count": 6
+      },
+      {
+        "id": "Q3",
+        "file_ids": [
+          "1LDT0Hi-IYrYjRq_X2LYG2s_fiGs-Mbsf",
+          "1CtJaBo4KUH53RZYERA4YNrVda2C5QGh_"
+        ],
+        "search_s": 1.174,
+        "response_bytes": 36144,
+        "chunk_count": 5
+      },
+      {
+        "id": "Q4",
+        "file_ids": [
+          "1qzkEuTPD1ls2JCLKvGMnzOtKAqWIMOEJ",
+          "17XKCnGGsIzLEqt1mtMBkOMbz_REAC664",
+          "1DZJ75LDPjUu5zfwAHF7NHRlqKFxqjxWO",
+          "1OlFiThQ-kJKFpVrMaAJjzuftlUQewh4r",
+          "1aPWuhai9MH5OPLMS-a1jx26VVket5Vy9"
+        ],
+        "search_s": 0.963,
+        "response_bytes": 30135,
+        "chunk_count": 6
+      },
+      {
+        "id": "Q5",
+        "file_ids": [
+          "1nS2-aq_CzNJaQPpfzR7DqZLUKeap89yP",
+          "1FOsccORPkynbFh3Y57hhsFTEbueknhw1",
+          "17cOaGF5xrSL1WbKWgfDOKBMsc5pYJRSn",
+          "1vgdvBxa9rt8uwvKE49y57fQFIo74ogei",
+          "19pKMci-8orjKoLbrTjPDFmTCJxTCU-xD"
+        ],
+        "search_s": 1.137,
+        "response_bytes": 35061,
+        "chunk_count": 7
+      },
+      {
+        "id": "Q6",
+        "file_ids": [
+          "1MzxoX9c6xMTJKJ634rlyVXxPt5g4TUoR",
+          "1rS5pEfqIJ8pPGTrsLwB5w1hUmr8NLPA5",
+          "1PoTjhXiNDzo4TwlgFw24wfNd0zNrfPh8",
+          "13sH1v-glyEsNd48Oit4JTU5rOHU7nuAQ",
+          "1z8_jBvrRqAN547WJ3BXfQiq84LP6Zd6T"
+        ],
+        "search_s": 1.013,
+        "response_bytes": 48714,
+        "chunk_count": 9
+      }
+    ]
+  },
+  "comparisons": [
+    {
+      "id": "Q1",
+      "same_ranked_documents": true,
+      "same_document_set": true
+    },
+    {
+      "id": "Q2",
+      "same_ranked_documents": true,
+      "same_document_set": true
+    },
+    {
+      "id": "Q3",
+      "same_ranked_documents": true,
+      "same_document_set": true
+    },
+    {
+      "id": "Q4",
+      "same_ranked_documents": true,
+      "same_document_set": true
+    },
+    {
+      "id": "Q5",
+      "same_ranked_documents": true,
+      "same_document_set": true
+    },
+    {
+      "id": "Q6",
+      "same_ranked_documents": true,
+      "same_document_set": true
+    }
+  ],
+  "note": "Sequential samples; cache/cold state unknown. Not a latency SLA."
+}

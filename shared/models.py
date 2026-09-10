@@ -195,10 +195,17 @@ class SearchSource:
 
 
 @dataclass
+class SearchChunk:
+    text: str
+    score: float
+
+
+@dataclass
 class SearchHit:
     text: str
     score: float
     source: SearchSource
+    chunks: tuple[SearchChunk, ...] = ()
 
 
 @dataclass

@@ -1,0 +1,74 @@
+{
+  "url": "https://rag-mcp-cs-staff-42w47ff6ba-du.a.run.app/mcp",
+  "top_k": 5,
+  "timeout_s": 120,
+  "cache_state": "unknown; identical recent queries may be cached",
+  "rows": [
+    {
+      "id": "Q1",
+      "query": "선후배 멘토링을 팀으로 신청하려면 어떤 서식을 써야 하나요?",
+      "started_utc": "2026-09-10T07:21:14.990854+00:00",
+      "initialize_s": 0.825,
+      "search_s": 1.949,
+      "response_complete_s": 2.774,
+      "status": "ok",
+      "response_chars": 7449,
+      "elapsed_including_close_s": 2.775
+    },
+    {
+      "id": "Q2",
+      "query": "엔지니어링하우스를 새로 열고 싶은 교수는 언제까지 신청해야 하나요?",
+      "started_utc": "2026-09-10T07:21:17.766764+00:00",
+      "initialize_s": 1.288,
+      "search_s": 1.517,
+      "response_complete_s": 2.805,
+      "status": "ok",
+      "response_chars": 10195,
+      "elapsed_including_close_s": 2.806
+    },
+    {
+      "id": "Q3",
+      "query": "넷클래스 프로그램을 쓰려면 컴퓨터 사양이 어느 정도여야 하나요?",
+      "started_utc": "2026-09-10T07:21:20.573963+00:00",
+      "initialize_s": 1.027,
+      "search_s": 1.659,
+      "response_complete_s": 2.685,
+      "status": "ok",
+      "response_chars": 11690,
+      "elapsed_including_close_s": 2.686
+    },
+    {
+      "id": "Q4",
+      "query": "2학기 TU인턴십에 참여하면 실습지원비를 얼마나 받나요?",
+      "started_utc": "2026-09-10T07:21:23.261724+00:00",
+      "initialize_s": 0.599,
+      "search_s": 1.252,
+      "response_complete_s": 1.851,
+      "status": "ok",
+      "response_chars": 9096,
+      "elapsed_including_close_s": 1.852
+    },
+    {
+      "id": "Q5",
+      "query": "3월 컴퓨터공학부 행사일정 중 MT가 있나요?",
+      "started_utc": "2026-09-10T07:21:25.114540+00:00",
+      "initialize_s": 0.635,
+      "search_s": 1.229,
+      "response_complete_s": 1.865,
+      "status": "ok",
+      "response_chars": 11652,
+      "elapsed_including_close_s": 1.865
+    },
+    {
+      "id": "Q6",
+      "query": "연구교수도 외국어 교육비를 지원받을 수 있나요?",
+      "started_utc": "2026-09-10T07:21:26.980813+00:00",
+      "initialize_s": 0.646,
+      "search_s": 1.863,
+      "response_complete_s": 2.509,
+      "status": "ok",
+      "response_chars": 12266,
+      "elapsed_including_close_s": 2.51
+    }
+  ]
+}

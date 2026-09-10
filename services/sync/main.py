@@ -19,6 +19,7 @@ import re
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ from shared.mime_types import (  # noqa: E402
 )
 from shared.pdf_split import PdfSplitError, split_pdf  # noqa: E402
 from shared.xlsx_md import XlsxParseError, xlsx_to_markdown  # noqa: E402
+from shared.html_text import html_to_text  # noqa: E402
 from shared.models import Audience, DocState, DocStatus, ParseRoute  # noqa: E402
 from shared.path_context import (  # noqa: E402
     PathContext,
@@ -61,6 +63,10 @@ from shared.rag_engine import (  # noqa: E402
 from shared.rag_mapping import RagFileMapping, RagFileMappingStore  # noqa: E402
 from shared.search_postprocess import extract_file_id  # noqa: E402
 from shared.task_queue import IndexTaskQueue  # noqa: E402
+from shared.index_guard import (  # noqa: E402
+    MutationLease, MutationOwnershipLost, StaleIndexTask, activate, check_active_mutation,
+    check_versions, document_mutation, document_version, routing_version,
+)
 
 setup_logging()
 logger = logging.getLogger("sync_service")
@@ -113,7 +119,13 @@ def _pdf_has_extractable_text(data: bytes) -> tuple[bool, str | None]:
         reason += f":extractErrors={extraction_errors}"
     return False, reason
 
-app = FastAPI(title="Drive Sync Service (GCS-only index)", version="2.0.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    get_settings()  # 잘못된 학과 맵으로 readiness 성공을 보고하지 않는다.
+    yield
+
+
+app = FastAPI(title="Drive Sync Service (GCS-only index)", version="2.0.0", lifespan=_lifespan)
 
 
 class DriveIdBody(BaseModel):
@@ -153,6 +165,8 @@ class IngestBody(BaseModel):
     name: str = ""
     mime_type: str = Field(default="", alias="mimeType")
     modified_time: str | None = Field(default=None, alias="modifiedTime")
+    # 변환기 변경 후 원본 수정 시각을 보존하면서 정규화 산출물을 다시 만든다.
+    refresh_content: bool = Field(default=False, alias="refreshContent")
     removed: bool = False
     web_view_link: str | None = Field(default=None, alias="webViewLink")
     # Drive 가 알려준 원본 크기. 다운로드 전에 거르는 데 쓴다(없으면 사후 검사만).
@@ -178,6 +192,8 @@ class IndexGcsTaskBody(BaseModel):
     audience: str
     gcs_uris: list[str] = Field(..., alias="gcsUris")
     file_ids: list[str] = Field(..., alias="fileIds")
+    file_versions: dict[str, str] = Field(default_factory=dict, alias="fileVersions")
+    routing_version: str = Field(default="", alias="routingVersion")
 
     model_config = {"populate_by_name": True}
 
@@ -223,6 +239,7 @@ class ReconcileBody(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, str]:
+    get_settings()
     return {"status": "ok", "indexPath": "gcs-only"}
 
 
@@ -931,6 +948,14 @@ def _ingest_with(
     gcs: GcsClient,
     drive: DriveClient,
 ) -> dict[str, Any]:
+    with document_mutation(store, settings, [body.file_id]):
+        return _ingest_locked(body, store=store, settings=settings, gcs=gcs, drive=drive)
+
+
+def _ingest_locked(
+    body: IngestBody, *, store: DocStateStore, settings: Settings,
+    gcs: GcsClient, drive: DriveClient,
+) -> dict[str, Any]:
     """ingest 본체. 클라이언트를 주입받아 대량 경로에서 재사용할 수 있게 한다.
 
     파일마다 DriveClient 를 새로 만들면 인증 + discovery build 가 파일 수만큼 돌고,
@@ -1035,7 +1060,7 @@ def _ingest_with(
         )
         return {"fileId": body.file_id, "status": DocStatus.SKIPPED.value, "route": route.value}
 
-    if not store.should_reparse(body.file_id, body.modified_time):
+    if not body.refresh_content and not store.should_reparse(body.file_id, body.modified_time):
         existing = store.get(body.file_id)
         # path 있고 이미 INDEXED면 스킵. PARSED만 된 문서는 재처리(색인 누락 복구).
         if (
@@ -1691,6 +1716,8 @@ def _ingest_direct(
             body_text = data.decode("utf-8")
         except UnicodeDecodeError:
             body_text = data.decode("utf-8", errors="replace")
+        if mime == "text/html":
+            body_text = html_to_text(body_text)
 
     if body_text is not None:
         md_text = build_breadcrumb_markdown(
@@ -1855,6 +1882,14 @@ def _clean_file_ids(raw_ids: list[str]) -> tuple[list[str], list[str]]:
 def _sync_student_corpus(
     gcs_uris: list[str], file_ids: list[str], settings: Settings, store: DocStateStore
 ) -> dict[str, Any]:
+    ids = sorted(set(file_ids) | {extract_file_id(uri) for uri in gcs_uris})
+    with document_mutation(store, settings, ids):
+        return _sync_student_corpus_locked(gcs_uris, file_ids, settings, store)
+
+
+def _sync_student_corpus_locked(
+    gcs_uris: list[str], file_ids: list[str], settings: Settings, store: DocStateStore
+) -> dict[str, Any]:
     """학생 코퍼스를 doc_state 의 audience 에 맞춘다.
 
     교직원 코퍼스(=기본 코퍼스)는 전량을 담으므로 기존 경로가 그대로 처리한다.
@@ -1886,7 +1921,7 @@ def _sync_student_corpus(
 
     rag = RagEngineClient(settings, corpus_name=settings.rag_corpus_name_student)
     try:
-        rag.delete_files_by_ids(sorted(touched))
+        removed = rag.delete_files_by_ids(sorted(touched))
     except Exception:  # noqa: BLE001
         # 삭제가 실패한 채로 import 하면 옛 청크가 남는다. 학생 코퍼스에서 그것은
         # '내려야 할 문서가 안 내려간' 상태이므로 조용히 넘기지 않는다.
@@ -1894,6 +1929,7 @@ def _sync_student_corpus(
         raise
 
     outcome = rag.import_from_gcs(student_uris) if student_uris else None
+    check_active_mutation()
     if outcome and not outcome.ok:
         # 교직원 쪽과 달리 여기서는 상태를 되돌릴 대상이 없다(audience 는
         # doc_state 에 이미 확정돼 있다). 남길 수 있는 건 신호뿐이다.
@@ -1920,7 +1956,7 @@ def _sync_student_corpus(
     return {
         "enabled": True,
         "imported": outcome.imported if outcome else 0,
-        "removed": len(touched),
+        "removed": removed,
         "ok": outcome.ok if outcome else True,
     }
 
@@ -2230,6 +2266,20 @@ def _import_and_mark(
     mapping_settings: Settings | None = None,
     corpus_type: str = "FACULTY",
 ) -> ImportOutcome:
+    settings = mapping_settings or getattr(rag, "settings", None) or get_settings()
+    ids = sorted(set(file_ids) | {extract_file_id(uri) for uri in gcs_uris})
+    with document_mutation(store, settings, ids):
+        return _import_and_mark_locked(
+            store, gcs_uris, file_ids, rag=rag, mark_indexed=mark_indexed,
+            mapping_settings=mapping_settings, corpus_type=corpus_type,
+        )
+
+
+def _import_and_mark_locked(
+    store: DocStateStore, gcs_uris: list[str], file_ids: list[str], *,
+    rag: Any | None = None, mark_indexed: bool = True,
+    mapping_settings: Settings | None = None, corpus_type: str = "FACULTY",
+) -> ImportOutcome:
     """이번 배치의 기존 청크만 제거 → import → **전량 성공일 때만** INDEXED 전환.
 
     **삭제 대상은 반드시 이번에 import 할 파일과 같아야 한다.** 실행 시작 시
@@ -2250,7 +2300,9 @@ def _import_and_mark(
     client = rag if rag is not None else RagEngineClient()
     # 삭제 실패 뒤 import 를 계속하면 이전 청크와 새 청크가 함께 남으므로 fail closed.
     client.delete_files_by_ids(list(dict.fromkeys(file_ids)))
+    check_active_mutation()
     outcome = client.import_from_gcs(gcs_uris)
+    check_active_mutation()
     if not outcome.ok:
         logger.error(
             "RAG import 부분 실패 — INDEXED 로 올리지 않는다 "
@@ -2301,6 +2353,12 @@ def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
     settings = get_settings()
     store = DocStateStore()
 
+    ids = sorted(set(body.file_ids) | {extract_file_id(uri) for uri in body.gcs_uris})
+    with document_mutation(store, settings, ids):
+        return _index_gcs_locked(body, settings, store)
+
+
+def _index_gcs_locked(body: IndexGcsBody, settings: Settings, store: DocStateStore) -> dict[str, Any]:
     file_ids, bad_ids = _clean_file_ids(body.file_ids)
     if bad_ids:
         logger.warning(
@@ -2373,46 +2431,73 @@ def _index_job_refs(settings: Settings, job_id: str):
 
 
 def _finalize_index_job(settings: Settings, job_id: str) -> dict[str, Any]:
-    """Mark a split job DONE only after every required corpus part succeeds."""
+    """Commit INDEXED and job DONE together, only for the queued revisions."""
     from google.cloud import firestore
 
     store, job_ref, parts_ref = _index_job_refs(settings, job_id)
-    snap = job_ref.get()
-    if not snap.exists:
-        raise HTTPException(404, "index job not found")
-    job = snap.to_dict() or {}
-    expected = [str(item) for item in job.get("expectedParts") or []]
-    parts: list[dict[str, Any]] = []
-    for part_id in expected:
-        part_snap = parts_ref.document(part_id).get()
-        parts.append(part_snap.to_dict() or {})
-    if not expected or any(part.get("status") != "DONE" for part in parts):
-        return {"status": str(job.get("status") or "RUNNING")}
 
-    # 학생 태스크가 먼저 성공해도 교직원 태스크까지 끝나기 전에는 이 상태 전이를
-    # 하지 않는다. 둘 중 하나라도 재시도 중이면 문서는 PARSED에 남는다.
-    file_ids = [str(fid) for fid in job.get("fileIds") or []]
-    _mark_indexed_states(store, file_ids)
-    faculty = [part for part in parts if part.get("audience") == "FACULTY"]
-    result = {
-        "count": sum(int(part.get("count") or 0) for part in faculty),
-        "failed": sum(int(part.get("failed") or 0) for part in parts),
-        "skipped": sum(int(part.get("skipped") or 0) for part in parts),
-        "student": next(
-            (part.get("result") for part in parts if part.get("audience") == "STUDENT"),
-            {"enabled": False},
-        ),
-    }
-    job_ref.set(
-        {
-            "status": "DONE",
-            "result": result,
-            "completedAt": firestore.SERVER_TIMESTAMP,
-            "updatedAt": firestore.SERVER_TIMESTAMP,
-        },
-        merge=True,
-    )
-    return {"status": "DONE", **result}
+    @firestore.transactional
+    def finalize(txn):
+        snap = job_ref.get(transaction=txn)
+        if not snap.exists:
+            raise HTTPException(404, "index job not found")
+        job = snap.to_dict() or {}
+        if job.get("status") in {"DONE", "FAILED"}:
+            return {"status": job["status"], **(job.get("result") or {})}
+        if job.get("deadlineAt") and job["deadlineAt"] <= datetime.now(UTC):
+            error = "index tasks did not complete before deadline"
+            txn.set(job_ref, {"status": "FAILED", "error": error}, merge=True)
+            return {"status": "FAILED", "error": error}
+        expected = job.get("expectedParts") or []
+        parts = [parts_ref.document(pid).get(transaction=txn).to_dict() or {} for pid in expected]
+        if not expected or any(part.get("status") != "DONE" for part in parts):
+            return {"status": "RUNNING"}
+        if job.get("routingVersion") != routing_version(
+            _settings_for_drive(settings, job.get("driveId"))
+        ):
+            error = "department routing changed; enqueue again"
+            txn.set(job_ref, {"status": "FAILED", "error": error}, merge=True)
+            return {"status": "FAILED", "error": error}
+        try:
+            check_versions(store, job.get("fileVersions") or {}, txn)
+        except StaleIndexTask as exc:
+            txn.set(job_ref, {"status": "FAILED", "error": str(exc)}, merge=True)
+            return {"status": "FAILED", "error": str(exc)}
+        for fid in job["fileVersions"]:
+            held = store._tokens.document(f"__mutation__{fid}").get(transaction=txn)
+            if held.exists:
+                return {"status": "RUNNING"}
+        faculty = [part for part in parts if part.get("audience") == "FACULTY"]
+        result = {
+            "count": sum(int(part.get("count") or 0) for part in faculty),
+            "failed": sum(int(part.get("failed") or 0) for part in parts),
+            "skipped": sum(int(part.get("skipped") or 0) for part in parts),
+            "student": next(
+                (part.get("result") for part in parts if part.get("audience") == "STUDENT"),
+                {"enabled": False},
+            ),
+        }
+        for fid in job["fileVersions"]:
+            txn.update(
+                store._col.document(fid),
+                {
+                    "status": "INDEXED",
+                    "lastSyncedAt": firestore.SERVER_TIMESTAMP,
+                },
+            )
+        txn.set(
+            job_ref,
+            {
+                "status": "DONE",
+                "result": result,
+                "completedAt": firestore.SERVER_TIMESTAMP,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+        return {"status": "DONE", **result}
+
+    return finalize(store._db.transaction())
 
 
 @app.post("/sync/index-gcs-async", status_code=202)
@@ -2432,11 +2517,19 @@ def index_gcs_async(body: IndexGcsBody) -> dict[str, Any]:
     file_ids, bad_ids = _clean_file_ids(body.file_ids)
     if bad_ids:
         raise HTTPException(422, f"malformed fileIds: {bad_ids[:5]}")
+    if not file_ids or {extract_file_id(uri) for uri in body.gcs_uris} != set(file_ids):
+        raise HTTPException(422, "gcsUris must match the complete fileIds set")
+    if any(not uri.startswith(f"gs://{dept_settings.gcs_source_bucket}/") for uri in body.gcs_uris):
+        raise HTTPException(422, "gcsUris must belong to this department's source bucket")
     validation_store = DocStateStore(settings)
+    versions: dict[str, str] = {}
     for fid in file_ids:
         state = validation_store.get(fid)
-        if state and state.drive_id and state.drive_id != body.drive_id:
-            raise HTTPException(409, f"file belongs to another drive: {fid}")
+        if not state or state.drive_id != body.drive_id:
+            raise HTTPException(409, f"file missing or belongs to another drive: {fid}")
+        if state.status not in {DocStatus.PARSED, DocStatus.INDEXED}:
+            raise HTTPException(409, f"file is not ready for indexing: {fid}")
+        versions[fid] = document_version(state)
 
     job_id = uuid.uuid4().hex
     parts: list[dict[str, Any]] = [
@@ -2456,9 +2549,7 @@ def index_gcs_async(body: IndexGcsBody) -> dict[str, Any]:
         )
 
     job_store, job_ref, parts_ref = _index_job_refs(settings, job_id)
-    deadline = datetime.now(UTC) + timedelta(
-        seconds=settings.index_job_timeout_seconds
-    )
+    deadline = datetime.now(UTC) + timedelta(seconds=settings.index_job_timeout_seconds)
     batch = job_store._db.batch()  # noqa: SLF001
     batch.set(
         job_ref,
@@ -2468,6 +2559,9 @@ def index_gcs_async(body: IndexGcsBody) -> dict[str, Any]:
             "status": "RUNNING",
             "driveId": body.drive_id,
             "fileIds": file_ids,
+            "fileVersions": versions,
+            "routingVersion": routing_version(dept_settings),
+            "gcsUris": body.gcs_uris,
             "requestedUris": len(body.gcs_uris),
             "expectedParts": [part["partId"] for part in parts],
             "deadlineAt": deadline,
@@ -2500,6 +2594,8 @@ def index_gcs_async(body: IndexGcsBody) -> dict[str, Any]:
                     "audience": part["audience"],
                     "gcsUris": body.gcs_uris,
                     "fileIds": file_ids,
+                    "fileVersions": versions,
+                    "routingVersion": routing_version(dept_settings),
                 },
             )
     except Exception as exc:
@@ -2522,9 +2618,7 @@ def index_gcs_async(body: IndexGcsBody) -> dict[str, Any]:
 
 @app.post("/sync/index-gcs-task")
 def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
-    """Cloud Tasks worker. A non-2xx response triggers queue-level retry."""
-    from google.cloud import firestore
-
+    """Claim the part and document leases atomically before touching RAG."""
     settings = get_settings()
     if not settings.cloud_tasks_enabled:
         raise HTTPException(409, "Cloud Tasks indexing is disabled")
@@ -2533,94 +2627,100 @@ def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
     dept_settings = _settings_for_drive(settings, body.drive_id)
     store, job_ref, parts_ref = _index_job_refs(settings, body.job_id)
     part_ref = parts_ref.document(body.part_id)
-    existing = part_ref.get()
-    if existing.exists and (existing.to_dict() or {}).get("status") == "DONE":
-        return {"status": "DONE", "idempotent": True}
-
-    part_ref.set(
-        {"status": "RUNNING", "updatedAt": firestore.SERVER_TIMESTAMP}, merge=True
+    job = job_ref.get().to_dict() or {}
+    part = part_ref.get().to_dict() or {}
+    if not job or not part:
+        raise HTTPException(404, "index job/part not found")
+    if part.get("status") == "DONE":
+        # A crash after part completion must not leave the parent RUNNING forever.
+        return {**_finalize_index_job(settings, body.job_id), "idempotent": True}
+    if job.get("status") == "FAILED":
+        return {"status": "FAILED", "error": job.get("error")}
+    if not body.file_versions or not job.get("fileVersions"):
+        job_ref.set({"status": "FAILED", "error": "unversioned task; enqueue again"}, merge=True)
+        return {"status": "FAILED"}
+    if (
+        body.drive_id != job.get("driveId")
+        or body.audience != part.get("audience")
+        or body.file_ids != job.get("fileIds")
+        or body.gcs_uris != job.get("gcsUris")
+        or body.file_versions != job.get("fileVersions")
+        or body.routing_version != job.get("routingVersion")
+    ):
+        raise HTTPException(409, "task payload does not match persisted job")
+    if body.routing_version != routing_version(dept_settings):
+        job_ref.set(
+            {"status": "FAILED", "error": "unversioned task or routing changed; enqueue again"},
+            merge=True,
+        )
+        return {"status": "FAILED"}
+    lease = MutationLease(
+        store, body.file_ids, versions=body.file_versions, job_ref=job_ref, part_ref=part_ref
     )
+    claimed = False
     try:
-        if body.audience == "FACULTY":
-            outcome = _import_and_mark(
-                store,
-                body.gcs_uris,
-                body.file_ids,
-                rag=RagEngineClient(dept_settings),
-                mark_indexed=False,
-                mapping_settings=dept_settings,
-                corpus_type="FACULTY",
-            )
-            if not outcome.ok:
-                raise RuntimeError(
-                    "faculty import incomplete "
-                    f"imported={outcome.imported} failed={outcome.failed} "
-                    f"skipped={outcome.skipped}"
+        claimed = lease.claim()
+        if not claimed:
+            return {**_finalize_index_job(settings, body.job_id), "idempotent": True}
+        lease.pin()
+        with activate(lease):
+            if body.audience == "FACULTY":
+                outcome = _import_and_mark(
+                    store,
+                    body.gcs_uris,
+                    body.file_ids,
+                    rag=RagEngineClient(dept_settings),
+                    mark_indexed=False,
+                    mapping_settings=dept_settings,
+                    corpus_type="FACULTY",
                 )
-            result: dict[str, Any] = {
-                "count": outcome.imported,
-                "failed": outcome.failed,
-                "skipped": outcome.skipped,
-            }
-        else:
-            student = _sync_student_corpus(
-                body.gcs_uris, body.file_ids, dept_settings, store
-            )
-            if not bool(student.get("ok", True)):
-                raise RuntimeError("student corpus import incomplete")
-            result = {
-                "count": int(student.get("imported") or 0),
-                "failed": int(student.get("failed") or 0),
-                "skipped": int(student.get("skipped") or 0),
-                "result": student,
-            }
-        part_ref.set(
-            {
-                "status": "DONE",
-                "audience": body.audience,
-                **result,
-                "completedAt": firestore.SERVER_TIMESTAMP,
-                "updatedAt": firestore.SERVER_TIMESTAMP,
-                "error": None,
-            },
-            merge=True,
-        )
+                if not outcome.ok:
+                    raise RuntimeError(
+                        "faculty import incomplete "
+                        f"imported={outcome.imported} failed={outcome.failed} skipped={outcome.skipped}"
+                    )
+                result = {
+                    "count": outcome.imported,
+                    "failed": outcome.failed,
+                    "skipped": outcome.skipped,
+                }
+            else:
+                student = _sync_student_corpus(body.gcs_uris, body.file_ids, dept_settings, store)
+                if not bool(student.get("ok", True)):
+                    raise RuntimeError("student corpus import incomplete")
+                result = {
+                    "count": int(student.get("imported") or 0),
+                    "failed": int(student.get("failed") or 0),
+                    "skipped": int(student.get("skipped") or 0),
+                    "result": student,
+                }
+            lease.finish({"audience": body.audience, **result})
         return _finalize_index_job(settings, body.job_id)
+    except MutationOwnershipLost as exc:
+        if claimed:
+            lease.finish(error=exc)
+        raise HTTPException(409, "task ownership changed; retry later") from exc
+    except StaleIndexTask as exc:
+        if claimed:
+            lease.finish(error=exc)
+        job_ref.set({"status": "FAILED", "error": str(exc)[:2000]}, merge=True)
+        return {"status": "FAILED", "error": str(exc)}
     except Exception as exc:
-        part_ref.set(
-            {
-                "status": "RETRYING",
-                "error": str(exc)[:2000],
-                "updatedAt": firestore.SERVER_TIMESTAMP,
-            },
-            merge=True,
-        )
+        if claimed:
+            lease.finish(error=exc)
         raise
 
 
 @app.get("/sync/index-jobs/{job_id}")
 def index_job_status(job_id: str) -> dict[str, Any]:
-    from google.cloud import firestore
-
     settings = get_settings()
+    _finalize_index_job(settings, job_id)
     _, job_ref, parts_ref = _index_job_refs(settings, job_id)
     snap = job_ref.get()
     if not snap.exists:
         raise HTTPException(404, "index job not found")
     data = snap.to_dict() or {}
     status = str(data.get("status") or "RUNNING")
-    deadline = data.get("deadlineAt")
-    if status not in {"DONE", "FAILED"} and deadline and datetime.now(UTC) > deadline:
-        status = "FAILED"
-        data["error"] = "index tasks did not complete before deadline"
-        job_ref.set(
-            {
-                "status": status,
-                "error": data["error"],
-                "updatedAt": firestore.SERVER_TIMESTAMP,
-            },
-            merge=True,
-        )
     parts = []
     for part_id in data.get("expectedParts") or []:
         part = parts_ref.document(str(part_id)).get()
@@ -3105,8 +3205,12 @@ def delete_file(body: DeleteBody) -> dict[str, Any]:
             state = store.get(body.file_id)
             drive_id = state.drive_id if state else ""
         settings = _settings_for_drive(settings, drive_id)
-    gcs = GcsClient(settings)
+    with document_mutation(store, settings, [body.file_id]):
+        return _delete_file_locked(body, settings, store)
 
+
+def _delete_file_locked(body: DeleteBody, settings: Settings, store: DocStateStore) -> dict[str, Any]:
+    gcs = GcsClient(settings)
     try:
         ok = RagEngineClient(settings).delete_by_file_id(body.file_id)
         # 학생 코퍼스에서도 반드시 빼야 한다. 여기를 빠뜨리면 Drive 에서 지운 문서가

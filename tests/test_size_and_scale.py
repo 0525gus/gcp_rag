@@ -365,11 +365,11 @@ def test_search_still_returns_top_k_after_filtering_hidden_docs(
     monkeypatch.setattr(mcp_main, "RagEngineClient", _Rag)
     monkeypatch.setattr(mcp_main, "DocStateStore", _Store)
 
-    results = mcp_main.search(query="q", top_k=5)
+    results = mcp_main.search(query="q", top_k=5)["documents"]
 
     assert len(results) == 5, f"top_k=5 인데 {len(results)}개만 반환됐다"
     assert [r["source"]["fileId"] for r in results] == ["f2", "f3", "f4", "f5", "f6"]
-    assert [r["rank"] for r in results] == [1, 2, 3, 4, 5]
+    assert [r["citationId"] for r in results] == [1, 2, 3, 4, 5]
 
 
 def test_search_fills_top_k_at_the_maximum_too(
@@ -412,7 +412,7 @@ def test_search_fills_top_k_at_the_maximum_too(
     monkeypatch.setattr(mcp_main, "RagEngineClient", _Rag)
     monkeypatch.setattr(mcp_main, "DocStateStore", _Store)
 
-    results = mcp_main.search(query="q", top_k=k)
+    results = mcp_main.search(query="q", top_k=k)["documents"]
 
-    assert len(results) == k, f"top_k={k} 인데 {len(results)}개만 반환됐다"
+    assert len(results) == min(k, mcp_main.settings.search_max_total_chunks)
     assert all(r["source"]["fileId"] not in hidden for r in results)

@@ -43,8 +43,10 @@ CS = Department(
     student_folder_ids=("F_STU",),
     sync_folder_ids=("F_A", "F_B"),
 )
-# 일부만 적은 학과. 기존 학과를 옮기지 않고 새 학과만 자기 버킷을 갖는 이관을 흉내낸다.
-EE = Department(code="ee", drive_ids=("D_EE",), staff_corpus="c-ee-staff")
+# 공용 버킷을 쓰는 학과도 배포 시 해석된 값을 명시한다.
+EE = Department(code="ee", drive_ids=("D_EE",), staff_corpus="c-ee-staff",
+                hwp_bucket="shared-hwp", source_bucket="shared-src",
+                sync_folder_ids=("SHARED_FOLDER",))
 
 
 # --- 하위 호환 -------------------------------------------------------------
@@ -56,12 +58,12 @@ def test_empty_map_keeps_current_behaviour():
     assert s.department_for_drive("anything") is None
 
 
-def test_omitted_fields_inherit_shared_values():
+def test_optional_student_fields_do_not_inherit_shared_values():
     s = Settings(**BASE, departments=(CS, EE))
     ee = s.for_drive("D_EE")
     assert ee.rag_corpus_name == "c-ee-staff"
-    # 안 적은 것은 공용값 그대로
-    assert ee.rag_corpus_name_student == "corpus-default-student"
+    assert ee.rag_corpus_name_student == ""
+    assert ee.student_folder_ids == ""
     assert ee.gcs_source_bucket == "shared-src"
     assert ee.sync_folder_ids == "SHARED_FOLDER"
 
@@ -107,6 +109,8 @@ def test_json_round_trip():
                 "staffCorpus": "c-cs-staff",
                 "studentCorpus": "c-cs-student",
                 "sourceBucket": "b-cs-src",
+                "hwpBucket": "b-cs-hwp",
+                "syncFolderIds": ["F_SYNC"],
                 "studentFolderIds": ["F_STU"],
             }
         }
@@ -120,22 +124,22 @@ def test_json_round_trip():
 def test_json_accepts_comma_strings():
     """저장소 관례가 쉼표 구분이라 리스트/문자열 둘 다 받는다."""
     (dept,) = _departments_from_json(
-        json.dumps({"cs": {"driveIds": "D_A, D_B", "staffCorpus": "c"}})
+        json.dumps({"cs": {"driveIds": "D_A, D_B", "staffCorpus": "c",
+                           "hwpBucket": "raw", "sourceBucket": "source",
+                           "syncFolderIds": "folder"}})
     )
     assert dept.drive_ids == ("D_A", "D_B")
 
 
-@pytest.mark.parametrize("raw", ["", "   ", "{깨진", "[]", "null", '"문자열"'])
-def test_broken_json_falls_back_to_single_department(raw: str):
-    """설정 오타 하나로 sync 가 기동조차 못 하면 안 된다 — 비우고 경고만."""
-    assert _departments_from_json(raw) == ()
+@pytest.mark.parametrize("raw", ["{깨진", "[]", "{}", "null", '"문자열"'])
+def test_broken_json_is_rejected(raw: str):
+    with pytest.raises(ValueError, match="DEPARTMENTS_JSON"):
+        _departments_from_json(raw)
 
 
-def test_broken_json_is_logged(caplog):
-    """조용히 비우면 '학과 설정이 왜 안 먹지' 를 추적할 수 없다."""
-    with caplog.at_level("ERROR"):
-        _departments_from_json("{깨진")
-    assert any("DEPARTMENTS_JSON" in r.message for r in caplog.records)
+def test_partial_department_cannot_use_common_values():
+    with pytest.raises(ValueError, match="buckets required"):
+        Settings(**BASE, departments=(Department(code="bad", drive_ids=("D",), staff_corpus="c"),))
 
 
 # --- sync 배선 헬퍼 ---------------------------------------------------------

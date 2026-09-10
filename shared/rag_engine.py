@@ -14,6 +14,7 @@ from google.api_core import exceptions as gcp_exceptions
 from agentplatform import rag
 
 from shared.config import Settings, get_settings
+from shared.index_guard import check_active_mutation
 from shared.gcs import GcsClient, gs_uri
 from shared.models import SearchHit, SearchSource
 from shared.rag_import_result import RagImportResult, parse_import_results
@@ -259,6 +260,7 @@ class RagEngineClient:
         delay = 1.0
         last_err: Exception | None = None
         for attempt in range(max_retries):
+            check_active_mutation()
             try:
                 result_sink = self._new_import_result_sink()
                 import_kwargs: dict[str, Any] = {}
@@ -502,6 +504,7 @@ class RagEngineClient:
         fallback을 끄지 않아 불완전한 backfill이 문서 삭제 누락으로 이어지지 않게
         한다.
         """
+        check_active_mutation()
         wanted = {fid for fid in file_ids if fid}
         if not wanted:
             return 0
@@ -550,6 +553,10 @@ class RagEngineClient:
             not getattr(self.settings, "rag_mapping_read_enabled", False)
             or getattr(self.settings, "rag_mapping_fallback_scan_enabled", True)
         ):
+            if getattr(self.settings, "cloud_tasks_enabled", False):
+                # 다른 Cloud Run worker의 import는 이 프로세스의 dirty-ID 캐시에
+                # 반영되지 않는다. 분산 실행에서 fallback은 최신 목록을 읽어야 한다.
+                self.invalidate_file_index()
             scanned = self._file_index(missing)
             index = {**direct_index}
             for fid in missing:
@@ -557,6 +564,8 @@ class RagEngineClient:
                 # 캐시에도 반영된다. 복사하면 같은 프로세스의 다음 호출이 이미
                 # 삭제한 RagFile을 다시 삭제하려 든다.
                 index.setdefault(fid, scanned.get(fid, []))
+        elif missing:
+            raise RuntimeError("RAG mapping missing and fallback scan disabled; deletion unverified")
 
         targets: list[tuple[str, str]] = []
         seen_targets: set[tuple[str, str]] = set()
@@ -576,8 +585,9 @@ class RagEngineClient:
         workers = max(1, self.settings.rag_delete_concurrency)
         pacing = self.settings.rag_delete_pacing_seconds
 
-        def _delete_one(item: tuple[str, str]) -> tuple[str, str] | None:
+        def _delete_one(item: tuple[str, str]) -> tuple[tuple[str, str], bool]:
             fid, resource_name = item
+            removed = True
             try:
                 # 페이싱으로도 쿼터를 다 못 막는다(동시 실행 + 다른 배치와 경합).
                 # 429 는 기다리면 풀리므로 여기서 한 번 더 삼킨다.
@@ -585,30 +595,28 @@ class RagEngineClient:
                     lambda name=resource_name: rag.delete_file(name=name),
                     what="delete_file",
                 )
-                logger.info("Deleted RAG file: %s (%s)", resource_name, fid)
-                if mapping_store is not None:
-                    key = (fid, resource_name.rstrip("/").rsplit("/", 1)[-1])
-                    for mapping in mappings_by_target.get(key, ()):
-                        try:
-                            mapping_store.delete(mapping)
-                        except Exception:
-                            logger.exception(
-                                "RAG mapping cleanup failed fileId=%s mapping=%s",
-                                fid,
-                                mapping.mapping_id,
-                            )
-                return item
-            except Exception:  # noqa: BLE001
-                # 이미 지워졌거나 일시 오류 — 재색인 자체를 막지는 않는다
-                logger.warning("delete failed: %s (%s)", resource_name, fid)
-                return None
+            except Exception as exc:
+                # SDK는 원인 예외를 RuntimeError로 감싸기도 한다. 명시적인
+                # NotFound만 성공과 동등하게 취급하고 권한/쿼터/통신 실패는 전파한다.
+                if not _contains_exception(exc, (gcp_exceptions.NotFound,)):
+                    logger.exception("RAG delete failed: %s (%s)", resource_name, fid)
+                    raise
+                removed = False
+            logger.info("RAG file absent: %s (%s) deleted=%s", resource_name, fid, removed)
+            if mapping_store is not None:
+                key = (fid, resource_name.rstrip("/").rsplit("/", 1)[-1])
+                for mapping in mappings_by_target.get(key, ()):
+                    # 실패한 삭제의 매핑은 반드시 남긴다. 이 지점은 삭제 성공 또는
+                    # NotFound가 확인된 경우에만 도달한다.
+                    mapping_store.delete(mapping)
+            return item, removed
 
         deleted = 0
         if workers == 1:
             for i, item in enumerate(targets):
-                if _delete_one(item):
-                    deleted += 1
-                    index.get(item[0], []).remove(item[1])
+                _, removed = _delete_one(item)
+                deleted += int(removed)
+                index.get(item[0], []).remove(item[1])
                 if pacing > 0 and i < len(targets) - 1:
                     time.sleep(pacing)
             return deleted
@@ -619,11 +627,9 @@ class RagEngineClient:
             # 한 묶음(=동시 실행 수)을 보내고 페이싱만큼 쉬는 식으로 속도를 제어한다
             for start in range(0, len(targets), workers):
                 chunk = targets[start : start + workers]
-                for done in pool.map(_delete_one, chunk):
-                    if done:
-                        deleted += 1
-                        # 지운 건 인덱스에서도 빼야 다음 호출이 없는 파일을 노리지 않는다
-                        index.get(done[0], []).remove(done[1])
+                for done, removed in pool.map(_delete_one, chunk):
+                    deleted += int(removed)
+                    index.get(done[0], []).remove(done[1])
                 if pacing > 0 and start + workers < len(targets):
                     time.sleep(pacing)
         return deleted

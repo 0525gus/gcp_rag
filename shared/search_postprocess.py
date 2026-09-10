@@ -7,8 +7,7 @@ import re
 from dataclasses import replace
 from typing import Any
 
-from shared.lexical_rerank import query_terms
-from shared.models import SearchHit
+from shared.models import SearchChunk, SearchHit
 
 # 긴 suffix 먼저.
 #
@@ -91,8 +90,6 @@ def _text_fingerprint(text: str, n: int = 180) -> str:
 CHUNK_JOINER = "\n\n[...]\n\n"
 
 
-CONTEXT_SEPARATOR = "\n\n---\n\n"
-
 # 게시판 수집물처럼 제목이 폴더에 있고 파일명은 기계가 붙인 경우
 _GENERIC_FILENAMES = frozenset({"content", "index", "body", "untitled"})
 
@@ -129,66 +126,6 @@ def citation_label(source: dict[str, Any]) -> str:
     return name
 
 
-def build_answer_payload(chunks: list[dict[str, Any]], query: str) -> dict[str, Any]:
-    """search 결과 → answer 툴 payload (출처 라벨 + 커버리지 신호).
-
-    context 블록마다 `[n] 파일명` 라벨을 붙인다. 본문만 이어붙이던 이전 형식은
-    문서 경계와 출처의 연결을 끊어, 호출 LLM 이 어느 문장이 어느 문서에서 왔는지
-    복원할 수 없게 만들었다 — 서로 다른 문서를 한 서술로 합치는 답의 원인이다.
-
-    coverage 는 '되물어야 하는 질의'를 호출측이 판별할 근거다. MCP 툴은 자기
-    턴이 없어 사용자에게 되물을 수 없으므로, 판단 재료만 넘기고 행동은 맡긴다.
-      - full: 어떤 문서 **하나**가 질의어를 전부 담고 있다
-      - partial: 질의어가 여러 문서에 흩어져 있거나 일부는 어디에도 없다
-      - none: 결과 없음
-    """
-    terms = query_terms(query)
-
-    blocks: list[str] = []
-    citations: list[dict[str, Any]] = []
-    covered: set[str] = set()
-    single_doc_covers_all = False
-
-    for n, chunk in enumerate(chunks, start=1):
-        src = chunk.get("source") or {}
-        label = citation_label(src)
-        blocks.append(f"[{n}] {label}\n{chunk.get('text', '')}")
-        citations.append(
-            {
-                "n": n,
-                "fileId": src.get("fileId"),
-                "name": src.get("name"),
-                "label": label,
-                "bundle": src.get("bundle"),
-                "sourceUri": src.get("sourceUri"),
-            }
-        )
-        covered.update(t.lower() for t in chunk.get("matchedTerms", []))
-        if not chunk.get("missingTerms"):
-            single_doc_covers_all = True
-
-    if not chunks:
-        coverage = "none"
-    elif single_doc_covers_all:
-        coverage = "full"
-    else:
-        coverage = "partial"
-
-    return {
-        "context": CONTEXT_SEPARATOR.join(blocks),
-        "citations": citations,
-        # `chunk_count` 는 이름과 달리 **문서(=context 블록) 수**다. search 결과
-        # 한 항목이 청크 하나가 아니라 한 문서(청크 여러 개를 이어 붙인 것)이기
-        # 때문이다. 이름을 바꾸면 FactChat 쪽이 깨지므로 남겨 두고, 뜻이 맞는
-        # 이름을 함께 싣는다.
-        "chunk_count": len(chunks),
-        "documentCount": len(chunks),
-        "queryTerms": terms,
-        "uncoveredTerms": [t for t in terms if t.lower() not in covered],
-        "coverage": coverage,
-    }
-
-
 def postprocess_hits(
     hits: list[SearchHit],
     *,
@@ -213,9 +150,8 @@ def postprocess_hits(
 
     다만 top_k × max_chunks_per_file 은 곱셈이라 큰 k 에서 응답이 폭발한다
     (top_k=20 → 최대 60청크 ≈ 6만 토큰). max_total_chunks 로 총량을 묶되,
-    **문서마다 첫 청크는 먼저 보장하고** 남은 예산만 2번째·3번째 청크에
-    나눠 준다. 순서를 반대로 하면 앞 문서가 예산을 다 먹고 뒤 문서가 통째로
-    사라져, 이 함수의 존재 이유인 문서 다양성이 깨진다.
+    전체 청크 상한 안에서 문서마다 첫 청크를 먼저 배정하고 남은 예산을
+    2번째·3번째 청크에 나눠 준다. 상한보다 많은 문서를 반환하지 않는다.
     """
     if not hits:
         return []
@@ -262,9 +198,9 @@ def postprocess_hits(
         if len(grouped[fid]) < max_chunks_per_file:
             grouped[fid].append(hit)
 
-    selected = order[:top_k]
-    # 문서당 1청크는 보장 — 예산이 문서 수보다 작아도 문서를 통째로 버리지 않는다
-    budget = max(max_total_chunks or len(selected) * max_chunks_per_file, len(selected))
+    limit = min(top_k, max_total_chunks) if max_total_chunks is not None else top_k
+    selected = order[:max(0, limit)]
+    budget = max_total_chunks if max_total_chunks is not None else len(selected) * max_chunks_per_file
     take = {fid: 1 for fid in selected}
     spare = budget - len(selected)
     # 남은 예산은 관련도 순으로 한 개씩 돌려 나눈다(라운드로빈).
@@ -283,9 +219,9 @@ def postprocess_hits(
     for fid in selected:
         chunks = grouped[fid][: take[fid]]
         head = chunks[0]
-        if len(chunks) == 1:
-            out.append(head)
-            continue
         merged = CHUNK_JOINER.join(c.text for c in chunks)
-        out.append(SearchHit(text=merged, score=head.score, source=head.source))
+        out.append(SearchHit(
+            text=merged, score=head.score, source=head.source,
+            chunks=tuple(SearchChunk(text=c.text, score=c.score) for c in chunks),
+        ))
     return out
