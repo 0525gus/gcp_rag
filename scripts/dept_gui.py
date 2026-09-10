@@ -45,6 +45,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import dept_config
+from shared.source_links import citation_view_uri
 
 CONFIG_DIR = ROOT / "config"
 DEPT_DIR = CONFIG_DIR / "departments"
@@ -2151,7 +2152,7 @@ def retrieve_department_corpus(
                 "rank": index,
                 "text": context_text,
                 "sourceDisplayName": str(item.get("sourceDisplayName") or ""),
-                "sourceUri": str(item.get("sourceUri") or ""),
+                "sourceUri": citation_view_uri(str(item.get("sourceUri") or "")),
                 "score": item.get("score"),
             }
         )
@@ -3510,44 +3511,6 @@ def _set_teardown_target(run_id: str, key: str, **changes: Any) -> None:
                 return
 
 
-def _department_corpus_usage() -> dict[str, list[str]]:
-    """코퍼스 → 그 코퍼스를 가리키는 학과 코드. 버킷과 같은 이유로 필요하다."""
-    usage: dict[str, set[str]] = {}
-    if not DEPT_DIR.exists():
-        return {}
-    for path in sorted(DEPT_DIR.glob("*.yaml")):
-        try:
-            config = _read_yaml(path)
-        except (OSError, yaml.YAMLError):
-            continue
-        for corpus in (config.get("corpora") or {}).values():
-            name = str(corpus or "").strip()
-            if name:
-                usage.setdefault(name, set()).add(path.stem)
-    return {name: sorted(codes) for name, codes in usage.items()}
-
-
-def _department_drive_usage() -> dict[str, list[str]]:
-    """공유드라이브 ID → 그 드라이브를 가리키는 학과 코드.
-
-    Firestore 의 doc_state 는 fileId 하나로 전 학과가 같은 컬렉션을 쓴다. 학과를
-    가르는 유일한 축이 ``driveId`` 라서, 지우기 전에 그 드라이브를 다른 학과도
-    보고 있는지 먼저 봐야 한다. ``_validate_departments`` 가 중복을 막지만 손으로
-    고친 YAML 은 그 검증을 지나지 않는다.
-    """
-    usage: dict[str, set[str]] = {}
-    if not DEPT_DIR.exists():
-        return {}
-    for path in sorted(DEPT_DIR.glob("*.yaml")):
-        try:
-            config = _read_yaml(path)
-        except (OSError, yaml.YAMLError):
-            continue
-        for drive_id in _normalise_ids((config.get("drive") or {}).get("driveIds")):
-            usage.setdefault(drive_id, set()).add(path.stem)
-    return {drive_id: sorted(codes) for drive_id, codes in usage.items()}
-
-
 def _teardown_target(
     key: str,
     kind: str,
@@ -3587,17 +3550,27 @@ def _teardown_target(
 def department_teardown_plan(code: str) -> dict[str, Any]:
     """학과 하나를 지울 때 무엇이 사라지는지 한 벌로 만든다."""
     normalised = str(code or "").strip().lower()
-    path = DEPT_DIR / f"{normalised}.yaml"
-    if not DEPT_CODE_RE.fullmatch(normalised) or not path.exists():
+    if not DEPT_CODE_RE.fullmatch(normalised):
         raise FileNotFoundError(normalised)
-    config = _read_yaml(path)
+    configs = _cloud_department_configs()
+    if normalised not in configs:
+        raise FileNotFoundError(normalised)
+    config = configs[normalised]
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
     region = str(common.get("GCP_REGION") or "asia-northeast3")
     corpora = config.get("corpora") or {}
     buckets = config.get("buckets") or {}
-    corpus_usage = _department_corpus_usage()
-    bucket_usage = _department_bucket_usage()
+    corpus_usage: dict[str, list[str]] = {}
+    bucket_usage: dict[str, list[str]] = {}
+    drive_usage: dict[str, list[str]] = {}
+    for department_code, deployed in configs.items():
+        for value in (deployed.get("corpora") or {}).values():
+            corpus_usage.setdefault(str(value).strip(), []).append(department_code)
+        for value in (deployed.get("buckets") or {}).values():
+            bucket_usage.setdefault(str(value).removeprefix("gs://").strip(), []).append(department_code)
+        for value in _normalise_ids((deployed.get("drive") or {}).get("driveIds")):
+            drive_usage.setdefault(value, []).append(department_code)
 
     targets: list[dict[str, Any]] = []
     audiences = ["staff", "student"] if str(corpora.get("student") or "").strip() else ["staff"]
@@ -3646,7 +3619,6 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
     # 학과 버킷과 코퍼스만 지우면 **Firestore 에 동기화 이력이 그대로 남는다.**
     # 같은 공유드라이브를 나중에 다시 등록하면 contentHash 가 같아 전부
     # HASH_UNCHANGED 로 건너뛰고, 새 코퍼스는 영원히 비어 있게 된다.
-    drive_usage = _department_drive_usage()
     drive_ids = _normalise_ids((config.get("drive") or {}).get("driveIds"))
     if drive_ids:
         shared_drives = sorted(
@@ -3690,19 +3662,6 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
                 )
             )
 
-    # 설정 파일은 **맨 뒤**다. 앞이 하나라도 실패하면 남겨서 재시도할 수 있어야 한다.
-    targets.append(
-        _teardown_target(
-            "config",
-            "config",
-            "학과 설정 파일",
-            path.name,
-            [],
-            note="MCP 키가 이 파일에만 있습니다. 지우면 되돌릴 수 없습니다.",
-        )
-    )
-    # 설정만 지우면 rag-sync 는 없어진 버킷·코퍼스로 계속 라우팅한다. 그 상태의
-    # 동기화는 전량 404 로 DLQ 에 쌓인다 — runtime_env_drift 주석의 실측 그대로다.
     targets.append(
         _teardown_target(
             "sync-env",
@@ -3714,6 +3673,12 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
         )
     )
 
+    # Cloud 설정을 담은 staff 서비스는 마지막에 지워 재시도 정보를 유지한다.
+    staff = next(target for target in targets if target["key"] == "mcp-staff")
+    targets.remove(staff)
+    staff["note"] += " 학과 Cloud 설정도 함께 삭제됩니다."
+    targets.append(staff)
+
     return {
         "kind": "department",
         "code": normalised,
@@ -3721,6 +3686,7 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
         "projectId": project,
         "region": region,
         "confirmWord": normalised,
+        "lastDepartment": len(configs) == 1,
         "targets": targets,
     }
 
@@ -4021,27 +3987,30 @@ def _delete_gcs_prefix(uri: str) -> str:
     raise RuntimeError((output or "객체 삭제에 실패했습니다.")[-400:])
 
 
-def _refresh_sync_department_map() -> str:
-    """rag-sync 의 DEPARTMENTS_JSON 을 남은 학과로 맞춘다.
-
-    로컬 YAML 이 진실이면 그것을, YAML 을 두지 않는 운영 환경이면 배포된 MCP
-    주석을 쓴다 — ``_expected_runtime_env`` 와 같은 기준이다. 여기서 기준이
-    갈리면 아직 남아 있는 학과가 라우팅 맵에서 통째로 빠진다.
-    """
-    expected = (
-        dept_config.departments_json()
-        if dept_config.list_departments()
-        else cloud_departments_json()
-    )
-    return update_sync_department_map(expected=expected)
+def _require_sync_removed() -> None:
+    common = _common()
+    ok, result = _gcloud_json([
+        "run", "services", "describe", SYNC_SERVICE,
+        f"--project={common.get('GCP_PROJECT_ID', '')}",
+        f"--region={common.get('GCP_REGION') or 'asia-northeast3'}",
+    ], timeout=30)
+    if not ok and _missing_resource_output(str(result)):
+        return
+    raise ValueError("마지막 학과 삭제 전 운영 환경에서 Sync 런타임을 삭제해 주세요. 빈 학과 맵은 현재 런타임에서 지원하지 않습니다.")
 
 
-def _delete_department_config(code: str) -> str:
-    path = DEPT_DIR / f"{code}.yaml"
-    if not path.exists():
-        return "이미 없습니다"
-    path.unlink()
-    return "삭제 완료"
+def _refresh_cloud_teardown_routing(remove_code: str) -> str:
+    configs = _cloud_department_configs()
+    if remove_code:
+        configs.pop(remove_code, None)
+    if not configs:
+        _require_sync_removed()
+        return "Sync 런타임이 없어 라우팅 갱신이 필요하지 않습니다"
+    try:
+        expected = dept_config.departments_json_from_configs(configs)
+    except SystemExit as exc:
+        raise ValueError(str(exc)) from exc
+    return f"남은 학과: {update_sync_department_map(expected=expected) or '없음'}"
 
 
 def _execute_teardown_run(run_id: str) -> None:
@@ -4058,10 +4027,10 @@ def _execute_teardown_run(run_id: str) -> None:
         if target.get("skipped"):
             _set_teardown_target(run_id, key, status="SKIPPED")
             continue
-        # 설정 파일은 GCP 쪽이 다 지워진 뒤에만 지운다. 남겨야 재시도가 된다.
-        if kind == "config" and failed:
+        # 실패하면 Cloud 설정을 담은 MCP와 라우팅을 남겨 재시도한다.
+        if run["kind"] == "department" and key in {"sync-env", "mcp-staff"} and failed:
             _set_teardown_target(
-                run_id, key, status="SKIPPED", detail="GCP 리소스가 남아 설정 파일은 유지합니다"
+                run_id, key, status="SKIPPED", detail="앞선 작업이 실패하여 설정과 라우팅을 유지합니다"
             )
             continue
         _set_teardown_target(
@@ -4086,9 +4055,10 @@ def _execute_teardown_run(run_id: str) -> None:
             elif kind == "metadataObjects":
                 detail = _delete_gcs_prefix(name)
             elif kind == "syncEnv":
-                detail = f"남은 학과: {_refresh_sync_department_map() or '없음'}"
+                remove_department = any(item["key"] == "mcp-staff" and not item.get("skipped") for item in run["targets"])
+                detail = _refresh_cloud_teardown_routing(run["code"] if remove_department else "")
             else:
-                detail = _delete_department_config(run["code"])
+                raise ValueError(f"지원하지 않는 삭제 대상: {kind}")
             _set_teardown_target(run_id, key, status="COMPLETE", detail=detail)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             failed += 1
@@ -4119,6 +4089,8 @@ def apply_teardown_selection(
         chosen = {target["key"] for target in plan["targets"] if target.get("selected")}
     else:
         chosen = {str(key) for key in selected}
+    if plan.get("kind") == "department" and "mcp-staff" in chosen and "sync-env" not in chosen:
+        raise ValueError("교직원 MCP 삭제 시 학과 라우팅 갱신도 선택해 주세요.")
     for target in plan["targets"]:
         if target.get("sharedWith"):
             # 다른 학과가 쓰는 것은 화면이 뭐라 하든 지우지 않는다.
@@ -4148,12 +4120,12 @@ def teardown_selection_warnings(plan: dict[str, Any]) -> list[str]:
         and not target.get("selected")
         and target["kind"] in {"cloudRun", "corpus", "bucket", "metadataObjects"}
     ]
-    if "config" in chosen and orphans:
+    if "mcp-staff" in chosen and orphans:
         warnings.append(
-            "설정 파일을 지우면 남긴 리소스는 콘솔에서 다시 찾을 수 없습니다: "
+            "Cloud 설정을 담은 MCP를 지우면 남긴 리소스는 콘솔에서 다시 찾을 수 없습니다: "
             + ", ".join(orphans)
         )
-    if "config" in chosen and "sync-env" not in chosen:
+    if "mcp-staff" in chosen and "sync-env" not in chosen:
         warnings.append(
             "rag-sync 라우팅을 갱신하지 않으면 없어진 버킷으로 계속 동기화를 시도합니다."
         )
@@ -4174,6 +4146,8 @@ def start_teardown_run(
     if str(confirm or "").strip() != expected:
         raise PermissionError(expected)
     plan = apply_teardown_selection(plan, selected)
+    if plan.get("lastDepartment") and any(target["key"] == "mcp-staff" and target.get("selected") for target in plan["targets"]):
+        _require_sync_removed()
     with _TEARDOWN_LOCK:
         _cleanup_teardown_runs()
         active = next(

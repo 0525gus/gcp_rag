@@ -103,6 +103,22 @@ def test_new_query_runs_again_but_same_query_uses_cache(server):
     assert len(calls) == 2
 
 
+def test_search_returns_preview_for_existing_edit_uri(server, monkeypatch):
+    app, _, _ = server
+    original = "https://docs.google.com/document/d/f1/edit?resourcekey=key"
+
+    class Store:
+        def get(self, fid):
+            return DocState(file_id=fid, drive_id="d", name="document",
+                            status=DocStatus.INDEXED, source_uri=original)
+
+    monkeypatch.setattr(app, "DocStateStore", lambda *_: Store())
+    result = app.search("문서 보기")
+    assert result["documents"]
+    for document in result["documents"]:
+        assert document["source"]["sourceUri"] == "https://drive.google.com/file/d/f1/view?resourcekey=key"
+
+
 def test_html_preserves_scholarship_table_relationships():
     content = '''<html><head><style>noise</style></head><body>
     <h2>성적우수장학금</h2><input type="hidden" value="secret">

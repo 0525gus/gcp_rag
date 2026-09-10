@@ -541,9 +541,10 @@
             <div class="panel-toolbar">
               <div>
                 <h2>공통 런타임</h2>
-                <span id="commonRuntimeMeta" aria-live="polite">상태 확인 전</span>
+                <p class="runtime-description">모든 학과가 함께 사용하는 문서 처리 · 동기화 서비스입니다.</p>
               </div>
               <div class="toolbar-controls">
+                <span class="runtime-summary" id="commonRuntimeMeta" aria-live="polite">상태 확인 전</span>
                 <button type="button" class="button secondary compact" id="refreshCommonRuntime">상태 새로고침</button>
               </div>
             </div>
@@ -568,18 +569,22 @@
         <header>
           <div><span class="eyebrow">DEPARTMENT DETAIL</span><h2 id="drawerTitle">학과 상세</h2><p id="drawerPath"></p></div>
           <div class="drawer-header-actions">
-            <details class="drawer-more" id="drawerMore">
-              <summary aria-label="학과 추가 작업">•••</summary>
-              <div class="drawer-more-menu">
-                <button type="button" id="drawerDelete"><span>⌫</span><div><b>학과 삭제</b><small>관련 리소스와 설정 삭제</small></div></button>
-              </div>
-            </details>
             <button class="icon-button" data-close-drawer aria-label="상세 닫기">×</button>
           </div>
         </header>
         <div class="drawer-summary" id="drawerSummary"></div>
         <section class="drawer-mcp-servers" id="drawerMcpServers" aria-live="polite"></section>
-        <div class="drawer-content" id="drawerContent"></div>
+        <div class="drawer-content">
+          <div id="drawerContent"></div>
+          <details class="department-management hidden" id="drawerMore">
+            <summary>고급 관리 <span>Cloud 리소스 삭제</span></summary>
+            <div class="department-management-body">
+              <b>학과 리소스 삭제</b>
+              <p>이 학과의 MCP, 코퍼스, 버킷과 동기화 이력을 선택하여 영구 삭제합니다. 서비스가 중단되며 삭제한 데이터는 복구할 수 없습니다.</p>
+              <button type="button" class="button danger compact" id="drawerDelete">삭제 대상 검토</button>
+            </div>
+          </details>
+        </div>
         <footer>
           <button class="button primary" id="drawerEdit">설정 수정</button>
           <button class="button secondary" id="drawerCheck">이 학과 다시 확인</button>

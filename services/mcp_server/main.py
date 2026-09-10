@@ -39,6 +39,7 @@ from shared.search_postprocess import (  # noqa: E402
 )
 
 from shared.html_text import clean_html_evidence  # noqa: E402
+from shared.source_links import citation_view_uri  # noqa: E402
 from shared.search_response import (  # noqa: E402
     EvidenceDocument, SearchResponse, build_search_response,
 )
@@ -268,7 +269,7 @@ def search(
             "name": display_name,
             "path": meta.path if meta else None,
             "bundle": meta.bundle if meta else None,
-            "sourceUri": (
+            "sourceUri": citation_view_uri(
                 (meta.source_uri if meta and meta.source_uri else None)
                 or hit.source.source_uri
             ),

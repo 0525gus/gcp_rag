@@ -457,7 +457,7 @@
         <td>${badge(overall)}</td>
         ${layers.map((layer) => `<td>${badge(overall === "CHECKING" ? "CHECKING" : layerStatus(result, layer))}</td>`).join("")}
         <td class="time-cell" title="${escapeHtml(checkedAt || "")}">${overall === "CHECKING" ? "확인 중" : relativeTime(checkedAt)}</td>
-        <td><div class="row-actions"><button class="row-button" data-action="check" title="다시 확인" aria-label="${escapeHtml(dept.name)} 다시 확인">↻</button>${dept.cloudOnly ? "" : `<button class="row-button danger-button" data-action="delete" title="삭제" aria-label="${escapeHtml(dept.name)} 삭제">⌫</button>`}<button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세">›</button></div></td>
+        <td><div class="row-actions"><button class="row-button" data-action="check" title="다시 확인" aria-label="${escapeHtml(dept.name)} 다시 확인">↻</button><button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세">›</button></div></td>
       </tr>`;
     }).join("");
 
@@ -466,9 +466,6 @@
         const button = event.target.closest("button");
         const code = row.dataset.code;
         if (button?.dataset.action === "check" && !button.disabled) startStatus([code]);
-        // 삭제는 상세를 거치지 않고 바로 계획 창을 연다. 어떤 리소스를 지울지는
-        // 그 창에서 하나씩 고른다 — 여기서 지워지는 것은 아직 아무것도 없다.
-        else if (button?.dataset.action === "delete" && !button.disabled) openTeardown("department", code);
         else openDrawer(code);
       });
     });
@@ -1003,7 +1000,11 @@
     }
     const services = runtime.services || [];
     const ready = services.filter((item) => item.state === "READY").length;
-    $("#commonRuntimeMeta").textContent = `${ready} / ${services.length}개 정상 · ${runtime.region || ""}`.trim();
+    $("#commonRuntimeMeta").textContent = `${ready} / ${services.length}개 정상${runtime.region ? ` · ${runtime.region}` : ""}`;
+    if (!services.length) {
+      grid.innerHTML = '<p class="runtime-empty">표시할 공통 런타임 서비스가 없습니다.</p>';
+      return;
+    }
     grid.innerHTML = services.map((service) => {
       const tone = runtimeStateTone[service.state] || "warn";
       // 미배포는 지울 것이 없다. 살아 있는 것에만 삭제를 건다.
@@ -1016,11 +1017,13 @@
           <div><b>${escapeHtml(service.name)}</b><small>${escapeHtml(service.purpose)}</small></div>
           <span class="runtime-chip">${escapeHtml(runtimeStateLabels[service.state] || service.state)}</span>
         </header>
-        <p class="runtime-detail">${escapeHtml(service.detail || "")}</p>
-        ${extra ? `<p class="runtime-extra">${escapeHtml(extra)}</p>` : ""}
+        <div class="runtime-body">
+          <p class="runtime-detail">${escapeHtml(service.detail || "상세 정보가 없습니다.")}</p>
+          ${extra ? `<div class="runtime-extra"><span>${service.pendingRevision ? "대기 리비전" : service.revision ? "리비전" : "실행 일정"}</span><code>${escapeHtml(service.pendingRevision || extra)}</code></div>` : ""}
+        </div>
         <footer>
           ${service.url ? `<button type="button" class="copy-value-button" data-copy-value="${escapeHtml(service.url)}">URL 복사</button>` : "<span></span>"}
-          ${deletable ? `<button type="button" class="button danger compact" data-runtime-delete="${escapeHtml(service.key)}">삭제</button>` : ""}
+          ${deletable ? `<button type="button" class="button danger compact" data-runtime-delete="${escapeHtml(service.key)}" aria-label="${escapeHtml(service.name)} 삭제">삭제</button>` : ""}
         </footer>
       </article>`;
     }).join("");
@@ -2016,7 +2019,7 @@
       : dept.cloudOnly ? "Cloud 설정 수정" : "설정 수정";
     $("#drawerDelete").dataset.code = code;
     $("#drawerMore").removeAttribute("open");
-    $("#drawerMore").classList.toggle("hidden", Boolean(dept.cloudOnly));
+    $("#drawerMore").classList.toggle("hidden", !dept.cloudOnly);
     const drawer = $("#detailDrawer");
     drawer.classList.add("open");
     drawer.setAttribute("aria-hidden", "false");
@@ -2242,10 +2245,10 @@
       .filter((target) => target.selectable && !target.selected
         && ["cloudRun", "corpus", "bucket", "metadataObjects"].includes(target.kind))
       .map((target) => target.label);
-    if (chosen.has("config") && orphans.length) {
-      messages.push(`설정 파일을 지우면 남긴 리소스는 콘솔에서 다시 찾을 수 없습니다: ${orphans.join(", ")}`);
+    if (chosen.has("mcp-staff") && orphans.length) {
+      messages.push(`Cloud 설정을 담은 MCP를 지우면 남긴 리소스는 콘솔에서 다시 찾을 수 없습니다: ${orphans.join(", ")}`);
     }
-    if (chosen.has("config") && !chosen.has("sync-env")) {
+    if (chosen.has("mcp-staff") && !chosen.has("sync-env")) {
       messages.push("rag-sync 라우팅을 갱신하지 않으면 없어진 버킷으로 계속 동기화를 시도합니다.");
     }
     const removesData = [...chosen].some((key) => key.startsWith("corpus-") || key.startsWith("bucket-"));
@@ -2286,10 +2289,11 @@
         ? `등록된 학과 ${remaining.length}곳(${remaining.join(", ")})의 자동 동기화가 즉시 멈춥니다. 학과 코퍼스와 버킷은 남습니다.`
         : "Parser, Sync, Workflow, Scheduler를 삭제합니다. 다시 쓰려면 공통 런타임을 재배포해야 합니다.";
     }
+    if (plan.lastDepartment) return "마지막 학과입니다. 교직원 MCP까지 삭제하려면 운영 환경에서 Sync 런타임을 먼저 삭제해야 합니다. 선택한 리소스는 복구할 수 없습니다.";
     const kept = (plan.targets || []).filter((target) => target.skipped);
     return kept.length
       ? `다른 학과가 함께 쓰는 리소스 ${kept.length}개는 지우지 않고 남깁니다. 나머지는 되돌릴 수 없습니다.`
-      : "이 학과의 GCP 리소스와 설정 파일을 모두 지웁니다. 되돌릴 수 없습니다.";
+      : "선택한 학과 Cloud 리소스를 영구 삭제합니다. Drive 원본은 유지되며 삭제한 데이터는 복구할 수 없습니다.";
   }
 
   function syncTeardownConfirmState() {
@@ -2298,7 +2302,8 @@
     $("#startTeardown").disabled = !plan
       || Boolean(state.teardownRun)
       || value !== plan.confirmWord
-      || teardownSelectedKeys().length === 0;
+      || teardownSelectedKeys().length === 0
+      || (plan.kind === "department" && teardownSelectedKeys().includes("mcp-staff") && !teardownSelectedKeys().includes("sync-env"));
   }
 
   function showTeardownModal() {
@@ -2320,6 +2325,7 @@
       : "/api/v1/common-runtime/teardown-plan";
     try {
       const plan = await api(url);
+      if (kind === "department") plan.targets.forEach((target) => { target.selected = false; });
       // 특정 리소스 한 개에서 들어온 삭제(예: 운영 환경의 rag-parser 카드)는
       // 그것만 켠 채로 연다. 목록은 그대로 보여 준다 — 무엇을 안 지우는지가 보인다.
       if (onlyKeys) {

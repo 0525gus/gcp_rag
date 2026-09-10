@@ -3352,13 +3352,24 @@ def _stub_teardown_deletes(monkeypatch: pytest.MonkeyPatch, failures: set[str] |
     )
     monkeypatch.setattr(
         dept_gui,
-        "_refresh_sync_department_map",
-        lambda: calls.append("syncEnv:rag-sync") or "",
+        "_refresh_cloud_teardown_routing",
+        lambda code: calls.append("syncEnv:rag-sync") or "",
     )
     monkeypatch.setattr(dept_gui, "_provision_access_token", lambda: "token")
     return calls
 
 
+@pytest.fixture()
+def cloud_teardown_configs(isolated_config: Path, monkeypatch: pytest.MonkeyPatch):
+    """Use existing config samples as uploaded Cloud metadata for teardown tests."""
+    monkeypatch.setattr(dept_gui, "_cloud_department_configs", lambda: {
+        path.stem: yaml.safe_load(path.read_text(encoding="utf-8"))
+        for path in isolated_config.glob("*.yaml")
+    })
+    monkeypatch.setattr(dept_gui, "_require_sync_removed", lambda: None)
+
+
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_department_teardown_plan_lists_every_owned_resource(isolated_config: Path) -> None:
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
@@ -3367,25 +3378,25 @@ def test_department_teardown_plan_lists_every_owned_resource(isolated_config: Pa
 
     assert plan["confirmWord"] == "ee"
     assert [target["key"] for target in plan["targets"]] == [
-        "mcp-staff",
         "mcp-student",
         "corpus-staff",
         "corpus-student",
         "bucket-hwpOriginal",
         "bucket-source",
         "firestore-state",
-        "config",
         "sync-env",
+        "mcp-staff",
     ]
-    # 설정 파일은 GCP 리소스 뒤여야 한다 — 앞이 실패하면 남겨서 다시 시도한다.
+    # Cloud 설정을 담은 MCP는 마지막에 삭제해 실패 시 재시도 정보를 남긴다.
     keys = [target["key"] for target in plan["targets"]]
-    assert keys.index("config") > keys.index("bucket-source")
-    # 라우팅 갱신은 설정이 사라진 **뒤**라야 남은 학과만 남는다.
-    assert keys[-1] == "sync-env"
+    assert keys.index("mcp-staff") > keys.index("bucket-source")
+    # 라우팅 갱신이 성공한 후 Cloud 설정을 삭제한다.
+    assert keys[-1] == "mcp-staff"
     assert not any(target["skipped"] for target in plan["targets"])
     assert all(target["selected"] for target in plan["targets"])
 
 
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_teardown_plan_covers_firestore_history_and_shared_bucket_objects(
     isolated_config: Path,
 ) -> None:
@@ -3421,6 +3432,7 @@ def test_teardown_plan_covers_firestore_history_and_shared_bucket_objects(
     )
 
 
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_teardown_plan_keeps_firestore_history_when_a_drive_is_shared(
     isolated_config: Path,
 ) -> None:
@@ -3437,6 +3449,7 @@ def test_teardown_plan_keeps_firestore_history_when_a_drive_is_shared(
     assert by_key["firestore-state"]["selectable"] is False
 
 
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_teardown_plan_keeps_resources_shared_with_other_departments(
     isolated_config: Path,
 ) -> None:
@@ -3458,9 +3471,10 @@ def test_teardown_plan_keeps_resources_shared_with_other_departments(
     assert by_key["bucket-source"]["skipped"] is True
     # 학과 전용인 것은 그대로 지운다.
     assert by_key["mcp-staff"]["skipped"] is False
-    assert by_key["config"]["skipped"] is False
+    assert "config" not in by_key
 
 
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_teardown_refuses_when_confirm_word_does_not_match(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3478,7 +3492,8 @@ def test_teardown_refuses_when_confirm_word_does_not_match(
     assert (isolated_config / "ee.yaml").exists()
 
 
-def test_teardown_deletes_owned_resources_and_config_last(
+@pytest.mark.usefixtures("cloud_teardown_configs")
+def test_teardown_deletes_owned_resources_and_cloud_metadata_last(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client, headers = _client()
@@ -3492,20 +3507,21 @@ def test_teardown_deletes_owned_resources_and_config_last(
 
     assert run["status"] == "COMPLETED"
     assert calls == [
-        "run:rag-mcp-ee-staff",
         "run:rag-mcp-ee-student",
         "corpus:projects/project-test/locations/asia-northeast3/ragCorpora/staff-1",
         "corpus:projects/project-test/locations/asia-northeast3/ragCorpora/student-1",
         "bucket:rag-ee-hwp-project-test",
         "bucket:rag-ee-source-project-test",
         "firestore:DRIVE-1",
-        # 설정이 사라진 뒤라야 남은 학과만으로 라우팅 맵이 만들어진다.
+        # Cloud 라우팅을 먼저 갱신하고 설정을 담은 staff MCP를 마지막에 지운다.
         "syncEnv:rag-sync",
+        "run:rag-mcp-ee-staff",
     ]
-    assert not (isolated_config / "ee.yaml").exists()
+    assert (isolated_config / "ee.yaml").exists()
 
 
-def test_teardown_keeps_config_file_when_a_gcp_delete_fails(
+@pytest.mark.usefixtures("cloud_teardown_configs")
+def test_teardown_keeps_cloud_metadata_when_a_gcp_delete_fails(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """GCP 쪽이 남았는데 설정을 지우면 고아 리소스를 콘솔에서 못 찾는다."""
@@ -3521,10 +3537,13 @@ def test_teardown_keeps_config_file_when_a_gcp_delete_fails(
 
     assert run["status"] == "PARTIAL"
     assert by_key["bucket-source"]["status"] == "FAILED"
-    assert by_key["config"]["status"] == "SKIPPED"
+    assert "config" not in by_key
+    assert by_key["mcp-staff"]["status"] == "SKIPPED"
+    assert by_key["sync-env"]["status"] == "SKIPPED"
     assert (isolated_config / "ee.yaml").exists()
 
 
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_teardown_skips_shared_resources_when_running(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3540,12 +3559,13 @@ def test_teardown_skips_shared_resources_when_running(
     _wait_for_teardown()
     run = next(iter(dept_gui._TEARDOWN_RUNS.values()))
 
-    assert calls == ["run:rag-mcp-ee-staff", "run:rag-mcp-ee-student", "syncEnv:rag-sync"]
+    assert calls == ["run:rag-mcp-ee-student", "syncEnv:rag-sync", "run:rag-mcp-ee-staff"]
     assert run["status"] == "COMPLETED"
-    assert not (isolated_config / "ee.yaml").exists()
+    assert (isolated_config / "ee.yaml").exists()
     assert (isolated_config / "me.yaml").exists()
 
 
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_teardown_runs_only_the_targets_that_were_selected(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3557,21 +3577,22 @@ def test_teardown_runs_only_the_targets_that_were_selected(
     response = client.post(
         "/api/v1/departments/ee/teardown",
         headers=headers,
-        json={"confirm": "ee", "targets": ["mcp-staff", "bucket-source"]},
+        json={"confirm": "ee", "targets": ["mcp-student", "bucket-source"]},
     )
     assert response.status_code == 202
     _wait_for_teardown()
     run = dept_gui._TEARDOWN_RUNS[response.json()["runId"]]
     by_key = {target["key"]: target for target in run["targets"]}
 
-    assert calls == ["run:rag-mcp-ee-staff", "bucket:rag-ee-source-project-test"]
+    assert calls == ["run:rag-mcp-ee-student", "bucket:rag-ee-source-project-test"]
     # 고르지 않은 것은 목록에서 사라지지 않는다 — 무엇을 남겼는지가 보여야 한다.
     assert by_key["corpus-staff"]["status"] == "SKIPPED"
     assert by_key["corpus-staff"]["detail"] == "선택하지 않아 남깁니다"
-    assert by_key["config"]["status"] == "SKIPPED"
+    assert "config" not in by_key
     assert (isolated_config / "ee.yaml").exists()
 
 
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_teardown_refuses_an_empty_selection(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3590,6 +3611,7 @@ def test_teardown_refuses_an_empty_selection(
     assert calls == []
 
 
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_selecting_a_shared_resource_still_does_not_delete_it(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3606,19 +3628,20 @@ def test_selecting_a_shared_resource_still_does_not_delete_it(
     response = client.post(
         "/api/v1/departments/ee/teardown",
         headers=headers,
-        json={"confirm": "ee", "targets": ["corpus-staff", "bucket-source", "config"]},
+        json={"confirm": "ee", "targets": ["corpus-staff", "bucket-source", "mcp-student"]},
     )
     assert response.status_code == 202
     _wait_for_teardown()
     run = dept_gui._TEARDOWN_RUNS[response.json()["runId"]]
     by_key = {target["key"]: target for target in run["targets"]}
 
-    assert calls == []
+    assert calls == ["run:rag-mcp-ee-student"]
     assert by_key["corpus-staff"]["status"] == "SKIPPED"
     assert "다른 학과가 사용 중" in by_key["corpus-staff"]["detail"]
-    assert not (isolated_config / "ee.yaml").exists()
+    assert (isolated_config / "ee.yaml").exists()
 
 
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_teardown_warns_when_the_selection_leaves_orphans_behind(
     isolated_config: Path,
 ) -> None:
@@ -3626,11 +3649,12 @@ def test_teardown_warns_when_the_selection_leaves_orphans_behind(
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
     plan = dept_gui.department_teardown_plan("ee")
 
-    selected = dept_gui.apply_teardown_selection(plan, ["config"])
+    selected = dept_gui.apply_teardown_selection(plan, ["mcp-staff", "sync-env"])
     warnings = dept_gui.teardown_selection_warnings(selected)
 
     assert any("콘솔에서 다시 찾을 수 없습니다" in item for item in warnings)
-    assert any("rag-sync 라우팅" in item for item in warnings)
+    with pytest.raises(ValueError, match="라우팅 갱신"):
+        dept_gui.apply_teardown_selection(plan, ["mcp-staff"])
 
 
 def test_common_runtime_teardown_can_delete_one_service(
@@ -3804,6 +3828,7 @@ def test_common_runtime_status_flags_a_revision_that_never_became_ready(
     assert state["pendingRevision"] == "rag-sync-00008"
 
 
+@pytest.mark.usefixtures("cloud_teardown_configs")
 def test_every_teardown_kind_has_a_label_in_the_console(isolated_config: Path) -> None:
     """계획의 kind 는 여기서 만들고 이름은 app.js 가 붙인다 — 둘이 어긋나기 쉽다.
 
@@ -4332,3 +4357,51 @@ def test_env_only_refresh_without_local_yaml_updates_the_department_map(
         call for call in calls if call["args"][1:4] == ["run", "services", "update"]
     )
     assert update["args"][4] == dept_gui.SYNC_SERVICE
+
+
+def test_cloud_teardown_needs_no_local_yaml(isolated_config, monkeypatch):
+    deployed = _payload()
+    monkeypatch.setattr(dept_gui, "_cloud_department_configs", lambda: {"ee": deployed})
+    plan = dept_gui.department_teardown_plan("ee")
+    assert not list(isolated_config.glob("*.yaml"))
+    assert plan["lastDepartment"] is True
+    assert plan["targets"][-1]["key"] == "mcp-staff"
+    assert not any(target["kind"] == "config" for target in plan["targets"])
+
+
+def test_cloud_teardown_rejects_local_only_department(isolated_config, monkeypatch):
+    (isolated_config / "ee.yaml").write_text("name: local", encoding="utf-8")
+    monkeypatch.setattr(dept_gui, "_cloud_department_configs", lambda: {"me": _payload()})
+    with pytest.raises(FileNotFoundError):
+        dept_gui.department_teardown_plan("ee")
+
+
+def test_cloud_teardown_last_department_blocks_before_deletion(isolated_config, monkeypatch):
+    monkeypatch.setattr(dept_gui, "_cloud_department_configs", lambda: {"ee": _payload()})
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *args, **kwargs: (True, {"name": "rag-sync"}))
+    plan = dept_gui.department_teardown_plan("ee")
+    with pytest.raises(ValueError, match="Sync"):
+        dept_gui.start_teardown_run(plan, "ee")
+    assert not dept_gui._TEARDOWN_RUNS
+
+
+def test_cloud_teardown_routing_uses_remaining_cloud_configs(isolated_config, monkeypatch):
+    deployed = {"ee": _payload(), "me": _payload()}
+    for config in deployed.values():
+        config["keys"] = {"staff": "k" * 24, "student": "s" * 24}
+    monkeypatch.setattr(dept_gui, "_cloud_department_configs", lambda: deployed.copy())
+    captured = []
+    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kwargs: captured.append(json.loads(kwargs["expected"])) or "me")
+    dept_gui._refresh_cloud_teardown_routing("ee")
+    assert list(captured[0]) == ["me"]
+    assert "ee" in deployed
+
+
+@pytest.mark.parametrize("result, allowed", [((False, "NOT_FOUND"), True), ((False, "permission denied"), False), ((True, {}), False)])
+def test_cloud_teardown_last_department_requires_confirmed_absence(isolated_config, monkeypatch, result, allowed):
+    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *args, **kwargs: result)
+    if allowed:
+        dept_gui._require_sync_removed()
+    else:
+        with pytest.raises(ValueError):
+            dept_gui._require_sync_removed()
