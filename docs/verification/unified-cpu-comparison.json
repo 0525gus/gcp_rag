@@ -1,0 +1,171 @@
+{
+  "targets": {
+    "cpu1": "https://cpu1---rag-mcp-42w47ff6ba-du.a.run.app/mcp",
+    "cpu2": "https://cpu2---rag-mcp-42w47ff6ba-du.a.run.app/mcp"
+  },
+  "registryRevision": "74135b2ea5e14e53bbefe355785e8251",
+  "verification": [
+    {
+      "target": "cpu1",
+      "department": "cs",
+      "audience": "staff",
+      "initMs": 1250.86,
+      "documents": 10
+    },
+    {
+      "target": "cpu1",
+      "department": "cs",
+      "audience": "student",
+      "initMs": 956.22,
+      "documents": 10
+    },
+    {
+      "target": "cpu1",
+      "department": "ee",
+      "audience": "staff",
+      "initMs": 691.94,
+      "documents": 0
+    },
+    {
+      "target": "cpu1",
+      "department": "ee",
+      "audience": "student",
+      "initMs": 429.47,
+      "documents": 0
+    },
+    {
+      "target": "cpu2",
+      "department": "cs",
+      "audience": "staff",
+      "initMs": 1432.02,
+      "documents": 10
+    },
+    {
+      "target": "cpu2",
+      "department": "cs",
+      "audience": "student",
+      "initMs": 1162.57,
+      "documents": 10
+    },
+    {
+      "target": "cpu2",
+      "department": "ee",
+      "audience": "staff",
+      "initMs": 901.74,
+      "documents": 0
+    },
+    {
+      "target": "cpu2",
+      "department": "ee",
+      "audience": "student",
+      "initMs": 637.22,
+      "documents": 0
+    }
+  ],
+  "timings": {
+    "cpu1": {
+      "sequential": {
+        "n": 24,
+        "medianMs": 1087.13,
+        "p95Ms": 1342.22,
+        "meanMs": 1111.8
+      },
+      "concurrent4": {
+        "n": 8,
+        "medianMs": 1350.1,
+        "p95Ms": 1553.42,
+        "meanMs": 1268.96
+      },
+      "sequentialSamplesMs": [
+        1187.79,
+        994.75,
+        959.16,
+        1183.63,
+        1235.88,
+        1073.86,
+        1167.92,
+        1074.54,
+        1342.22,
+        1019.32,
+        1001.99,
+        961.82,
+        1138.38,
+        1322.11,
+        1049.72,
+        1478.1,
+        1176.28,
+        1063.66,
+        1099.73,
+        921.15,
+        1162.37,
+        979.83,
+        938.35,
+        1150.53
+      ],
+      "concurrentSamplesMs": [
+        1382.86,
+        1042.17,
+        1553.42,
+        1078.04,
+        1369.44,
+        923.18,
+        1471.85,
+        1330.76
+      ]
+    },
+    "cpu2": {
+      "sequential": {
+        "n": 24,
+        "medianMs": 1029.87,
+        "p95Ms": 1504.61,
+        "meanMs": 1109.4
+      },
+      "concurrent4": {
+        "n": 8,
+        "medianMs": 1128.14,
+        "p95Ms": 1358.91,
+        "meanMs": 1129.16
+      },
+      "sequentialSamplesMs": [
+        1601.73,
+        1228.94,
+        956.63,
+        952.94,
+        947.83,
+        1398.7,
+        1120.39,
+        1035.83,
+        1440.82,
+        1015.56,
+        1049.3,
+        1138.86,
+        959.09,
+        1023.9,
+        912.19,
+        1504.61,
+        1167.94,
+        918.78,
+        944.87,
+        951.87,
+        1110.61,
+        1354.02,
+        894.65,
+        995.5
+      ],
+      "concurrentSamplesMs": [
+        1166.22,
+        1209.07,
+        1358.91,
+        1047.42,
+        1269.82,
+        921.4,
+        1090.07,
+        970.34
+      ]
+    }
+  },
+  "notes": [
+    "End-to-end client timing; includes network and Vertex/Firestore latency.",
+    "First connection is not a controlled cold-start measurement."
+  ]
+}

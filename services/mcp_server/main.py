@@ -8,6 +8,8 @@ tool: search
 from __future__ import annotations
 
 import copy
+import asyncio
+import hmac
 import logging
 import os
 import sys
@@ -18,7 +20,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -40,6 +42,7 @@ from shared.search_postprocess import (  # noqa: E402
 
 from shared.html_text import clean_html_evidence  # noqa: E402
 from shared.source_links import citation_view_uri  # noqa: E402
+from shared.mcp_routing import RouteRegistry, SearchScope  # noqa: E402
 from shared.search_response import (  # noqa: E402
     EvidenceDocument, SearchResponse, build_search_response,
 )
@@ -49,6 +52,8 @@ logger = logging.getLogger("mcp_server")
 
 settings = get_settings()
 MCP_API_KEY = os.environ.get("MCP_API_KEY", "").strip()
+ROUTING_MODE = os.environ.get("MCP_ROUTING_MODE", "single")
+route_registry = RouteRegistry(settings)
 # 키가 없으면 ApiKeyMiddleware 가 통째로 무력화된다(401 이 아니라 그냥 통과).
 # 배포가 공개(allUsers)로 바뀌는 순간 코퍼스 전체가 무인증 노출이므로, 인증 없이
 # 뜨는 것은 반드시 의도한 선택이어야 한다 — 명시적 opt-in 없이는 기동을 거부한다.
@@ -77,8 +82,6 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
     """FactChat 등 외부 커넥터용 단순 API 키 게이트."""
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
-        if not MCP_API_KEY:
-            return await call_next(request)
         if request.url.path in {"/health", "/"}:
             return await call_next(request)
 
@@ -90,7 +93,16 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
         elif x_key:
             token = x_key.strip()
 
-        if token != MCP_API_KEY:
+        if ROUTING_MODE == "registry":
+            try:
+                scope = await asyncio.to_thread(route_registry.resolve, token)
+            except Exception:
+                logger.error("MCP route registry lookup failed")
+                return JSONResponse({"error": "routing_unavailable"}, status_code=503)
+            if scope is None:
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            request.state.mcp_scope = scope
+        elif MCP_API_KEY and not hmac.compare_digest(token, MCP_API_KEY):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         return await call_next(request)
 
@@ -108,7 +120,7 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
 # 바뀌므로 짧은 TTL 로 stale 위험이 사실상 없다. 0 이면 캐시를 끈다.
 _CACHE_TTL = float(os.environ.get("SEARCH_CACHE_TTL_SECONDS", "60"))
 _CACHE_MAX = int(os.environ.get("SEARCH_CACHE_MAX_ENTRIES", "128"))
-_CacheKey = tuple[str, int, str | None]
+_CacheKey = tuple
 _cache: OrderedDict[_CacheKey, tuple[float, SearchResponse]] = OrderedDict()
 _cache_lock = threading.Lock()
 
@@ -139,11 +151,12 @@ def _cache_put(key: _CacheKey, value: SearchResponse) -> None:
             _cache.popitem(last=False)
 
 
-@mcp.tool()
 def search(
     query: str,
     top_k: int | None = None,
     drive_id: str | None = None,
+    *,
+    scope: SearchScope | None = None,
 ) -> SearchResponse:
     """질문과 관련된 근거 문서를 검색해 본문 청크와 출처를 함께 반환합니다.
 
@@ -161,17 +174,22 @@ def search(
             원값이며 답변 확률이 아닙니다. 결과 배열 순서가 문서 관련도 순위입니다.
         drive_id: 특정 공유 드라이브로 필터(선택).
     """
-    k = top_k or settings.top_k_default
+    if ROUTING_MODE == "registry" and scope is None:
+        raise PermissionError("Authenticated search scope is required")
+    if scope and drive_id and drive_id not in scope.drive_ids:
+        raise PermissionError("This credential cannot search the requested drive")
+    request_settings = replace(settings, rag_corpus_name=scope.corpus) if scope else settings
+    k = top_k or request_settings.top_k_default
     k = max(1, min(k, settings.search_top_k_max))
     logger.info("search query=%r top_k=%s drive_id=%s", query, k, drive_id)
 
-    cache_key = (query, k, drive_id)
+    cache_key = (scope.cache_partition if scope else (settings.rag_corpus_name,), query, k, drive_id)
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.info("search cache hit query=%r top_k=%s", query, k)
         return cached
 
-    rag = RagEngineClient(settings)
+    rag = RagEngineClient(request_settings)
     # 여유분 retrieve 후 후처리(파일당 청크 병합)로 k개.
     # 상한을 k*배수보다 낮게 두면 큰 k 에서 여유분이 사라져 k 개를 못 채운다.
     fetch_k = min(
@@ -186,7 +204,7 @@ def search(
         top_k=fetch_k,
         vector_distance_threshold=threshold if threshold > 0 else None,
     )
-    store = DocStateStore(settings)
+    store = DocStateStore(request_settings)
     # 상태·드라이브 필터는 **postprocess 앞**에 둔다. 뒤에 두면 postprocess 가 이미
     # k 개 문서로 잘라 놓은 뒤라, 걸러낸 자리가 빈 채로 남아 top_k 보다 적게 나간다.
     # 앞에서 걷어내면 청크 병합 예산(max_total_chunks)도 살아남을 문서에만 쓰인다.
@@ -199,6 +217,9 @@ def search(
 
     def _servable(hit: Any) -> bool:
         meta = _meta(hit.source.file_id)
+        if scope and (not meta or meta.drive_id not in scope.drive_ids
+                      or (scope.audience == "student" and meta.audience != "STUDENT")):
+            return False
         if meta and (
             # EXCLUDED = 대상 폴더 밖. 코퍼스 정리가 비동기라 청크가 남아 있을 수
             # 있으므로 검색 단에서도 막는다.
@@ -210,7 +231,7 @@ def search(
         ):
             # 비동기 코퍼스 정리·재시도가 수렴하는 동안의 이중 방어.
             return False
-        if drive_id and meta and meta.drive_id != drive_id:
+        if drive_id and (not meta or meta.drive_id != drive_id):
             return False
         return True
 
@@ -298,25 +319,36 @@ def search(
     return response
 
 
+@mcp.tool(name="search", description=search.__doc__)
+async def search_tool(query: str, ctx: Context, top_k: int | None = None,
+                      drive_id: str | None = None) -> SearchResponse:
+    # Scope comes from the authenticated HTTP request, never from tool arguments.
+    request = ctx.request_context.request
+    scope = getattr(request.state, "mcp_scope", None) if request is not None else None
+    return await asyncio.to_thread(search, query, top_k, drive_id, scope=scope)
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_request: Request):  # type: ignore[no-untyped-def]
     return JSONResponse(
         {
             "status": "ok",
             "service": os.environ.get("K_SERVICE") or "rag-mcp",
-            "auth": "api_key" if MCP_API_KEY else "none",
+            "auth": "scoped_api_key" if ROUTING_MODE == "registry" else "api_key" if MCP_API_KEY else "none",
         }
     )
 
 
 def build_app():
     """ASGI 앱 (+ API 키 미들웨어). 인증이 없으면 기동을 거부한다."""
-    if not MCP_API_KEY and not MCP_ALLOW_NO_AUTH:
+    if ROUTING_MODE not in {"single", "registry"}:
+        raise RuntimeError("Unknown MCP routing mode")
+    if ROUTING_MODE != "registry" and not MCP_API_KEY and not MCP_ALLOW_NO_AUTH:
         raise RuntimeError(
             "MCP_API_KEY is not set and MCP_ALLOW_NO_AUTH is not enabled — "
             "refusing to serve the corpus without authentication"
         )
-    if not MCP_API_KEY:
+    if ROUTING_MODE != "registry" and not MCP_API_KEY:
         logger.warning(
             "starting WITHOUT app-level auth (MCP_ALLOW_NO_AUTH=true) — "
             "the deployment must stay IAM-protected"

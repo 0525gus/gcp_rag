@@ -328,6 +328,7 @@
       const data = {
         code,
         region: state.environment?.region || "Cloud Run",
+        unifiedMcp: Boolean(department.unifiedMcp),
         servers: department.cloudServices,
       };
       state.mcpServers.set(code, data);
@@ -359,10 +360,11 @@
       return;
     }
     const servers = data.servers || [];
-    root.innerHTML = `<div class="drawer-mcp-heading"><b>MCP SERVERS</b><small>${escapeHtml(data.region || "Cloud Run")}</small></div>
+    root.innerHTML = `<div class="drawer-mcp-heading"><b>${data.unifiedMcp ? "공통 MCP · 접근 범위" : "MCP SERVERS"}</b><small>${escapeHtml(data.region || "Cloud Run")}</small></div>
+      ${data.unifiedMcp ? '<p class="drawer-mcp-loading">URL은 공통이며, 키에 따라 이 학과의 교직원·학생 검색 범위가 결정됩니다.</p>' : ""}
       <div class="drawer-mcp-grid">${servers.map((server) => {
         const ready = server.status === "READY";
-        const statusLabel = ready ? "준비됨" : server.status === "NOT_READY" ? "배포 확인 필요" : "아직 배포되지 않음";
+        const statusLabel = ready ? "준비됨" : server.status === "DISABLED" ? "접근 중지됨" : server.status === "NOT_READY" ? "배포 확인 필요" : "아직 배포되지 않음";
         const url = server.mcpUrl || (server.url ? `${server.url.replace(/\/$/, "")}/mcp` : "URL 없음");
         const urlElement = server.healthUrl
           ? `<a class="mcp-server-url" href="${escapeHtml(server.healthUrl)}" target="_blank" rel="noopener">${escapeHtml(url)}</a>`
@@ -370,9 +372,9 @@
         return `<article class="drawer-mcp-card" data-status="${escapeHtml(server.status)}">
           <span class="mcp-audience-mark">${server.audience === "staff" ? "교" : "학"}</span>
           <div class="mcp-server-main">
-            <div class="mcp-server-title"><span class="mcp-ready-dot" title="${escapeHtml(statusLabel)}"></span><b>${escapeHtml(server.serviceName)}</b></div>
+            <div class="mcp-server-title"><span class="mcp-ready-dot" title="${escapeHtml(statusLabel)}"></span><b>${escapeHtml(data.unifiedMcp ? `${server.label} · ${statusLabel}` : server.serviceName)}</b></div>
             ${urlElement}
-            <div class="mcp-server-actions"><button type="button" class="mcp-url-copy" data-copy-mcp-url="${escapeHtml(url === "URL 없음" ? "" : url)}" ${url === "URL 없음" ? "disabled" : ""}>MCP URL 복사</button><button type="button" class="mcp-url-copy mcp-key-copy" data-copy-mcp-key="${escapeHtml(server.audience)}" data-department-code="${escapeHtml(code)}">키 복사</button></div>
+            <div class="mcp-server-actions"><button type="button" class="mcp-url-copy" data-copy-mcp-url="${escapeHtml(url === "URL 없음" ? "" : url)}" ${url === "URL 없음" ? "disabled" : ""}>MCP URL 복사</button><button type="button" class="mcp-url-copy mcp-key-copy" data-copy-mcp-key="${escapeHtml(server.audience)}" data-department-code="${escapeHtml(code)}" ${server.status === "DISABLED" ? "disabled" : ""}>키 복사</button></div>
           </div>
         </article>`;
       }).join("")}</div>`;
@@ -490,7 +492,7 @@
       const cloud = cloudResult.ok ? (cloudResult.value.departments || []) : [];
       cloud.forEach((item) => {
         const existing = merged.get(item.code);
-        if (existing) {
+        if (existing && !item.unifiedMcp) {
           existing.cloudServices = item.cloudServices || [];
           existing.cloudMetadata = item.metadata || {};
         } else {
@@ -2241,6 +2243,10 @@
     const chosen = new Set(teardownSelectedKeys());
     if (!chosen.size) return [];
     const messages = [];
+    if (plan.unifiedMcp) {
+      messages.push("공통 MCP는 유지됩니다. 선택한 학과의 접근 범위·동기화만 중지하며, Cloud 등록 설정은 관련 리소스를 모두 정리한 후 삭제할 수 있습니다.");
+      return messages;
+    }
     const orphans = (plan.targets || [])
       .filter((target) => target.selectable && !target.selected
         && ["cloudRun", "corpus", "bucket", "metadataObjects"].includes(target.kind))
@@ -2289,6 +2295,9 @@
         ? `등록된 학과 ${remaining.length}곳(${remaining.join(", ")})의 자동 동기화가 즉시 멈춥니다. 학과 코퍼스와 버킷은 남습니다.`
         : "Parser, Sync, Workflow, Scheduler를 삭제합니다. 다시 쓰려면 공통 런타임을 재배포해야 합니다.";
     }
+    if (plan.unifiedMcp) return plan.lastDepartment
+      ? "마지막 학과의 동기화를 중지하려면 운영 환경에서 Sync 런타임을 먼저 삭제해야 합니다. 공통 MCP는 유지됩니다."
+      : "공통 MCP를 유지하고 이 학과의 접근과 리소스를 정리합니다. 데이터 삭제 전 모든 MCP 접근 중지와 동기화 중지를 함께 선택해 주세요.";
     if (plan.lastDepartment) return "마지막 학과입니다. 교직원 MCP까지 삭제하려면 운영 환경에서 Sync 런타임을 먼저 삭제해야 합니다. 선택한 리소스는 복구할 수 없습니다.";
     const kept = (plan.targets || []).filter((target) => target.skipped);
     return kept.length
@@ -2303,7 +2312,7 @@
       || Boolean(state.teardownRun)
       || value !== plan.confirmWord
       || teardownSelectedKeys().length === 0
-      || (plan.kind === "department" && teardownSelectedKeys().includes("mcp-staff") && !teardownSelectedKeys().includes("sync-env"));
+      || (plan.kind === "department" && !plan.unifiedMcp && teardownSelectedKeys().includes("mcp-staff") && !teardownSelectedKeys().includes("sync-env"));
   }
 
   function showTeardownModal() {
@@ -2506,7 +2515,7 @@
     $("#mcpDeploymentDescription").textContent = complete
       ? "Cloud Run Ready와 Health 확인까지 완료했습니다."
       : failed ? "실패한 단계와 배포 로그를 확인한 뒤 다시 시도할 수 있습니다."
-        : running ? "창을 닫아도 배포는 백그라운드에서 계속됩니다." : "학과 설정을 Cloud Run 서비스로 배포합니다.";
+        : running ? "창을 닫아도 배포는 백그라운드에서 계속됩니다." : run.unifiedMcp ? "공통 MCP에 이 학과의 인증 키와 검색 범위를 등록합니다." : "학과 설정을 Cloud Run 서비스로 배포합니다.";
     const start = $("#startMcpDeployment");
     start.classList.toggle("hidden", running);
     start.textContent = complete ? "동기화 관리로 이동" : failed ? "다시 배포" : "지금 MCP 배포";
@@ -2523,7 +2532,8 @@
       name: dept.name,
       corpusMode: dept.corpusMode || "split",
       status: "READY",
-      serviceNames: dept.corpusMode === "single" ? [`rag-mcp-${code}-staff`] : [`rag-mcp-${code}-staff`, `rag-mcp-${code}-student`],
+      unifiedMcp: Boolean(dept.unifiedMcp || state.environment?.unifiedMcp),
+      serviceNames: dept.unifiedMcp || state.environment?.unifiedMcp ? ["rag-mcp"] : dept.corpusMode === "single" ? [`rag-mcp-${code}-staff`] : [`rag-mcp-${code}-staff`, `rag-mcp-${code}-student`],
       steps: [
         { key: "config", label: "설정 확인", status: "PENDING", detail: "YAML 및 MCP 키 확인" },
         { key: "image", label: "MCP 이미지", status: "PENDING", detail: "Artifact Registry 확인" },
@@ -3465,6 +3475,10 @@
 
   function resetWizard() {
     $("#departmentForm").reset();
+    const form = $("#departmentForm");
+    form.elements.staffMin.disabled = Boolean(state.environment?.unifiedMcp);
+    form.elements.studentMin.disabled = Boolean(state.environment?.unifiedMcp);
+    form.elements.staffMin.closest("details").classList.toggle("hidden", Boolean(state.environment?.unifiedMcp));
     $$('[data-corpus-mode]').forEach((button) => { button.disabled = false; });
     window.clearTimeout(state.codeAvailabilityTimer);
     state.editingCode = null;
@@ -3525,6 +3539,10 @@
       state.editingSource = config.source || "local";
       state.editingRevision = config.configRevision;
       setEditorMode(true, state.editingSource);
+      if (config.unifiedMcp) {
+        $("#createDescription").textContent = "공통 MCP의 학과별 검색 범위와 Cloud 등록 설정을 수정합니다.";
+        $("#confirmText").textContent = "변경 내용을 확인했으며 공통 MCP의 학과 설정을 업데이트합니다.";
+      }
       const form = $("#departmentForm");
       form.elements.code.value = config.code;
       form.elements.code.readOnly = true;
@@ -3535,6 +3553,9 @@
       form.elements.studentFolderIds.value = (config.drive?.studentFolderIds || []).join("\n");
       form.elements.staffMin.value = config.minInstances?.staff ?? 0;
       form.elements.studentMin.value = config.minInstances?.student ?? 0;
+      form.elements.staffMin.disabled = Boolean(config.unifiedMcp);
+      form.elements.studentMin.disabled = Boolean(config.unifiedMcp);
+      form.elements.staffMin.closest("details").classList.toggle("hidden", Boolean(config.unifiedMcp));
       setCorpusMode(config.corpusMode || (config.corpora?.student ? "split" : "single"));
       $$('[data-corpus-mode]').forEach((button) => { button.disabled = true; });
       $("#corpusModeHelp").textContent += " 운영 중 구성 변경은 재색인과 기존 서비스 정리가 필요해 별도 마이그레이션으로 진행합니다.";

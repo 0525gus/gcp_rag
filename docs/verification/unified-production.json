@@ -1,0 +1,104 @@
+{
+  "targets": {
+    "production": "https://rag-mcp-42w47ff6ba-du.a.run.app/mcp"
+  },
+  "registryRevision": "3915ab4cae8147b38bf1f4d445bcb598",
+  "verification": [
+    {
+      "target": "production",
+      "department": "cs",
+      "audience": "staff",
+      "initMs": 1600.04,
+      "documents": 10
+    },
+    {
+      "target": "production",
+      "department": "cs",
+      "audience": "student",
+      "initMs": 1286.49,
+      "documents": 10
+    },
+    {
+      "target": "production",
+      "department": "ee",
+      "audience": "staff",
+      "initMs": 1012.9,
+      "documents": 0
+    },
+    {
+      "target": "production",
+      "department": "ee",
+      "audience": "student",
+      "initMs": 734.81,
+      "documents": 0
+    }
+  ],
+  "timings": {},
+  "notes": [
+    "End-to-end client timing; includes network and Vertex/Firestore latency.",
+    "First connection is not a controlled cold-start measurement."
+  ],
+  "recordedAt": "2026-09-10T21:49:37.008405+00:00",
+  "deployment": [
+    {
+      "service": "rag-mcp",
+      "serviceMinInstances": 0,
+      "revisionMinInstances": 0,
+      "revision": "rag-mcp-unified-prod-0911",
+      "traffic": [
+        {
+          "revision": "rag-mcp-unified-prod-0911",
+          "percent": 100
+        }
+      ],
+      "resources": {
+        "limits": {
+          "cpu": "1",
+          "memory": "1Gi"
+        }
+      },
+      "routingMode": "registry",
+      "cacheTtlSeconds": "60",
+      "apiKeyInEnvironment": false,
+      "image": "asia-northeast3-docker.pkg.dev/tuk-mcp-rag/rag-mcp/mcp@sha256:b305a83ff6f9e4c1604635aecaf4eb52049c7994ed40840b5a30e67cfdb122b7"
+    },
+    {
+      "service": "rag-mcp-cs-staff",
+      "serviceMinInstances": 0,
+      "revisionMinInstances": 0
+    },
+    {
+      "service": "rag-mcp-cs-student",
+      "serviceMinInstances": 0,
+      "revisionMinInstances": 0
+    },
+    {
+      "service": "rag-mcp-ee-staff",
+      "serviceMinInstances": 0,
+      "revisionMinInstances": 0
+    },
+    {
+      "service": "rag-mcp-ee-student",
+      "serviceMinInstances": 0,
+      "revisionMinInstances": 0
+    }
+  ],
+  "automatedTests": {
+    "passed": 275,
+    "scope": "routing, unified console, legacy console, search contract, source links, audience split, deployment environment"
+  },
+  "eeCorpusAudit": [
+    {
+      "department": "ee",
+      "audience": "staff",
+      "ragFilesOnFirstPage": 0,
+      "hasMorePages": false
+    },
+    {
+      "department": "ee",
+      "audience": "student",
+      "ragFilesOnFirstPage": 0,
+      "hasMorePages": false
+    }
+  ]
+}

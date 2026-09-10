@@ -1,0 +1,888 @@
+{
+  "runId": "FCLOAD20260910T233705Z",
+  "urls": {
+    "staff": "https://factchat-cloud.mindlogic.ai/v1/gateway/chatbots/51767/chat/completions",
+    "student": "https://factchat-cloud.mindlogic.ai/v1/gateway/chatbots/51766/chat/completions"
+  },
+  "audience": "staff",
+  "expectedRevision": "rag-mcp-cpu2-prod-0911b",
+  "startedAt": "2026-09-10T23:37:05.726377+00:00",
+  "requestedConcurrency": 40,
+  "method": "40 simultaneous independent FactChat streaming conversations. Prompt explicitly requests MCP search with a unique marker. No automatic retries. Not 40 synchronized MCP tool invocations.",
+  "rows": [
+    {
+      "index": 20,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR20",
+      "startedAt": "2026-09-10T23:37:34.036841+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.333,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.369694+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 39,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR39",
+      "startedAt": "2026-09-10T23:37:34.040133+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.33,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.369694+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 2,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR02",
+      "startedAt": "2026-09-10T23:37:34.033065+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.342,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.375716+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 31,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR31",
+      "startedAt": "2026-09-10T23:37:34.039134+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.336,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.375716+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 36,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR36",
+      "startedAt": "2026-09-10T23:37:34.040133+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.336,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.375716+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 35,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR35",
+      "startedAt": "2026-09-10T23:37:34.040133+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.34,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.379424+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 32,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR32",
+      "startedAt": "2026-09-10T23:37:34.039134+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.34,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.379424+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 13,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR13",
+      "startedAt": "2026-09-10T23:37:34.036841+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.345,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.382420+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 11,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR11",
+      "startedAt": "2026-09-10T23:37:34.036133+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.346,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.382420+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 23,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR23",
+      "startedAt": "2026-09-10T23:37:34.038132+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.349,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.386439+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 26,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR26",
+      "startedAt": "2026-09-10T23:37:34.038132+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.361,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:37:34.398488+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 10,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR10",
+      "startedAt": "2026-09-10T23:37:34.036133+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 5.991,
+      "status": "ok",
+      "completionSeconds": 7.876,
+      "answerChars": 190,
+      "finishedAt": "2026-09-10T23:37:41.912137+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 7,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR07",
+      "startedAt": "2026-09-10T23:37:34.036133+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 6.554,
+      "status": "ok",
+      "completionSeconds": 8.432,
+      "answerChars": 274,
+      "finishedAt": "2026-09-10T23:37:42.467832+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 9,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR09",
+      "startedAt": "2026-09-10T23:37:34.036133+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.591,
+      "status": "ok",
+      "completionSeconds": 8.828,
+      "answerChars": 219,
+      "finishedAt": "2026-09-10T23:37:42.864048+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 24,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR24",
+      "startedAt": "2026-09-10T23:37:34.038132+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 6.847,
+      "status": "ok",
+      "completionSeconds": 8.999,
+      "answerChars": 377,
+      "finishedAt": "2026-09-10T23:37:43.036995+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 30,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR30",
+      "startedAt": "2026-09-10T23:37:34.039134+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 6.777,
+      "status": "ok",
+      "completionSeconds": 9.279,
+      "answerChars": 450,
+      "finishedAt": "2026-09-10T23:37:43.318728+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 27,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR27",
+      "startedAt": "2026-09-10T23:37:34.038132+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.267,
+      "status": "ok",
+      "completionSeconds": 9.436,
+      "answerChars": 319,
+      "finishedAt": "2026-09-10T23:37:43.474011+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 19,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR19",
+      "startedAt": "2026-09-10T23:37:34.036841+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 8.205,
+      "status": "ok",
+      "completionSeconds": 10.139,
+      "answerChars": 258,
+      "finishedAt": "2026-09-10T23:37:44.175875+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 34,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR34",
+      "startedAt": "2026-09-10T23:37:34.040133+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 8.447,
+      "status": "ok",
+      "completionSeconds": 10.206,
+      "answerChars": 213,
+      "finishedAt": "2026-09-10T23:37:44.244789+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 1,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR01",
+      "startedAt": "2026-09-10T23:37:34.033065+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 6.814,
+      "status": "ok",
+      "completionSeconds": 10.288,
+      "answerChars": 350,
+      "finishedAt": "2026-09-10T23:37:44.320449+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 33,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR33",
+      "startedAt": "2026-09-10T23:37:34.039134+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 8.805,
+      "status": "ok",
+      "completionSeconds": 10.847,
+      "answerChars": 242,
+      "finishedAt": "2026-09-10T23:37:44.886105+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 4,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR04",
+      "startedAt": "2026-09-10T23:37:34.034066+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 8.87,
+      "status": "ok",
+      "completionSeconds": 10.898,
+      "answerChars": 230,
+      "finishedAt": "2026-09-10T23:37:44.931953+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 38,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR38",
+      "startedAt": "2026-09-10T23:37:34.040133+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 8.899,
+      "status": "ok",
+      "completionSeconds": 11.033,
+      "answerChars": 387,
+      "finishedAt": "2026-09-10T23:37:45.072327+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 40,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR40",
+      "startedAt": "2026-09-10T23:37:34.040133+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 9.441,
+      "status": "ok",
+      "completionSeconds": 11.161,
+      "answerChars": 162,
+      "finishedAt": "2026-09-10T23:37:45.201833+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 6,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR06",
+      "startedAt": "2026-09-10T23:37:34.036133+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.918,
+      "status": "ok",
+      "completionSeconds": 11.196,
+      "answerChars": 383,
+      "finishedAt": "2026-09-10T23:37:45.231965+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 25,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR25",
+      "startedAt": "2026-09-10T23:37:34.038132+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 9.945,
+      "status": "ok",
+      "completionSeconds": 11.507,
+      "answerChars": 272,
+      "finishedAt": "2026-09-10T23:37:45.544938+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 8,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR08",
+      "startedAt": "2026-09-10T23:37:34.036133+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 9.239,
+      "status": "ok",
+      "completionSeconds": 11.549,
+      "answerChars": 416,
+      "finishedAt": "2026-09-10T23:37:45.584817+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 22,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR22",
+      "startedAt": "2026-09-10T23:37:34.038132+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 9.746,
+      "status": "ok",
+      "completionSeconds": 11.837,
+      "answerChars": 359,
+      "finishedAt": "2026-09-10T23:37:45.874572+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 28,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR28",
+      "startedAt": "2026-09-10T23:37:34.039134+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 10.077,
+      "status": "ok",
+      "completionSeconds": 11.998,
+      "answerChars": 207,
+      "finishedAt": "2026-09-10T23:37:46.036736+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 21,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR21",
+      "startedAt": "2026-09-10T23:37:34.036841+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 9.261,
+      "status": "ok",
+      "completionSeconds": 12.149,
+      "answerChars": 333,
+      "finishedAt": "2026-09-10T23:37:46.186995+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 18,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR18",
+      "startedAt": "2026-09-10T23:37:34.036841+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 9.933,
+      "status": "ok",
+      "completionSeconds": 12.287,
+      "answerChars": 324,
+      "finishedAt": "2026-09-10T23:37:46.324609+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 29,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR29",
+      "startedAt": "2026-09-10T23:37:34.039134+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 10.594,
+      "status": "ok",
+      "completionSeconds": 12.662,
+      "answerChars": 271,
+      "finishedAt": "2026-09-10T23:37:46.700526+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 3,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR03",
+      "startedAt": "2026-09-10T23:37:34.033065+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 10.995,
+      "status": "ok",
+      "completionSeconds": 12.881,
+      "answerChars": 275,
+      "finishedAt": "2026-09-10T23:37:46.914468+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 14,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR14",
+      "startedAt": "2026-09-10T23:37:34.036841+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 8.451,
+      "status": "ok",
+      "completionSeconds": 12.983,
+      "answerChars": 457,
+      "finishedAt": "2026-09-10T23:37:47.019125+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 16,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR16",
+      "startedAt": "2026-09-10T23:37:34.036841+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 11.014,
+      "status": "ok",
+      "completionSeconds": 13.247,
+      "answerChars": 342,
+      "finishedAt": "2026-09-10T23:37:47.284145+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 37,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR37",
+      "startedAt": "2026-09-10T23:37:34.040133+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 10.724,
+      "status": "ok",
+      "completionSeconds": 13.452,
+      "answerChars": 326,
+      "finishedAt": "2026-09-10T23:37:47.492136+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 15,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR15",
+      "startedAt": "2026-09-10T23:37:34.036841+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 9.68,
+      "status": "ok",
+      "completionSeconds": 13.48,
+      "answerChars": 205,
+      "finishedAt": "2026-09-10T23:37:47.517263+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 12,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR12",
+      "startedAt": "2026-09-10T23:37:34.036841+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 10.957,
+      "status": "ok",
+      "completionSeconds": 14.658,
+      "answerChars": 375,
+      "finishedAt": "2026-09-10T23:37:48.693778+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 5,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR05",
+      "startedAt": "2026-09-10T23:37:34.035128+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 12.879,
+      "status": "ok",
+      "completionSeconds": 15.169,
+      "answerChars": 351,
+      "finishedAt": "2026-09-10T23:37:49.204016+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 17,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR17",
+      "startedAt": "2026-09-10T23:37:34.036841+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 12.615,
+      "status": "ok",
+      "completionSeconds": 16.285,
+      "answerChars": 341,
+      "finishedAt": "2026-09-10T23:37:50.321955+00:00",
+      "mcpMarkerObserved": true
+    }
+  ],
+  "canaries": [
+    {
+      "index": 0,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233705ZR00",
+      "startedAt": "2026-09-10T23:37:06.037651+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.82,
+      "status": "ok",
+      "completionSeconds": 10.258,
+      "answerChars": 402,
+      "finishedAt": "2026-09-10T23:37:16.295855+00:00",
+      "backend": [
+        {
+          "service": "rag-mcp",
+          "revision": "rag-mcp-cpu2-prod-0911b",
+          "timestamp": "2026-09-10T23:37:12.313393Z",
+          "markers": [
+            "FCLOAD20260910T233705ZR00"
+          ]
+        }
+      ]
+    }
+  ],
+  "finishedAt": "2026-09-10T23:37:50.324998+00:00",
+  "summary": {
+    "statuses": {
+      "http_error": 11,
+      "ok": 29
+    },
+    "firstContent": {
+      "n": 29,
+      "medianSeconds": 9.239,
+      "p95Seconds": 12.615,
+      "maxSeconds": 12.879
+    },
+    "completion": {
+      "n": 29,
+      "medianSeconds": 11.507,
+      "p95Seconds": 15.169,
+      "maxSeconds": 16.285
+    }
+  },
+  "backend": [
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:12.313393Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR00"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:38.599540Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR10"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:38.639189Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR30"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:38.764691Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR05"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:38.780771Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR07"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:38.885443Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR28"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:38.921804Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR01"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:39.050032Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR29"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:39.376987Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR24"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:39.794159Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR27"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:39.886394Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR37"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:39.995149Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR09"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:40.073965Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR16"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:40.144897Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR40"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:40.244101Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR06"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:40.298445Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR17"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:40.551761Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR19"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:40.975235Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR38"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:41.032117Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR22"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:41.034732Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR14"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:41.152695Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR33"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:41.190996Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR34"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:41.224079Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR04"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:41.376940Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR21"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:41.464328Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR15"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:41.805861Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR25"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:41.876440Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR08"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:42.271239Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR05"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:42.495144Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR28"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:42.572665Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR18"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:42.866908Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR03"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:42.957178Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR12"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:42.981026Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR16"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:43.012261Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR29"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:43.212324Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR37"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:37:44.747093Z",
+      "markers": [
+        "FCLOAD20260910T233705ZR17"
+      ]
+    }
+  ],
+  "deployment": {
+    "resources": {
+      "limits": {
+        "cpu": "2",
+        "memory": "1Gi"
+      }
+    },
+    "concurrency": 40,
+    "serviceMin": 0,
+    "revisionMin": 0,
+    "traffic": [
+      {
+        "percent": 100,
+        "revisionName": "rag-mcp-cpu2-prod-0911b"
+      }
+    ]
+  },
+  "backendAudit": {
+    "conversationMarkersMatched": 29,
+    "successfulConversationsWithMarker": 29,
+    "factchat429WithMarker": 0,
+    "searchLogsIncludingCanary": 36,
+    "revisions": {
+      "rag-mcp-cpu2-prod-0911b": 36
+    },
+    "windowHttpStatuses": {
+      "200": 70,
+      "202": 35
+    },
+    "windowDistinctInstances": 1,
+    "note": "HTTP counts include protocol initialization and other requests in this time window; exact search markers tie the test conversations to the expected revision."
+  }
+}

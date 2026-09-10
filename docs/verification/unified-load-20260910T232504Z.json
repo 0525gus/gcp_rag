@@ -1,0 +1,779 @@
+{
+  "runId": "20260910T232504Z",
+  "url": "https://rag-mcp-42w47ff6ba-du.a.run.app/mcp",
+  "startedAt": "2026-09-10T23:25:04.101585+00:00",
+  "userAgent": "gcp-rag-loadtest/20260910T232504Z",
+  "stages": [
+    {
+      "concurrency": 40,
+      "startedAt": "2026-09-10T23:25:04.412329+00:00",
+      "finishedAt": "2026-09-10T23:25:14.637604+00:00",
+      "requests": 120,
+      "errors": {},
+      "errorCount": 0,
+      "elapsedSeconds": 10.23,
+      "requestsPerSecond": 11.74,
+      "successfulLatency": {
+        "medianMs": 2121.2,
+        "p95Ms": 5124.77,
+        "maxMs": 7310.98,
+        "meanMs": 2408.23
+      },
+      "allLatency": {
+        "medianMs": 2121.2,
+        "p95Ms": 5124.77,
+        "maxMs": 7310.98,
+        "meanMs": 2408.23
+      },
+      "samples": [
+        {
+          "ms": 1246.9,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1265.38,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1273.65,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1269.28,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1272.72,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1549.75,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1549.78,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1550.67,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1554.72,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1554.31,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1584.44,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1731.03,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1775.65,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1780.62,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1907.01,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1993.74,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2110.85,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2131.12,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2189.11,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2371.19,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2377.83,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1225.87,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2587.92,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1469.91,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2753.15,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2752.72,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2878.97,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2946.18,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1697.04,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1519.86,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1578.1,
+          "status": 200,
+          "error": "",
+          "documents": 2
+        },
+        {
+          "ms": 1930.71,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1639.33,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1949.63,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3192.53,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1662.81,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1678.94,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3390.13,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1849.69,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3460.99,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3527.01,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1781.0,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1901.13,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1298.8,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1901.81,
+          "status": 200,
+          "error": "",
+          "documents": 2
+        },
+        {
+          "ms": 3989.96,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3991.1,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2312.07,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1944.18,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2224.27,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1846.0,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2162.85,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2234.86,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1672.92,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 4543.51,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1948.36,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2069.24,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1945.6,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1802.98,
+          "status": 200,
+          "error": "",
+          "documents": 4
+        },
+        {
+          "ms": 1895.53,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 5124.77,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 5127.24,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 5127.74,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 5134.17,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 5133.37,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2188.4,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1972.41,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2069.65,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2165.9,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 5416.97,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2219.23,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1870.2,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2130.36,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2298.89,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2879.36,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2585.14,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2037.48,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2407.7,
+          "status": 200,
+          "error": "",
+          "documents": 3
+        },
+        {
+          "ms": 2950.33,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3419.45,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3302.8,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2111.16,
+          "status": 200,
+          "error": "",
+          "documents": 3
+        },
+        {
+          "ms": 2958.2,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2109.72,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2153.28,
+          "status": 200,
+          "error": "",
+          "documents": 2
+        },
+        {
+          "ms": 2654.6,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2609.08,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3533.4,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2305.56,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3115.05,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2756.15,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3131.32,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3745.85,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3077.34,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2177.82,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3494.32,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 7310.98,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2112.04,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2484.82,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2406.62,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1853.81,
+          "status": 200,
+          "error": "",
+          "documents": 3
+        },
+        {
+          "ms": 3041.32,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3040.24,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3035.66,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2147.39,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2368.98,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2036.5,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1784.66,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 2515.15,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1814.5,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 873.91,
+          "status": 200,
+          "error": "",
+          "documents": 4
+        },
+        {
+          "ms": 1766.3,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1554.12,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 3336.94,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1631.18,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1941.58,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1949.11,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1136.21,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 1198.1,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        },
+        {
+          "ms": 955.6,
+          "status": 200,
+          "error": "",
+          "documents": 5
+        }
+      ]
+    }
+  ],
+  "method": "Closed-loop concurrent workers, 3 searches each; alternating CS staff/student. Unique synthetic query suffix avoids exact-query cache hits. HTTP JSON-RPC tools/call on stateless MCP; pooled connections; 30s timeout. Document scope checked after timed stages. Not a single-instance or cold-start benchmark.",
+  "finishedAt": "2026-09-10T23:25:14.637604+00:00",
+  "scopeAudit": {
+    "uniqueFiles": 74,
+    "fileAudiencePairs": 87,
+    "violations": 0
+  },
+  "cloudObservations": {
+    "collectedAt": "2026-09-10T23:25:36.828861+00:00",
+    "requestLogCount": 120,
+    "stages": [
+      {
+        "concurrency": 40,
+        "requestLogs": 120,
+        "statusCounts": {
+          "200": 120
+        },
+        "distinctInstances": 4
+      }
+    ],
+    "metrics": {
+      "cpu/utilizations": [],
+      "memory/utilizations": [],
+      "instance_count": []
+    },
+    "notes": "Cloud metrics can arrive late; distinct instances per stage is not peak concurrent instances. CPU/memory distribution means are sampled aggregates."
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "runId": "FCLOAD20260910T233537Z",
+  "urls": {
+    "staff": "https://factchat-cloud.mindlogic.ai/v1/gateway/chatbots/51767/chat/completions",
+    "student": "https://factchat-cloud.mindlogic.ai/v1/gateway/chatbots/51766/chat/completions"
+  },
+  "expectedRevision": "rag-mcp-cpu2-prod-0911b",
+  "startedAt": "2026-09-10T23:35:37.642620+00:00",
+  "requestedConcurrency": 40,
+  "method": "40 simultaneous independent FactChat streaming conversations. Prompt explicitly requests MCP search with a unique marker. No automatic retries. Not 40 synchronized MCP tool invocations.",
+  "rows": [],
+  "canaries": [
+    {
+      "index": 0,
+      "audience": "staff",
+      "marker": "FCLOAD20260910T233537ZR00",
+      "startedAt": "2026-09-10T23:35:37.944029+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 8.359,
+      "status": "ok",
+      "completionSeconds": 10.982,
+      "answerChars": 448,
+      "finishedAt": "2026-09-10T23:35:48.926056+00:00",
+      "backend": [
+        {
+          "service": "rag-mcp",
+          "revision": "rag-mcp-cpu2-prod-0911b",
+          "timestamp": "2026-09-10T23:35:44.004932Z"
+        }
+      ]
+    },
+    {
+      "index": 41,
+      "audience": "student",
+      "marker": "FCLOAD20260910T233537ZR41",
+      "startedAt": "2026-09-10T23:36:03.798623+00:00",
+      "httpStatus": 403,
+      "status": "http_error",
+      "completionSeconds": 0.279,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:36:04.077207+00:00"
+    }
+  ],
+  "blocked": "FactChat canary failed; 40-way test not sent"
+}

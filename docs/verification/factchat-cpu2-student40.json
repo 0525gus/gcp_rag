@@ -1,0 +1,887 @@
+{
+  "runId": "FCLOAD20260910T234044Z",
+  "urls": {
+    "staff": "https://factchat-cloud.mindlogic.ai/v1/gateway/chatbots/51767/chat/completions",
+    "student": "https://factchat-cloud.mindlogic.ai/v1/gateway/chatbots/51766/chat/completions"
+  },
+  "audience": "student",
+  "expectedRevision": "rag-mcp-cpu2-prod-0911b",
+  "startedAt": "2026-09-10T23:40:44.192805+00:00",
+  "requestedConcurrency": 40,
+  "method": "40 simultaneous independent FactChat streaming conversations. Prompt explicitly requests MCP search with a unique marker. No automatic retries. Not 40 synchronized MCP tool invocations.",
+  "rows": [
+    {
+      "index": 14,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR14",
+      "startedAt": "2026-09-10T23:40:56.954603+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.288,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.242039+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 16,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR16",
+      "startedAt": "2026-09-10T23:40:56.954603+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.288,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.242039+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 40,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR40",
+      "startedAt": "2026-09-10T23:40:56.959012+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.284,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.243039+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 34,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR34",
+      "startedAt": "2026-09-10T23:40:56.958013+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.288,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.246055+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 28,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR28",
+      "startedAt": "2026-09-10T23:40:56.957011+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.289,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.246055+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 31,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR31",
+      "startedAt": "2026-09-10T23:40:56.957011+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.291,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.248057+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 38,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR38",
+      "startedAt": "2026-09-10T23:40:56.958013+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.29,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.248057+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 23,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR23",
+      "startedAt": "2026-09-10T23:40:56.956004+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.293,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.249054+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 36,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR36",
+      "startedAt": "2026-09-10T23:40:56.958013+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.291,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.249054+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 12,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR12",
+      "startedAt": "2026-09-10T23:40:56.954603+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.3,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.254055+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 35,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR35",
+      "startedAt": "2026-09-10T23:40:56.958013+00:00",
+      "httpStatus": 429,
+      "status": "http_error",
+      "completionSeconds": 0.296,
+      "answerChars": 0,
+      "finishedAt": "2026-09-10T23:40:57.254055+00:00",
+      "mcpMarkerObserved": false
+    },
+    {
+      "index": 8,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR08",
+      "startedAt": "2026-09-10T23:40:56.954100+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 5.112,
+      "status": "ok",
+      "completionSeconds": 5.787,
+      "answerChars": 45,
+      "finishedAt": "2026-09-10T23:41:02.740540+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 21,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR21",
+      "startedAt": "2026-09-10T23:40:56.956004+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 4.881,
+      "status": "ok",
+      "completionSeconds": 10.877,
+      "answerChars": 314,
+      "finishedAt": "2026-09-10T23:41:07.832068+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 20,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR20",
+      "startedAt": "2026-09-10T23:40:56.955612+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.034,
+      "status": "ok",
+      "completionSeconds": 10.888,
+      "answerChars": 50,
+      "finishedAt": "2026-09-10T23:41:07.844273+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 26,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR26",
+      "startedAt": "2026-09-10T23:40:56.956004+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 5.73,
+      "status": "ok",
+      "completionSeconds": 10.888,
+      "answerChars": 45,
+      "finishedAt": "2026-09-10T23:41:07.844273+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 2,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR02",
+      "startedAt": "2026-09-10T23:40:56.951102+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 5.617,
+      "status": "ok",
+      "completionSeconds": 10.893,
+      "answerChars": 50,
+      "finishedAt": "2026-09-10T23:41:07.844273+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 32,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR32",
+      "startedAt": "2026-09-10T23:40:56.957011+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 5.951,
+      "status": "ok",
+      "completionSeconds": 10.908,
+      "answerChars": 50,
+      "finishedAt": "2026-09-10T23:41:07.865811+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 6,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR06",
+      "startedAt": "2026-09-10T23:40:56.953100+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 4.908,
+      "status": "ok",
+      "completionSeconds": 10.914,
+      "answerChars": 418,
+      "finishedAt": "2026-09-10T23:41:07.867811+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 10,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR10",
+      "startedAt": "2026-09-10T23:40:56.954100+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 4.704,
+      "status": "ok",
+      "completionSeconds": 10.952,
+      "answerChars": 445,
+      "finishedAt": "2026-09-10T23:41:07.905489+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 30,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR30",
+      "startedAt": "2026-09-10T23:40:56.957011+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 4.869,
+      "status": "ok",
+      "completionSeconds": 10.949,
+      "answerChars": 399,
+      "finishedAt": "2026-09-10T23:41:07.905489+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 39,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR39",
+      "startedAt": "2026-09-10T23:40:56.958013+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 5.273,
+      "status": "ok",
+      "completionSeconds": 10.948,
+      "answerChars": 410,
+      "finishedAt": "2026-09-10T23:41:07.906306+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 18,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR18",
+      "startedAt": "2026-09-10T23:40:56.955612+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 4.926,
+      "status": "ok",
+      "completionSeconds": 10.951,
+      "answerChars": 416,
+      "finishedAt": "2026-09-10T23:41:07.906306+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 17,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR17",
+      "startedAt": "2026-09-10T23:40:56.954603+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.638,
+      "status": "ok",
+      "completionSeconds": 10.952,
+      "answerChars": 535,
+      "finishedAt": "2026-09-10T23:41:07.906306+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 1,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR01",
+      "startedAt": "2026-09-10T23:40:56.951102+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 8.645,
+      "status": "ok",
+      "completionSeconds": 10.956,
+      "answerChars": 344,
+      "finishedAt": "2026-09-10T23:41:07.907494+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 29,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR29",
+      "startedAt": "2026-09-10T23:40:56.957011+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.814,
+      "status": "ok",
+      "completionSeconds": 11.686,
+      "answerChars": 354,
+      "finishedAt": "2026-09-10T23:41:08.642993+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 11,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR11",
+      "startedAt": "2026-09-10T23:40:56.954100+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.588,
+      "status": "ok",
+      "completionSeconds": 13.316,
+      "answerChars": 237,
+      "finishedAt": "2026-09-10T23:41:10.270600+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 37,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR37",
+      "startedAt": "2026-09-10T23:40:56.958013+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 8.603,
+      "status": "ok",
+      "completionSeconds": 13.34,
+      "answerChars": 198,
+      "finishedAt": "2026-09-10T23:41:10.298710+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 22,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR22",
+      "startedAt": "2026-09-10T23:40:56.956004+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.981,
+      "status": "ok",
+      "completionSeconds": 13.347,
+      "answerChars": 234,
+      "finishedAt": "2026-09-10T23:41:10.302710+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 13,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR13",
+      "startedAt": "2026-09-10T23:40:56.954603+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.697,
+      "status": "ok",
+      "completionSeconds": 13.349,
+      "answerChars": 278,
+      "finishedAt": "2026-09-10T23:41:10.303709+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 5,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR05",
+      "startedAt": "2026-09-10T23:40:56.952101+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 8.026,
+      "status": "ok",
+      "completionSeconds": 13.351,
+      "answerChars": 349,
+      "finishedAt": "2026-09-10T23:41:10.303709+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 7,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR07",
+      "startedAt": "2026-09-10T23:40:56.953100+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 9.351,
+      "status": "ok",
+      "completionSeconds": 13.35,
+      "answerChars": 229,
+      "finishedAt": "2026-09-10T23:41:10.304214+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 24,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR24",
+      "startedAt": "2026-09-10T23:40:56.956004+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.4,
+      "status": "ok",
+      "completionSeconds": 13.364,
+      "answerChars": 426,
+      "finishedAt": "2026-09-10T23:41:10.320250+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 9,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR09",
+      "startedAt": "2026-09-10T23:40:56.954100+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 6.926,
+      "status": "ok",
+      "completionSeconds": 13.366,
+      "answerChars": 445,
+      "finishedAt": "2026-09-10T23:41:10.320250+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 25,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR25",
+      "startedAt": "2026-09-10T23:40:56.956004+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 9.652,
+      "status": "ok",
+      "completionSeconds": 13.364,
+      "answerChars": 368,
+      "finishedAt": "2026-09-10T23:41:10.320250+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 33,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR33",
+      "startedAt": "2026-09-10T23:40:56.958013+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 6.728,
+      "status": "ok",
+      "completionSeconds": 13.364,
+      "answerChars": 317,
+      "finishedAt": "2026-09-10T23:41:10.322252+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 15,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR15",
+      "startedAt": "2026-09-10T23:40:56.954603+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 7.015,
+      "status": "ok",
+      "completionSeconds": 13.368,
+      "answerChars": 446,
+      "finishedAt": "2026-09-10T23:41:10.322252+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 19,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR19",
+      "startedAt": "2026-09-10T23:40:56.955612+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 10.087,
+      "status": "ok",
+      "completionSeconds": 13.368,
+      "answerChars": 523,
+      "finishedAt": "2026-09-10T23:41:10.322252+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 3,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR03",
+      "startedAt": "2026-09-10T23:40:56.952101+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 6.55,
+      "status": "ok",
+      "completionSeconds": 14.443,
+      "answerChars": 414,
+      "finishedAt": "2026-09-10T23:41:11.394586+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 27,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR27",
+      "startedAt": "2026-09-10T23:40:56.957011+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 5.975,
+      "status": "ok",
+      "completionSeconds": 16.924,
+      "answerChars": 412,
+      "finishedAt": "2026-09-10T23:41:13.880437+00:00",
+      "mcpMarkerObserved": true
+    },
+    {
+      "index": 4,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR04",
+      "startedAt": "2026-09-10T23:40:56.952101+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 6.378,
+      "status": "ok",
+      "completionSeconds": 27.487,
+      "answerChars": 460,
+      "finishedAt": "2026-09-10T23:41:24.439056+00:00",
+      "mcpMarkerObserved": true
+    }
+  ],
+  "canaries": [
+    {
+      "index": 0,
+      "audience": "student",
+      "marker": "FCLOAD20260910T234044ZR00",
+      "startedAt": "2026-09-10T23:40:44.484080+00:00",
+      "httpStatus": 200,
+      "firstContentSeconds": 5.465,
+      "status": "ok",
+      "completionSeconds": 7.536,
+      "answerChars": 451,
+      "finishedAt": "2026-09-10T23:40:52.020546+00:00",
+      "backend": [
+        {
+          "service": "rag-mcp",
+          "revision": "rag-mcp-cpu2-prod-0911b",
+          "timestamp": "2026-09-10T23:40:47.280199Z",
+          "markers": [
+            "FCLOAD20260910T234044ZR00"
+          ]
+        }
+      ]
+    }
+  ],
+  "finishedAt": "2026-09-10T23:41:24.441057+00:00",
+  "summary": {
+    "statuses": {
+      "http_error": 11,
+      "ok": 29
+    },
+    "firstContent": {
+      "n": 29,
+      "medianSeconds": 6.926,
+      "p95Seconds": 9.652,
+      "maxSeconds": 10.087
+    },
+    "completion": {
+      "n": 29,
+      "medianSeconds": 13.316,
+      "p95Seconds": 16.924,
+      "maxSeconds": 27.487
+    }
+  },
+  "backend": [
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:40:47.280199Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR00"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:40:59.793904Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR21"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:40:59.845692Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR01"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:40:59.908248Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR13"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:40:59.919823Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR10"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:40:59.998358Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR30"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:00.031299Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR22"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:00.068331Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR18"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:00.085131Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR06"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:00.863177Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR08"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:00.910110Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR39"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.028717Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR05"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.250194Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR11"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.300521Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR37"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.303357Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR07"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.303900Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR02"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.336258Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR26"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.463620Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR27"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.775805Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR32"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.877438Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR25"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.901214Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR04"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:01.921718Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR03"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:02.157289Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR33"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:02.211130Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR24"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:02.264610Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR09"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:02.335715Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR19"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:02.376503Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR15"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:02.651953Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR17"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:02.710197Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR29"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:02.830372Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR20"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:03.150753Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR13"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:03.472234Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR22"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:03.617773Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR01"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:03.885388Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR05"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:04.172157Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR37"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:04.581325Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR25"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:04.644362Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR07"
+      ]
+    },
+    {
+      "service": "rag-mcp",
+      "revision": "rag-mcp-cpu2-prod-0911b",
+      "timestamp": "2026-09-10T23:41:05.277383Z",
+      "markers": [
+        "FCLOAD20260910T234044ZR19"
+      ]
+    }
+  ],
+  "backendAudit": {
+    "conversationMarkersMatched": 29,
+    "successfulConversationsWithMarker": 29,
+    "factchat429WithMarker": 0,
+    "searchLogsIncludingCanary": 38,
+    "revisions": {
+      "rag-mcp-cpu2-prod-0911b": 38
+    },
+    "windowHttpStatuses": {
+      "200": 74,
+      "202": 37
+    },
+    "windowDistinctInstances": 1,
+    "note": "HTTP counts include protocol initialization and other requests in this window; exact search markers tie the test conversations to the expected revision."
+  }
+}

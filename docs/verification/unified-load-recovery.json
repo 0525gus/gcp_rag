@@ -1,0 +1,41 @@
+{
+  "targets": {
+    "recovery": "https://rag-mcp-42w47ff6ba-du.a.run.app/mcp"
+  },
+  "registryRevision": "3915ab4cae8147b38bf1f4d445bcb598",
+  "verification": [
+    {
+      "target": "recovery",
+      "department": "cs",
+      "audience": "staff",
+      "initMs": 1276.2,
+      "documents": 10
+    },
+    {
+      "target": "recovery",
+      "department": "cs",
+      "audience": "student",
+      "initMs": 970.39,
+      "documents": 10
+    },
+    {
+      "target": "recovery",
+      "department": "ee",
+      "audience": "staff",
+      "initMs": 684.21,
+      "documents": 0
+    },
+    {
+      "target": "recovery",
+      "department": "ee",
+      "audience": "student",
+      "initMs": 403.79,
+      "documents": 0
+    }
+  ],
+  "timings": {},
+  "notes": [
+    "End-to-end client timing; includes network and Vertex/Firestore latency.",
+    "First connection is not a controlled cold-start measurement."
+  ]
+}

@@ -37,6 +37,20 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
 Set-Location (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot "_load_env.ps1")
 
+# Cloud registry mode owns the department keys/configs. Rebuilding a runtime must
+# never recreate the old per-department services or reload stale local YAML.
+$py = Get-PythonExe
+$unifiedMode = & $py -c "from scripts.dept_gui import _unified_mcp_enabled; print('1' if _unified_mcp_enabled() else '0')"
+if ($LASTEXITCODE -ne 0) { throw "MCP routing mode lookup failed" }
+if ($unifiedMode.Trim() -eq "1") {
+  Write-Host "== Unified MCP: deploy the shared rag-mcp runtime; routes remain in Cloud =="
+  $unifiedArgs = @((Join-Path $PSScriptRoot "deploy_unified_mcp.py"))
+  if ($SkipBuild) { $unifiedArgs += "--skip-build" }
+  & $py @unifiedArgs
+  if ($LASTEXITCODE -ne 0) { throw "Unified MCP deployment failed" }
+  return
+}
+
 function Assert-LastExit {
   if ($LASTEXITCODE -ne 0) { throw "gcloud exit $LASTEXITCODE" }
 }

@@ -8,6 +8,11 @@
 - Firestore 매핑으로 수정·삭제 시 Vertex 코퍼스 전체 순회 방지
 - 상세 명세: [`docs/DEV_SPEC.md`](docs/DEV_SPEC.md)
 
+**통합 MCP 운영:** 공통 `rag-mcp` URI 하나에 기존 학과·교직원·학생 키를 연결한다.
+Cloud 레지스트리 설정, 범위 격리, 배포와 CPU 비교는
+[`docs/unified-mcp.md`](docs/unified-mcp.md)를 참고한다.
+아래 학과별 MCP 서비스 구성과 배포 항목은 기존 개별 서비스 방식에 대한 설명이다.
+
 ```mermaid
 flowchart TB
   Drive["Google Drive"]
