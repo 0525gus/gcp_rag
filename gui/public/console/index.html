@@ -537,6 +537,20 @@
             <span class="shield-mark">✓</span>
             <div><h2>로컬 보안 경계</h2><p>이 콘솔은 127.0.0.1에서만 열리며 MCP 키와 GCP 토큰을 브라우저에 저장하지 않습니다.</p></div>
           </section>
+          <section class="panel runtime-panel">
+            <div class="panel-toolbar">
+              <div>
+                <h2>공통 런타임</h2>
+                <span id="commonRuntimeMeta" aria-live="polite">상태 확인 전</span>
+              </div>
+              <div class="toolbar-controls">
+                <button type="button" class="button secondary compact" id="refreshCommonRuntime">상태 새로고침</button>
+              </div>
+            </div>
+            <div class="runtime-grid" id="commonRuntimeGrid">
+              <div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div>
+            </div>
+          </section>
           <section class="panel danger-zone" id="commonRuntimeDangerZone">
             <div>
               <b>공통 런타임 철거</b>
@@ -685,7 +699,15 @@
             <div><span>REGION</span><b id="teardownRegion">—</b></div>
           </div>
           <div class="teardown-warning" id="teardownWarning"><span aria-hidden="true">!</span><p id="teardownWarningText"></p></div>
+          <div class="teardown-select-bar" id="teardownSelectBar">
+            <div><b>지울 대상을 고르세요</b><small id="teardownSelectionMeta">0개 선택</small></div>
+            <div class="teardown-select-actions">
+              <button type="button" class="text-button" data-teardown-select="all">전체 선택</button>
+              <button type="button" class="text-button" data-teardown-select="none">전체 해제</button>
+            </div>
+          </div>
           <div class="deployment-step-list" id="teardownTargets"></div>
+          <div class="teardown-impact hidden" id="teardownImpact" aria-live="polite"></div>
           <label class="field teardown-confirm" id="teardownConfirmField">
             <span>확인을 위해 <b id="teardownConfirmWord">—</b> 를 그대로 입력하세요</span>
             <input id="teardownConfirmInput" autocomplete="off" spellcheck="false" placeholder="확인 문구" />

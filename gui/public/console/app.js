@@ -52,6 +52,8 @@
     runtimeEnv: null,
     runtimeEnvChecking: false,
     runtimeEnvSignature: "",
+    commonRuntime: null,
+    commonRuntimeLoading: false,
     teardownPlan: null,
     teardownRun: null,
     teardownPollTimer: null,
@@ -146,6 +148,7 @@
     if (view === "environment") {
       loadEnvironment();
       refreshDriveSaStatusInline();
+      loadCommonRuntimeState();
     }
     if (view === "dashboard") refreshRuntimeEnvIfStale();
     if (view === "sync") loadSyncRuns();
@@ -454,7 +457,7 @@
         <td>${badge(overall)}</td>
         ${layers.map((layer) => `<td>${badge(overall === "CHECKING" ? "CHECKING" : layerStatus(result, layer))}</td>`).join("")}
         <td class="time-cell" title="${escapeHtml(checkedAt || "")}">${overall === "CHECKING" ? "확인 중" : relativeTime(checkedAt)}</td>
-        <td><div class="row-actions"><button class="row-button" data-action="check" title="다시 확인" aria-label="${escapeHtml(dept.name)} 다시 확인">↻</button><button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세">›</button></div></td>
+        <td><div class="row-actions"><button class="row-button" data-action="check" title="다시 확인" aria-label="${escapeHtml(dept.name)} 다시 확인">↻</button>${dept.cloudOnly ? "" : `<button class="row-button danger-button" data-action="delete" title="삭제" aria-label="${escapeHtml(dept.name)} 삭제">⌫</button>`}<button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세">›</button></div></td>
       </tr>`;
     }).join("");
 
@@ -463,6 +466,9 @@
         const button = event.target.closest("button");
         const code = row.dataset.code;
         if (button?.dataset.action === "check" && !button.disabled) startStatus([code]);
+        // 삭제는 상세를 거치지 않고 바로 계획 창을 연다. 어떤 리소스를 지울지는
+        // 그 창에서 하나씩 고른다 — 여기서 지워지는 것은 아직 아무것도 없다.
+        else if (button?.dataset.action === "delete" && !button.disabled) openTeardown("department", code);
         else openDrawer(code);
       });
     });
@@ -974,6 +980,66 @@
       </article>`).join("");
   }
 
+  const runtimeStateLabels = { READY: "정상", DEGRADED: "확인 필요", MISSING: "미배포", UNKNOWN: "조회 실패" };
+  const runtimeStateTone = { READY: "ok", DEGRADED: "warn", MISSING: "warn", UNKNOWN: "fail" };
+
+  function renderCommonRuntime() {
+    const grid = $("#commonRuntimeGrid");
+    if (state.commonRuntimeLoading && !state.commonRuntime) {
+      grid.innerHTML = '<div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div>';
+      $("#commonRuntimeMeta").textContent = "상태 확인 중…";
+      return;
+    }
+    const runtime = state.commonRuntime;
+    if (!runtime) {
+      grid.innerHTML = '<p class="runtime-empty">공통 런타임 상태를 읽지 못했습니다.</p>';
+      $("#commonRuntimeMeta").textContent = "확인 실패";
+      return;
+    }
+    if (runtime.reason) {
+      grid.innerHTML = `<p class="runtime-empty">${escapeHtml(runtime.reason)}</p>`;
+      $("#commonRuntimeMeta").textContent = "확인 필요";
+      return;
+    }
+    const services = runtime.services || [];
+    const ready = services.filter((item) => item.state === "READY").length;
+    $("#commonRuntimeMeta").textContent = `${ready} / ${services.length}개 정상 · ${runtime.region || ""}`.trim();
+    grid.innerHTML = services.map((service) => {
+      const tone = runtimeStateTone[service.state] || "warn";
+      // 미배포는 지울 것이 없다. 살아 있는 것에만 삭제를 건다.
+      const deletable = service.state !== "MISSING";
+      const extra = service.pendingRevision
+        ? `대기 중인 리비전 ${service.pendingRevision}`
+        : service.revision || service.schedule || "";
+      return `<article class="runtime-card status-${escapeHtml(tone)}">
+        <header>
+          <div><b>${escapeHtml(service.name)}</b><small>${escapeHtml(service.purpose)}</small></div>
+          <span class="runtime-chip">${escapeHtml(runtimeStateLabels[service.state] || service.state)}</span>
+        </header>
+        <p class="runtime-detail">${escapeHtml(service.detail || "")}</p>
+        ${extra ? `<p class="runtime-extra">${escapeHtml(extra)}</p>` : ""}
+        <footer>
+          ${service.url ? `<button type="button" class="copy-value-button" data-copy-value="${escapeHtml(service.url)}">URL 복사</button>` : "<span></span>"}
+          ${deletable ? `<button type="button" class="button danger compact" data-runtime-delete="${escapeHtml(service.key)}">삭제</button>` : ""}
+        </footer>
+      </article>`;
+    }).join("");
+  }
+
+  async function loadCommonRuntimeState() {
+    state.commonRuntimeLoading = true;
+    renderCommonRuntime();
+    try {
+      state.commonRuntime = await api("/api/v1/common-runtime/status");
+    } catch (error) {
+      state.commonRuntime = null;
+      toast("공통 런타임 상태를 읽지 못했습니다", error.message, "fail");
+    } finally {
+      state.commonRuntimeLoading = false;
+      renderCommonRuntime();
+    }
+  }
+
   async function refreshDriveSaStatusInline() {
     if (state.driveSaChecking) return;
     state.driveSaChecking = true;
@@ -1175,12 +1241,14 @@
     const button = event.target.closest("[data-copy-value]");
     if (!button) return;
     const value = button.dataset.copyValue || "";
+    // 원래 라벨로 되돌린다. "복사" 로 고정하면 URL 복사 버튼이 눌린 뒤 이름을 잃는다.
+    const label = button.textContent;
     try {
       await navigator.clipboard.writeText(value);
       button.textContent = "복사됨";
       button.classList.add("is-copied");
       window.setTimeout(() => {
-        button.textContent = "복사";
+        button.textContent = label;
         button.classList.remove("is-copied");
       }, 1400);
     } catch (_) {
@@ -2123,6 +2191,94 @@
     </article>`).join("");
   }
 
+  const teardownKindLabels = {
+    cloudRun: "Cloud Run",
+    corpus: "RAG 코퍼스",
+    bucket: "버킷",
+    firestoreState: "Firestore",
+    metadataObjects: "GCS 객체",
+    workflow: "Workflow",
+    scheduler: "Scheduler",
+    config: "설정 파일",
+    syncEnv: "env 갱신",
+  };
+
+  // 계획 단계에서는 같은 목록을 체크박스로 보여 준다. 실행이 시작되면
+  // renderTeardownTargets 의 읽기 전용 진행 목록으로 갈아탄다 — 돌고 있는
+  // 작업 옆에 켤 수 있는 체크박스가 남아 있으면 취소로 읽힌다.
+  function renderTeardownSelection() {
+    const plan = state.teardownPlan;
+    if (!plan) return;
+    $("#teardownTargets").innerHTML = (plan.targets || []).map((target) => {
+      const locked = !target.selectable;
+      return `<label class="deployment-step teardown-choice${locked ? " is-locked" : ""}" data-status="${locked ? "SKIPPED" : "PENDING"}">
+        <input type="checkbox" data-teardown-target="${escapeHtml(target.key)}" ${target.selected ? "checked" : ""} ${locked ? "disabled" : ""} />
+        <div class="deployment-step-copy">
+          <b>${escapeHtml(target.label)}</b>
+          <p>${escapeHtml(target.name)}</p>
+          <p>${escapeHtml(locked ? target.detail : (target.note || ""))}</p>
+        </div>
+        <span class="deployment-step-state">${escapeHtml(locked ? "유지" : teardownKindLabels[target.kind] || target.kind)}</span>
+      </label>`;
+    }).join("");
+    renderTeardownImpact();
+  }
+
+  function teardownSelectedKeys() {
+    return (state.teardownPlan?.targets || [])
+      .filter((target) => target.selected && target.selectable)
+      .map((target) => target.key);
+  }
+
+  // 고른 조합이 만드는 사고를 미리 말한다. 막지는 않는다 — 서버도 같은 판단을
+  // 실행 기록에 남기므로 여기 문구는 그 거울이다.
+  function teardownImpactMessages() {
+    const plan = state.teardownPlan;
+    if (!plan || plan.kind !== "department") return [];
+    const chosen = new Set(teardownSelectedKeys());
+    if (!chosen.size) return [];
+    const messages = [];
+    const orphans = (plan.targets || [])
+      .filter((target) => target.selectable && !target.selected
+        && ["cloudRun", "corpus", "bucket", "metadataObjects"].includes(target.kind))
+      .map((target) => target.label);
+    if (chosen.has("config") && orphans.length) {
+      messages.push(`설정 파일을 지우면 남긴 리소스는 콘솔에서 다시 찾을 수 없습니다: ${orphans.join(", ")}`);
+    }
+    if (chosen.has("config") && !chosen.has("sync-env")) {
+      messages.push("rag-sync 라우팅을 갱신하지 않으면 없어진 버킷으로 계속 동기화를 시도합니다.");
+    }
+    const removesData = [...chosen].some((key) => key.startsWith("corpus-") || key.startsWith("bucket-"));
+    if (removesData && !chosen.has("firestore-state")) {
+      messages.push("동기화 이력을 남기면 같은 공유드라이브를 다시 등록해도 문서가 재색인되지 않습니다.");
+    }
+    return messages;
+  }
+
+  function renderTeardownImpact() {
+    const selected = teardownSelectedKeys();
+    $("#teardownSelectionMeta").textContent = `${selected.length}개 선택`;
+    const messages = teardownImpactMessages();
+    const panel = $("#teardownImpact");
+    panel.classList.toggle("hidden", !messages.length);
+    panel.innerHTML = messages.map((item) => `<p><span aria-hidden="true">!</span>${escapeHtml(item)}</p>`).join("");
+    syncTeardownConfirmState();
+  }
+
+  function setTeardownSelection(key, selected) {
+    const target = (state.teardownPlan?.targets || []).find((item) => item.key === key);
+    if (!target || !target.selectable) return;
+    target.selected = selected;
+    renderTeardownImpact();
+  }
+
+  function setAllTeardownSelections(selected) {
+    (state.teardownPlan?.targets || []).forEach((target) => {
+      if (target.selectable) target.selected = selected;
+    });
+    renderTeardownSelection();
+  }
+
   function teardownWarningText(plan) {
     if (plan.kind === "commonRuntime") {
       const remaining = plan.remainingDepartments || [];
@@ -2139,7 +2295,10 @@
   function syncTeardownConfirmState() {
     const plan = state.teardownPlan;
     const value = $("#teardownConfirmInput").value.trim();
-    $("#startTeardown").disabled = !plan || Boolean(state.teardownRun) || value !== plan.confirmWord;
+    $("#startTeardown").disabled = !plan
+      || Boolean(state.teardownRun)
+      || value !== plan.confirmWord
+      || teardownSelectedKeys().length === 0;
   }
 
   function showTeardownModal() {
@@ -2155,12 +2314,18 @@
     $("#teardownModal").setAttribute("aria-hidden", "true");
   }
 
-  async function openTeardown(kind, code = "") {
+  async function openTeardown(kind, code = "", onlyKeys = null) {
     const url = kind === "department"
       ? `/api/v1/departments/${encodeURIComponent(code)}/teardown-plan`
       : "/api/v1/common-runtime/teardown-plan";
     try {
       const plan = await api(url);
+      // 특정 리소스 한 개에서 들어온 삭제(예: 운영 환경의 rag-parser 카드)는
+      // 그것만 켠 채로 연다. 목록은 그대로 보여 준다 — 무엇을 안 지우는지가 보인다.
+      if (onlyKeys) {
+        const wanted = new Set(onlyKeys);
+        plan.targets.forEach((target) => { target.selected = target.selectable && wanted.has(target.key); });
+      }
       state.teardownPlan = plan;
       state.teardownRun = null;
       $("#teardownTitle").textContent = kind === "department" ? `${plan.name} 삭제` : "공통 런타임 삭제";
@@ -2177,7 +2342,8 @@
       $("#closeTeardown").textContent = "취소";
       $("#closeTeardown").classList.add("ghost");
       $("#closeTeardown").classList.remove("primary");
-      renderTeardownTargets(plan.targets);
+      $("#teardownSelectBar").classList.remove("hidden");
+      renderTeardownSelection();
       syncTeardownConfirmState();
       showTeardownModal();
     } catch (error) {
@@ -2193,6 +2359,8 @@
     // 실행이 시작되면 확인 입력과 삭제 버튼은 할 일이 없다. 끝난 창에 죽은
     // 버튼이 남아 있으면 "또 눌러야 하나" 로 읽힌다.
     $("#teardownConfirmField").classList.add("hidden");
+    $("#teardownSelectBar").classList.add("hidden");
+    $("#teardownImpact").classList.add("hidden");
     $("#startTeardown").classList.add("hidden");
     $("#retryTeardown").classList.toggle("hidden", running || done);
     $("#closeTeardown").textContent = running ? "닫기" : "확인";
@@ -2213,6 +2381,7 @@
         return;
       }
       await loadDepartments();
+      if (run.kind === "commonRuntime") loadCommonRuntimeState();
       if (run.kind === "department" && state.selectedCode === run.code) closeDrawer();
       const succeeded = run.status === "COMPLETED";
       toast(
@@ -2236,7 +2405,10 @@
     $("#startTeardown").disabled = true;
     $("#teardownError").classList.add("hidden");
     try {
-      const run = await api(url, { method: "POST", body: { confirm: $("#teardownConfirmInput").value.trim() } });
+      const run = await api(url, {
+        method: "POST",
+        body: { confirm: $("#teardownConfirmInput").value.trim(), targets: teardownSelectedKeys() },
+      });
       renderTeardownRun(run);
       pollTeardown(run.runId);
     } catch (error) {
@@ -3632,6 +3804,20 @@
       if (event.target.closest("#openGcloudLogin")) return showCommonSetup(state.environment);
       return copyEnvironmentValue(event);
     });
+    $("#refreshCommonRuntime").addEventListener("click", loadCommonRuntimeState);
+    $("#commonRuntimeGrid").addEventListener("click", (event) => {
+      const remove = event.target.closest("[data-runtime-delete]");
+      // 공통 런타임 계획은 4종을 다 담고 있다. 카드에서 들어오면 그 한 줄만 켠다.
+      if (remove) return openTeardown("commonRuntime", "", [remove.dataset.runtimeDelete]);
+      return copyEnvironmentValue(event);
+    });
+    $("#teardownTargets").addEventListener("change", (event) => {
+      const box = event.target.closest("[data-teardown-target]");
+      if (box) setTeardownSelection(box.dataset.teardownTarget, box.checked);
+    });
+    $$("[data-teardown-select]").forEach((button) => button.addEventListener(
+      "click", () => setAllTeardownSelections(button.dataset.teardownSelect === "all"),
+    ));
     $("#drawerMcpServers").addEventListener("click", copySingleMcpServer);
     $("#drawerContent").addEventListener("click", (event) => {
       const commonButton = event.target.closest("[data-deploy-common-runtime]");

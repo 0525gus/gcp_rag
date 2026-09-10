@@ -6,11 +6,13 @@ import base64
 import io
 import json
 import os
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -3339,8 +3341,19 @@ def _stub_teardown_deletes(monkeypatch: pytest.MonkeyPatch, failures: set[str] |
     monkeypatch.setattr(dept_gui, "_delete_workflow_resource", record("workflow"))
     monkeypatch.setattr(dept_gui, "_delete_scheduler_job", record("scheduler"))
     monkeypatch.setattr(dept_gui, "_delete_bucket_resource", record("bucket"))
+    monkeypatch.setattr(dept_gui, "_delete_gcs_prefix", record("prefix"))
     monkeypatch.setattr(
         dept_gui, "_delete_rag_corpus", lambda name, region, token: calls.append(f"corpus:{name}") or "삭제 완료"
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_delete_department_firestore_state",
+        lambda drive_ids, project: calls.append(f"firestore:{','.join(drive_ids)}") or "문서 0건 삭제",
+    )
+    monkeypatch.setattr(
+        dept_gui,
+        "_refresh_sync_department_map",
+        lambda: calls.append("syncEnv:rag-sync") or "",
     )
     monkeypatch.setattr(dept_gui, "_provision_access_token", lambda: "token")
     return calls
@@ -3360,11 +3373,68 @@ def test_department_teardown_plan_lists_every_owned_resource(isolated_config: Pa
         "corpus-student",
         "bucket-hwpOriginal",
         "bucket-source",
+        "firestore-state",
         "config",
+        "sync-env",
     ]
-    # 설정 파일은 맨 뒤여야 한다 — 앞이 실패하면 남겨서 다시 시도한다.
-    assert plan["targets"][-1]["kind"] == "config"
+    # 설정 파일은 GCP 리소스 뒤여야 한다 — 앞이 실패하면 남겨서 다시 시도한다.
+    keys = [target["key"] for target in plan["targets"]]
+    assert keys.index("config") > keys.index("bucket-source")
+    # 라우팅 갱신은 설정이 사라진 **뒤**라야 남은 학과만 남는다.
+    assert keys[-1] == "sync-env"
     assert not any(target["skipped"] for target in plan["targets"])
+    assert all(target["selected"] for target in plan["targets"])
+
+
+def test_teardown_plan_covers_firestore_history_and_shared_bucket_objects(
+    isolated_config: Path,
+) -> None:
+    """버킷·코퍼스만 지우면 동기화 이력과 공용 버킷 객체가 그대로 남는다.
+
+    남은 doc_state 는 조용하다 — 같은 드라이브를 다시 등록하면 contentHash 가
+    같아 전부 건너뛰고 새 코퍼스가 영원히 비어 있게 된다.
+    """
+    (isolated_config.parent / "common.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "GCP_PROJECT_ID": "project-test",
+                "GCP_REGION": "asia-northeast3",
+                "FIRESTORE_DATABASE": "rag-sync-state",
+                "RAG_METADATA_BUCKET": "shared-metadata-test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+
+    plan = client.get("/api/v1/departments/ee/teardown-plan").json()
+    by_key = {target["key"]: target for target in plan["targets"]}
+
+    assert by_key["firestore-state"]["meta"]["driveIds"] == ["DRIVE-1"]
+    # 공용 메타데이터 버킷은 남기고 이 코퍼스 prefix 만 비운다.
+    assert by_key["metadata-staff"]["name"] == (
+        "gs://shared-metadata-test/import-results/staff-1/"
+    )
+    assert by_key["metadata-student"]["name"] == (
+        "gs://shared-metadata-test/import-results/student-1/"
+    )
+
+
+def test_teardown_plan_keeps_firestore_history_when_a_drive_is_shared(
+    isolated_config: Path,
+) -> None:
+    """doc_state 는 driveId 로만 학과를 가른다. 드라이브를 공유하면 지울 수 없다."""
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    _write_twin_department(isolated_config, "me")
+
+    plan = client.get("/api/v1/departments/ee/teardown-plan").json()
+    by_key = {target["key"]: target for target in plan["targets"]}
+
+    assert by_key["firestore-state"]["skipped"] is True
+    assert by_key["firestore-state"]["sharedWith"] == ["me"]
+    assert by_key["firestore-state"]["selectable"] is False
 
 
 def test_teardown_plan_keeps_resources_shared_with_other_departments(
@@ -3428,6 +3498,9 @@ def test_teardown_deletes_owned_resources_and_config_last(
         "corpus:projects/project-test/locations/asia-northeast3/ragCorpora/student-1",
         "bucket:rag-ee-hwp-project-test",
         "bucket:rag-ee-source-project-test",
+        "firestore:DRIVE-1",
+        # 설정이 사라진 뒤라야 남은 학과만으로 라우팅 맵이 만들어진다.
+        "syncEnv:rag-sync",
     ]
     assert not (isolated_config / "ee.yaml").exists()
 
@@ -3467,10 +3540,291 @@ def test_teardown_skips_shared_resources_when_running(
     _wait_for_teardown()
     run = next(iter(dept_gui._TEARDOWN_RUNS.values()))
 
-    assert calls == ["run:rag-mcp-ee-staff", "run:rag-mcp-ee-student"]
+    assert calls == ["run:rag-mcp-ee-staff", "run:rag-mcp-ee-student", "syncEnv:rag-sync"]
     assert run["status"] == "COMPLETED"
     assert not (isolated_config / "ee.yaml").exists()
     assert (isolated_config / "me.yaml").exists()
+
+
+def test_teardown_runs_only_the_targets_that_were_selected(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """리소스를 남긴 채 학과만 접는 경우가 실제로 있다 — 코퍼스는 재사용하고 서비스만 내린다."""
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    calls = _stub_teardown_deletes(monkeypatch)
+
+    response = client.post(
+        "/api/v1/departments/ee/teardown",
+        headers=headers,
+        json={"confirm": "ee", "targets": ["mcp-staff", "bucket-source"]},
+    )
+    assert response.status_code == 202
+    _wait_for_teardown()
+    run = dept_gui._TEARDOWN_RUNS[response.json()["runId"]]
+    by_key = {target["key"]: target for target in run["targets"]}
+
+    assert calls == ["run:rag-mcp-ee-staff", "bucket:rag-ee-source-project-test"]
+    # 고르지 않은 것은 목록에서 사라지지 않는다 — 무엇을 남겼는지가 보여야 한다.
+    assert by_key["corpus-staff"]["status"] == "SKIPPED"
+    assert by_key["corpus-staff"]["detail"] == "선택하지 않아 남깁니다"
+    assert by_key["config"]["status"] == "SKIPPED"
+    assert (isolated_config / "ee.yaml").exists()
+
+
+def test_teardown_refuses_an_empty_selection(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    calls = _stub_teardown_deletes(monkeypatch)
+
+    response = client.post(
+        "/api/v1/departments/ee/teardown",
+        headers=headers,
+        json={"confirm": "ee", "targets": []},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "TEARDOWN_SELECTION_EMPTY"
+    assert calls == []
+
+
+def test_selecting_a_shared_resource_still_does_not_delete_it(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """화면이 무엇을 보내든 다른 학과가 쓰는 리소스는 지우지 않는다.
+
+    선택 UI 가 생기면서 '체크하면 지워진다' 가 공유 검사보다 위에 오면
+    남은 학과의 검색이 오류 없이 빈 결과가 된다.
+    """
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    _write_twin_department(isolated_config, "me")
+    calls = _stub_teardown_deletes(monkeypatch)
+
+    response = client.post(
+        "/api/v1/departments/ee/teardown",
+        headers=headers,
+        json={"confirm": "ee", "targets": ["corpus-staff", "bucket-source", "config"]},
+    )
+    assert response.status_code == 202
+    _wait_for_teardown()
+    run = dept_gui._TEARDOWN_RUNS[response.json()["runId"]]
+    by_key = {target["key"]: target for target in run["targets"]}
+
+    assert calls == []
+    assert by_key["corpus-staff"]["status"] == "SKIPPED"
+    assert "다른 학과가 사용 중" in by_key["corpus-staff"]["detail"]
+    assert not (isolated_config / "ee.yaml").exists()
+
+
+def test_teardown_warns_when_the_selection_leaves_orphans_behind(
+    isolated_config: Path,
+) -> None:
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    plan = dept_gui.department_teardown_plan("ee")
+
+    selected = dept_gui.apply_teardown_selection(plan, ["config"])
+    warnings = dept_gui.teardown_selection_warnings(selected)
+
+    assert any("콘솔에서 다시 찾을 수 없습니다" in item for item in warnings)
+    assert any("rag-sync 라우팅" in item for item in warnings)
+
+
+def test_common_runtime_teardown_can_delete_one_service(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, headers = _client()
+    calls = _stub_teardown_deletes(monkeypatch)
+
+    response = client.post(
+        "/api/v1/common-runtime/teardown",
+        headers=headers,
+        json={"confirm": "project-test", "targets": ["parser"]},
+    )
+    assert response.status_code == 202
+    _wait_for_teardown()
+    run = dept_gui._TEARDOWN_RUNS[response.json()["runId"]]
+
+    assert calls == ["run:rag-parser"]
+    assert run["status"] == "COMPLETED"
+    assert {target["key"] for target in run["targets"] if target["status"] == "SKIPPED"} == {
+        "scheduler",
+        "workflow",
+        "sync",
+    }
+
+
+class _FakeFirestoreDoc:
+    def __init__(self, store: dict, path: str) -> None:
+        self.store, self.path = store, path
+
+    @property
+    def id(self) -> str:
+        return self.path.rsplit("/", 1)[-1]
+
+    def get(self):
+        data = self.store.get(self.path)
+        return SimpleNamespace(exists=data is not None, id=self.id, reference=self)
+
+    def delete(self) -> None:
+        self.store.pop(self.path, None)
+
+    def collection(self, name: str) -> _FakeFirestoreCollection:
+        return _FakeFirestoreCollection(self.store, f"{self.path}/{name}")
+
+
+class _FakeFirestoreCollection:
+    def __init__(self, store: dict, path: str, predicate=None) -> None:
+        self.store, self.path, self.predicate = store, path, predicate
+
+    def document(self, name: str) -> _FakeFirestoreDoc:
+        return _FakeFirestoreDoc(self.store, f"{self.path}/{name}")
+
+    def where(self, field: str, op: str, value) -> _FakeFirestoreCollection:
+        assert op == "in"
+        return _FakeFirestoreCollection(
+            self.store, self.path, lambda data: data.get(field) in value
+        )
+
+    def _children(self) -> list[str]:
+        depth = self.path.count("/") + 1
+        return [
+            path
+            for path in list(self.store)
+            if path.startswith(f"{self.path}/") and path.count("/") == depth
+        ]
+
+    def list_documents(self) -> list[_FakeFirestoreDoc]:
+        return [_FakeFirestoreDoc(self.store, path) for path in self._children()]
+
+    def stream(self) -> list:
+        rows = []
+        for path in self._children():
+            data = self.store.get(path) or {}
+            if self.predicate and not self.predicate(data):
+                continue
+            reference = _FakeFirestoreDoc(self.store, path)
+            rows.append(
+                SimpleNamespace(id=reference.id, reference=reference, to_dict=lambda d=data: d)
+            )
+        return rows
+
+
+class _FakeFirestoreClient:
+    def __init__(self, store: dict) -> None:
+        self.store = store
+
+    def collection(self, name: str) -> _FakeFirestoreCollection:
+        return _FakeFirestoreCollection(self.store, name)
+
+
+def test_firestore_teardown_removes_history_for_this_departments_drives_only(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """하위 컬렉션은 부모를 지워도 남는다 — rag_files 를 따로 지우지 않으면 고아가 된다."""
+    store = {
+        "doc_state/file-a": {"fileId": "file-a", "driveId": "DRIVE-1"},
+        "doc_state/file-a/rag_files/m1": {"corpus": "staff"},
+        "doc_state/file-a/rag_files/m2": {"corpus": "student"},
+        "doc_state/file-b": {"fileId": "file-b", "driveId": "DRIVE-OTHER"},
+        "doc_state/file-b/rag_files/m3": {"corpus": "staff"},
+        "doc_dlq/file-a": {"fileId": "file-a"},
+        "doc_split_queue/file-a": {"fileId": "file-a"},
+        "doc_dlq/file-b": {"fileId": "file-b"},
+        "sync_tokens/DRIVE-1": {"pageToken": "t1"},
+        "sync_tokens/DRIVE-OTHER": {"pageToken": "t2"},
+    }
+    monkeypatch.setattr(dept_gui, "_firestore_client", lambda project: _FakeFirestoreClient(store))
+
+    detail = dept_gui._delete_department_firestore_state(["DRIVE-1"], "project-test")
+
+    assert "문서 1건" in detail and "매핑 2건" in detail
+    assert set(store) == {
+        "doc_state/file-b",
+        "doc_state/file-b/rag_files/m3",
+        "doc_dlq/file-b",
+        "sync_tokens/DRIVE-OTHER",
+    }
+
+
+def test_common_runtime_status_reports_each_service(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_gcloud(args, timeout=12):
+        if args[:3] == ["run", "services", "describe"] and args[3] == "rag-sync":
+            return True, {
+                "metadata": {"creationTimestamp": "2026-09-01T00:00:00Z"},
+                "status": {
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                    "latestReadyRevisionName": "rag-sync-00007",
+                    "latestCreatedRevisionName": "rag-sync-00007",
+                    "url": "https://rag-sync-test.run.app",
+                },
+            }
+        if args[:3] == ["run", "services", "describe"]:
+            return False, "ERROR: NOT_FOUND: Service does not exist"
+        if args[:2] == ["workflows", "describe"]:
+            return True, {"state": "ACTIVE", "revisionId": "000012"}
+        return True, {"state": "ENABLED", "schedule": "0 3 * * *", "timeZone": "Asia/Seoul"}
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+    client, _ = _client()
+
+    body = client.get("/api/v1/common-runtime/status").json()
+    by_key = {item["key"]: item for item in body["services"]}
+
+    assert body["status"] == "DEGRADED"
+    assert by_key["sync"]["state"] == "READY"
+    assert by_key["sync"]["revision"] == "rag-sync-00007"
+    # 미배포와 조회 실패는 화면에서 다른 행동으로 이어진다 — 구분해야 한다.
+    assert by_key["parser"]["state"] == "MISSING"
+    assert by_key["workflow"]["state"] == "READY"
+    assert by_key["scheduler"]["state"] == "READY"
+
+
+def test_common_runtime_status_flags_a_revision_that_never_became_ready(
+    isolated_config: Path,
+) -> None:
+    """Ready=True 만 보면 새 리비전이 못 뜬 채 옛 리비전이 도는 상태가 정상으로 보인다."""
+    service = {
+        "metadata": {},
+        "status": {
+            "conditions": [{"type": "Ready", "status": "True"}],
+            "latestReadyRevisionName": "rag-sync-00007",
+            "latestCreatedRevisionName": "rag-sync-00008",
+        },
+    }
+
+    state = dept_gui._cloud_run_service_state(service)
+
+    assert state["state"] == "DEGRADED"
+    assert state["pendingRevision"] == "rag-sync-00008"
+
+
+def test_every_teardown_kind_has_a_label_in_the_console(isolated_config: Path) -> None:
+    """계획의 kind 는 여기서 만들고 이름은 app.js 가 붙인다 — 둘이 어긋나기 쉽다.
+
+    빠진 kind 는 오류를 내지 않는다. 삭제 창의 그 줄만 "firestoreState" 같은
+    내부 이름으로 뜬다 — 되돌릴 수 없는 화면에서 읽을 수 없는 라벨이 나온다.
+    """
+    client, headers = _client()
+    assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
+    plans = (dept_gui.department_teardown_plan("ee"), dept_gui.common_runtime_teardown_plan())
+    kinds = {target["kind"] for plan in plans for target in plan["targets"]}
+
+    app_js = (Path(dept_gui.WEB_DIR) / "app.js").read_text(encoding="utf-8")
+    labelled = set(
+        re.findall(
+            r"^\s*([A-Za-z]+):",
+            app_js.split("const teardownKindLabels = {", 1)[1].split("};", 1)[0],
+            re.MULTILINE,
+        )
+    )
+
+    assert kinds - labelled == set()
 
 
 def test_common_runtime_teardown_plan_warns_about_remaining_departments(

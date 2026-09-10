@@ -2978,6 +2978,121 @@ def _expected_runtime_env() -> tuple[str, dict[str, str], str]:
     )
 
 
+def _cloud_run_service_state(service: dict[str, Any]) -> dict[str, Any]:
+    """describe 응답에서 화면에 필요한 것만 뽑는다.
+
+    ``latestReady != latestCreated`` 는 새 리비전이 뜨지 못하고 옛 리비전이
+    트래픽을 받고 있다는 뜻이다. Ready=True 만 보면 이 상태가 정상으로 보인다.
+    """
+    status = service.get("status") or {}
+    metadata = service.get("metadata") or {}
+    ready_condition = next(
+        (item for item in status.get("conditions") or [] if item.get("type") == "Ready"),
+        {},
+    )
+    ready = str(ready_condition.get("status") or "").lower() == "true"
+    latest_ready = str(status.get("latestReadyRevisionName") or "")
+    latest_created = str(status.get("latestCreatedRevisionName") or "")
+    return {
+        "exists": True,
+        "state": "READY" if ready and latest_ready == latest_created else "DEGRADED",
+        "ready": ready,
+        "revision": latest_ready or latest_created,
+        "pendingRevision": latest_created if latest_created != latest_ready else "",
+        "url": str(status.get("url") or ""),
+        "updatedAt": str(metadata.get("creationTimestamp") or ""),
+        "detail": latest_ready or str(ready_condition.get("message") or "Ready 아님"),
+    }
+
+
+def common_runtime_state() -> dict[str, Any]:
+    """운영 환경 화면이 읽는 공통 런타임 현황.
+
+    학과 화면의 DEPLOY 검사와 달리 **학과를 고르지 않고** 공통 4종만 본다. 학과가
+    하나도 없어도, 학과가 전부 고장 나 있어도 런타임 자체의 상태는 보여야 한다.
+    """
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    if not project:
+        return {
+            "status": "UNKNOWN",
+            "reason": "공통 설정이 없습니다.",
+            "projectId": "",
+            "region": region,
+            "services": [],
+        }
+
+    definitions = [
+        ("parser", "cloudRun", "rag-parser", "HWP·HWPX 파싱 런타임"),
+        ("sync", "cloudRun", "rag-sync", "Drive 수집·색인 런타임"),
+        ("workflow", "workflow", "rag-daily-sync", "동기화 오케스트레이션"),
+        ("scheduler", "scheduler", "rag-daily-sync", "정기 실행 트리거"),
+    ]
+    scope = f"--project={project}"
+    commands = {
+        "cloudRun": lambda name: ["run", "services", "describe", name, f"--region={region}", scope],
+        "workflow": lambda name: ["workflows", "describe", name, f"--location={region}", scope],
+        "scheduler": lambda name: [
+            "scheduler", "jobs", "describe", name, f"--location={region}", scope,
+        ],
+    }
+
+    def _probe(item: tuple[str, str, str, str]) -> dict[str, Any]:
+        key, kind, name, purpose = item
+        ok, data = _gcloud_json(commands[kind](name), timeout=25)
+        base = {"key": key, "kind": kind, "name": name, "purpose": purpose}
+        if not ok or not isinstance(data, dict):
+            missing = _missing_resource_output(str(data or ""))
+            return {
+                **base,
+                "exists": False if missing else None,
+                "state": "MISSING" if missing else "UNKNOWN",
+                "detail": "배포되지 않았습니다" if missing else str(data or "조회 실패")[:200],
+            }
+        if kind == "cloudRun":
+            return {**base, **_cloud_run_service_state(data)}
+        if kind == "workflow":
+            state = str(data.get("state") or "UNKNOWN")
+            return {
+                **base,
+                "exists": True,
+                "state": "READY" if state == "ACTIVE" else "DEGRADED",
+                "revision": str(data.get("revisionId") or ""),
+                "updatedAt": str(data.get("updateTime") or ""),
+                "detail": state,
+            }
+        state = str(data.get("state") or "UNKNOWN")
+        schedule = f"{data.get('schedule') or ''} {data.get('timeZone') or ''}".strip()
+        return {
+            **base,
+            "exists": True,
+            "state": "READY" if state == "ENABLED" else "DEGRADED",
+            "schedule": schedule,
+            "updatedAt": str(data.get("lastAttemptTime") or ""),
+            "detail": f"{state}{' · ' + schedule if schedule else ''}",
+        }
+
+    # 4번의 gcloud 왕복은 순차로 돌면 그대로 더해진다. 화면은 한 번에 뜬다.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        services = list(pool.map(_probe, definitions))
+
+    states = {item["state"] for item in services}
+    status = (
+        "MISSING"
+        if states == {"MISSING"}
+        else "DEGRADED"
+        if states & {"DEGRADED", "MISSING", "UNKNOWN"}
+        else "READY"
+    )
+    return {
+        "status": status,
+        "projectId": project,
+        "region": region,
+        "services": services,
+    }
+
+
 def runtime_env_drift(cache: _StatusRunCache | None = None) -> dict[str, Any]:
     """배포된 Cloud Run env 가 지금 config 와 같은지 본다.
 
@@ -3412,15 +3527,55 @@ def _department_corpus_usage() -> dict[str, list[str]]:
     return {name: sorted(codes) for name, codes in usage.items()}
 
 
+def _department_drive_usage() -> dict[str, list[str]]:
+    """공유드라이브 ID → 그 드라이브를 가리키는 학과 코드.
+
+    Firestore 의 doc_state 는 fileId 하나로 전 학과가 같은 컬렉션을 쓴다. 학과를
+    가르는 유일한 축이 ``driveId`` 라서, 지우기 전에 그 드라이브를 다른 학과도
+    보고 있는지 먼저 봐야 한다. ``_validate_departments`` 가 중복을 막지만 손으로
+    고친 YAML 은 그 검증을 지나지 않는다.
+    """
+    usage: dict[str, set[str]] = {}
+    if not DEPT_DIR.exists():
+        return {}
+    for path in sorted(DEPT_DIR.glob("*.yaml")):
+        try:
+            config = _read_yaml(path)
+        except (OSError, yaml.YAMLError):
+            continue
+        for drive_id in _normalise_ids((config.get("drive") or {}).get("driveIds")):
+            usage.setdefault(drive_id, set()).add(path.stem)
+    return {drive_id: sorted(codes) for drive_id, codes in usage.items()}
+
+
 def _teardown_target(
-    key: str, kind: str, label: str, name: str, shared: list[str]
+    key: str,
+    kind: str,
+    label: str,
+    name: str,
+    shared: list[str],
+    *,
+    note: str = "",
+    meta: dict[str, Any] | None = None,
+    selected: bool = True,
 ) -> dict[str, Any]:
+    """계획에 실을 삭제 대상 한 줄.
+
+    ``skipped`` 는 두 가지 이유로 켜진다 — 다른 학과가 쓰고 있어서(강제), 또는
+    화면에서 선택을 껐기 때문에(사용자). 두 경우 모두 실행은 건너뛰되 목록에는
+    남긴다. 지우지 **않은** 것이 무엇인지가 지운 것만큼 중요하다.
+    """
     return {
         "key": key,
         "kind": kind,
         "label": label,
         "name": name,
+        "note": note,
+        "meta": meta or {},
         "sharedWith": shared,
+        # 다른 학과가 쓰는 것은 선택 자체를 막는다.
+        "selectable": not shared,
+        "selected": bool(selected) and not shared,
         "skipped": bool(shared),
         "status": "PENDING",
         "detail": (
@@ -3454,6 +3609,7 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
                 f"MCP Cloud Run ({audience})",
                 f"rag-mcp-{normalised}-{audience}",
                 [],
+                note="검색 엔드포인트가 즉시 사라집니다. 연결된 챗봇은 404 를 받습니다.",
             )
         )
     for audience in ("staff", "student"):
@@ -3463,7 +3619,12 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
         shared = [item for item in corpus_usage.get(name, []) if item != normalised]
         targets.append(
             _teardown_target(
-                f"corpus-{audience}", "corpus", f"RAG 코퍼스 ({audience})", name, shared
+                f"corpus-{audience}",
+                "corpus",
+                f"RAG 코퍼스 ({audience})",
+                name,
+                shared,
+                note="색인된 파일까지 force 로 함께 지웁니다. 다시 만들면 전체 재색인이 필요합니다.",
             )
         )
     for slot, label in (("hwpOriginal", "원본 HWP 버킷"), ("source", "Source 버킷")):
@@ -3471,9 +3632,87 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
         if not name:
             continue
         shared = [item for item in bucket_usage.get(name, []) if item != normalised]
-        targets.append(_teardown_target(f"bucket-{slot}", "bucket", label, name, shared))
+        targets.append(
+            _teardown_target(
+                f"bucket-{slot}",
+                "bucket",
+                label,
+                name,
+                shared,
+                note="객체를 모두 지운 뒤 버킷을 삭제합니다. Drive 원본은 남습니다.",
+            )
+        )
+
+    # 학과 버킷과 코퍼스만 지우면 **Firestore 에 동기화 이력이 그대로 남는다.**
+    # 같은 공유드라이브를 나중에 다시 등록하면 contentHash 가 같아 전부
+    # HASH_UNCHANGED 로 건너뛰고, 새 코퍼스는 영원히 비어 있게 된다.
+    drive_usage = _department_drive_usage()
+    drive_ids = _normalise_ids((config.get("drive") or {}).get("driveIds"))
+    if drive_ids:
+        shared_drives = sorted(
+            {
+                item
+                for drive_id in drive_ids
+                for item in drive_usage.get(drive_id, [])
+                if item != normalised
+            }
+        )
+        targets.append(
+            _teardown_target(
+                "firestore-state",
+                "firestoreState",
+                "동기화 이력 (Firestore)",
+                f"{_firestore_database_name()} · 공유드라이브 {len(drive_ids)}개",
+                shared_drives,
+                note="doc_state·rag_files·sync_tokens·DLQ·분할 큐에서 이 학과 드라이브 문서를 지웁니다.",
+                meta={"driveIds": drive_ids},
+            )
+        )
+
+    # 공용 메타데이터 버킷에는 코퍼스별 import 결과가 쌓인다. 버킷 자체는 공용이라
+    # 남기고 이 학과 코퍼스 prefix 만 지운다.
+    metadata_bucket = str(common.get("RAG_METADATA_BUCKET") or "").removeprefix("gs://").strip()
+    if metadata_bucket:
+        for audience in ("staff", "student"):
+            corpus = str(corpora.get(audience) or "").strip()
+            if not corpus:
+                continue
+            corpus_id = corpus.rstrip("/").rsplit("/", 1)[-1]
+            shared = [item for item in corpus_usage.get(corpus, []) if item != normalised]
+            targets.append(
+                _teardown_target(
+                    f"metadata-{audience}",
+                    "metadataObjects",
+                    f"import 결과 객체 ({audience})",
+                    f"gs://{metadata_bucket}/import-results/{corpus_id}/",
+                    shared,
+                    note="공용 메타데이터 버킷은 남기고 이 코퍼스 prefix 만 비웁니다.",
+                )
+            )
+
     # 설정 파일은 **맨 뒤**다. 앞이 하나라도 실패하면 남겨서 재시도할 수 있어야 한다.
-    targets.append(_teardown_target("config", "config", "학과 설정 파일", path.name, []))
+    targets.append(
+        _teardown_target(
+            "config",
+            "config",
+            "학과 설정 파일",
+            path.name,
+            [],
+            note="MCP 키가 이 파일에만 있습니다. 지우면 되돌릴 수 없습니다.",
+        )
+    )
+    # 설정만 지우면 rag-sync 는 없어진 버킷·코퍼스로 계속 라우팅한다. 그 상태의
+    # 동기화는 전량 404 로 DLQ 에 쌓인다 — runtime_env_drift 주석의 실측 그대로다.
+    targets.append(
+        _teardown_target(
+            "sync-env",
+            "syncEnv",
+            "rag-sync 학과 라우팅 갱신",
+            f"{SYNC_SERVICE} · DEPARTMENTS_JSON",
+            [],
+            note="삭제가 아니라 갱신입니다. 남은 학과만 남기도록 env 를 다시 씌웁니다.",
+        )
+    )
 
     return {
         "kind": "department",
@@ -3498,11 +3737,41 @@ def common_runtime_teardown_plan() -> dict[str, Any]:
     if not project:
         raise ValueError("공통 환경의 GCP 프로젝트가 설정되어 있지 않습니다.")
     remaining = sorted(path.stem for path in DEPT_DIR.glob("*.yaml")) if DEPT_DIR.exists() else []
+    # Scheduler → Workflow → Cloud Run 순. 거꾸로 지우면 살아 있는 잡이 없어진
+    # 워크플로를 호출해 실패 이력만 쌓는다.
     targets = [
-        _teardown_target("scheduler", "scheduler", "Cloud Scheduler 작업", "rag-daily-sync", []),
-        _teardown_target("workflow", "workflow", "Workflow", "rag-daily-sync", []),
-        _teardown_target("sync", "cloudRun", "Cloud Run", "rag-sync", []),
-        _teardown_target("parser", "cloudRun", "Cloud Run", "rag-parser", []),
+        _teardown_target(
+            "scheduler",
+            "scheduler",
+            "Cloud Scheduler 작업",
+            "rag-daily-sync",
+            [],
+            note="정기 실행만 멈춥니다. 수동 동기화는 계속 됩니다.",
+        ),
+        _teardown_target(
+            "workflow",
+            "workflow",
+            "Workflow",
+            "rag-daily-sync",
+            [],
+            note="동기화 오케스트레이션이 사라집니다. 수동 실행도 멈춥니다.",
+        ),
+        _teardown_target(
+            "sync",
+            "cloudRun",
+            "Cloud Run",
+            "rag-sync",
+            [],
+            note="Drive 수집·색인 런타임입니다. 학과 라우팅 맵(DEPARTMENTS_JSON)도 함께 사라집니다.",
+        ),
+        _teardown_target(
+            "parser",
+            "cloudRun",
+            "Cloud Run",
+            "rag-parser",
+            [],
+            note="HWP·HWPX 파싱 런타임입니다. rag-sync 가 이 서비스를 호출합니다.",
+        ),
     ]
     return {
         "kind": "commonRuntime",
@@ -3649,6 +3918,124 @@ def _delete_bucket_resource(name: str) -> str:
     raise RuntimeError((output or "버킷 삭제에 실패했습니다.")[-400:])
 
 
+def _firestore_database_name() -> str:
+    return str(_common().get("FIRESTORE_DATABASE") or "rag-sync-state")
+
+
+def _firestore_collection_names() -> dict[str, str]:
+    """common.yaml 이 비워 둔 값은 shared/config.py 의 기본값과 같아야 한다.
+
+    두 곳에서 따로 관리하면 GUI 는 ``doc_state`` 를 지우는데 런타임은
+    ``doc_state_v2`` 를 쓰는 상태가 조용히 생긴다.
+    """
+    common = _common()
+    return {
+        "docState": str(common.get("DOC_STATE_COLLECTION") or "doc_state"),
+        "syncTokens": str(common.get("SYNC_TOKEN_COLLECTION") or "sync_tokens"),
+        "dlq": str(common.get("DLQ_COLLECTION") or "doc_dlq"),
+        "splitQueue": str(common.get("SPLIT_QUEUE_COLLECTION") or "doc_split_queue"),
+    }
+
+
+def _firestore_client(project: str):
+    """google-cloud-firestore 는 GUI 필수 의존성이 아니다.
+
+    콘솔은 gcloud 만으로 돌아가는 것을 전제로 requirements-gui.txt 를 최소로
+    유지한다. 없으면 이 대상만 건너뛰고 나머지 삭제는 그대로 진행한다.
+    """
+    try:
+        from google.cloud import firestore
+    except ImportError as exc:  # pragma: no cover - 설치 환경에 따라 갈린다
+        raise RuntimeError(
+            "google-cloud-firestore 가 설치되어 있지 않습니다. "
+            "`pip install google-cloud-firestore` 후 다시 시도하세요."
+        ) from exc
+    return firestore.Client(project=project, database=_firestore_database_name())
+
+
+_FIRESTORE_DELETE_BATCH = 200
+
+
+def _delete_department_firestore_state(drive_ids: list[str], project: str) -> str:
+    """이 학과 공유드라이브에 속한 동기화 이력을 지운다.
+
+    doc_state 는 fileId 하나로 전 학과가 같은 컬렉션을 쓴다. 학과를 가르는 축은
+    ``driveId`` 뿐이라 그 값으로 골라 지운다.
+
+    **하위 컬렉션은 부모를 지워도 남는다.** ``doc_state/{fileId}/rag_files`` 를
+    따로 지우지 않으면 콘솔에서 보이지 않는 고아 매핑이 계속 쌓인다.
+    """
+    if not drive_ids:
+        return "대상 없음"
+    client = _firestore_client(project)
+    names = _firestore_collection_names()
+    docs = client.collection(names["docState"])
+    deleted_docs = 0
+    deleted_mappings = 0
+    deleted_queue = 0
+
+    # `in` 은 한 번에 30개까지다. 학과당 드라이브는 한두 개지만 상한은 지킨다.
+    for start in range(0, len(drive_ids), 30):
+        chunk = drive_ids[start : start + 30]
+        for snapshot in docs.where("driveId", "in", chunk).stream():
+            file_id = snapshot.id
+            for mapping in snapshot.reference.collection("rag_files").list_documents():
+                mapping.delete()
+                deleted_mappings += 1
+            for collection in (names["dlq"], names["splitQueue"]):
+                reference = client.collection(collection).document(file_id)
+                if reference.get().exists:
+                    reference.delete()
+                    deleted_queue += 1
+            snapshot.reference.delete()
+            deleted_docs += 1
+
+    deleted_tokens = 0
+    tokens = client.collection(names["syncTokens"])
+    for drive_id in drive_ids:
+        reference = tokens.document(drive_id)
+        if reference.get().exists:
+            reference.delete()
+            deleted_tokens += 1
+
+    return (
+        f"문서 {deleted_docs}건 · 매핑 {deleted_mappings}건 · "
+        f"큐 {deleted_queue}건 · 페이지 토큰 {deleted_tokens}건 삭제"
+    )
+
+
+def _delete_gcs_prefix(uri: str) -> str:
+    """공용 버킷 안의 한 prefix 만 비운다. 버킷 자체는 건드리지 않는다."""
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        raise RuntimeError("gcloud를 찾을 수 없습니다.")
+    target = uri.rstrip("/") + "/**"
+    ok, output = _run_command(
+        [gcloud, "storage", "rm", "--recursive", target, "--quiet"], timeout=900
+    )
+    if ok:
+        return "삭제 완료"
+    lowered = str(output or "").lower()
+    if _missing_resource_output(output) or "matched no objects" in lowered:
+        return "지울 객체가 없습니다"
+    raise RuntimeError((output or "객체 삭제에 실패했습니다.")[-400:])
+
+
+def _refresh_sync_department_map() -> str:
+    """rag-sync 의 DEPARTMENTS_JSON 을 남은 학과로 맞춘다.
+
+    로컬 YAML 이 진실이면 그것을, YAML 을 두지 않는 운영 환경이면 배포된 MCP
+    주석을 쓴다 — ``_expected_runtime_env`` 와 같은 기준이다. 여기서 기준이
+    갈리면 아직 남아 있는 학과가 라우팅 맵에서 통째로 빠진다.
+    """
+    expected = (
+        dept_config.departments_json()
+        if dept_config.list_departments()
+        else cloud_departments_json()
+    )
+    return update_sync_department_map(expected=expected)
+
+
 def _delete_department_config(code: str) -> str:
     path = DEPT_DIR / f"{code}.yaml"
     if not path.exists():
@@ -3677,7 +4064,9 @@ def _execute_teardown_run(run_id: str) -> None:
                 run_id, key, status="SKIPPED", detail="GCP 리소스가 남아 설정 파일은 유지합니다"
             )
             continue
-        _set_teardown_target(run_id, key, status="RUNNING", detail="삭제 중")
+        _set_teardown_target(
+            run_id, key, status="RUNNING", detail="갱신 중" if kind == "syncEnv" else "삭제 중"
+        )
         try:
             if kind == "cloudRun":
                 detail = _delete_cloud_run_service(name, project, region)
@@ -3690,6 +4079,14 @@ def _execute_teardown_run(run_id: str) -> None:
                 detail = _delete_rag_corpus(name, region, token)
             elif kind == "bucket":
                 detail = _delete_bucket_resource(name)
+            elif kind == "firestoreState":
+                detail = _delete_department_firestore_state(
+                    list((target.get("meta") or {}).get("driveIds") or []), project
+                )
+            elif kind == "metadataObjects":
+                detail = _delete_gcs_prefix(name)
+            elif kind == "syncEnv":
+                detail = f"남은 학과: {_refresh_sync_department_map() or '없음'}"
             else:
                 detail = _delete_department_config(run["code"])
             _set_teardown_target(run_id, key, status="COMPLETE", detail=detail)
@@ -3709,11 +4106,74 @@ def _execute_teardown_run(run_id: str) -> None:
         current["finishedEpoch"] = time.time()
 
 
-def start_teardown_run(plan: dict[str, Any], confirm: str) -> dict[str, Any]:
+def apply_teardown_selection(
+    plan: dict[str, Any], selected: list[str] | None
+) -> dict[str, Any]:
+    """화면에서 고른 대상만 남긴다. 고르지 않은 것은 지우지 않고 목록에 남긴다.
+
+    ``selected`` 가 None 이면 계획 그대로(기본 선택)를 쓴다 — 선택 UI 가 없는
+    호출자(스크립트·기존 테스트)의 동작을 바꾸지 않기 위해서다.
+    """
+    plan = copy.deepcopy(plan)
+    if selected is None:
+        chosen = {target["key"] for target in plan["targets"] if target.get("selected")}
+    else:
+        chosen = {str(key) for key in selected}
+    for target in plan["targets"]:
+        if target.get("sharedWith"):
+            # 다른 학과가 쓰는 것은 화면이 뭐라 하든 지우지 않는다.
+            continue
+        picked = target["key"] in chosen
+        target["selected"] = picked
+        if not picked:
+            target["skipped"] = True
+            target["detail"] = "선택하지 않아 남깁니다"
+    if not any(target.get("selected") for target in plan["targets"]):
+        raise ValueError("지울 대상을 하나 이상 선택해 주세요.")
+    return plan
+
+
+def teardown_selection_warnings(plan: dict[str, Any]) -> list[str]:
+    """고른 조합이 만들어 내는 사고를 미리 말한다. 막지는 않는다."""
+    warnings: list[str] = []
+    chosen = {target["key"] for target in plan["targets"] if target.get("selected")}
+    if not chosen:
+        return warnings
+    if plan.get("kind") != "department":
+        return warnings
+    orphans = [
+        target["label"]
+        for target in plan["targets"]
+        if target.get("selectable")
+        and not target.get("selected")
+        and target["kind"] in {"cloudRun", "corpus", "bucket", "metadataObjects"}
+    ]
+    if "config" in chosen and orphans:
+        warnings.append(
+            "설정 파일을 지우면 남긴 리소스는 콘솔에서 다시 찾을 수 없습니다: "
+            + ", ".join(orphans)
+        )
+    if "config" in chosen and "sync-env" not in chosen:
+        warnings.append(
+            "rag-sync 라우팅을 갱신하지 않으면 없어진 버킷으로 계속 동기화를 시도합니다."
+        )
+    if "firestore-state" not in chosen and any(
+        key.startswith(("corpus-", "bucket-")) for key in chosen
+    ):
+        warnings.append(
+            "동기화 이력을 남기면 같은 공유드라이브를 다시 등록해도 문서가 재색인되지 않습니다."
+        )
+    return warnings
+
+
+def start_teardown_run(
+    plan: dict[str, Any], confirm: str, selected: list[str] | None = None
+) -> dict[str, Any]:
     """계획을 확정해 실행한다. 확인 문구가 어긋나면 아무것도 하지 않는다."""
     expected = str(plan.get("confirmWord") or "")
     if str(confirm or "").strip() != expected:
         raise PermissionError(expected)
+    plan = apply_teardown_selection(plan, selected)
     with _TEARDOWN_LOCK:
         _cleanup_teardown_runs()
         active = next(
@@ -3731,6 +4191,7 @@ def start_teardown_run(plan: dict[str, Any], confirm: str) -> dict[str, Any]:
             "region": plan["region"],
             "status": "RUNNING",
             "targets": copy.deepcopy(plan["targets"]),
+            "warnings": teardown_selection_warnings(plan),
             "createdEpoch": time.time(),
         }
         _TEARDOWN_RUNS[run_id] = run
@@ -3931,12 +4392,17 @@ def cloud_departments_json() -> str:
     return dept_config.departments_json_from_configs(_cloud_department_configs())
 
 
-def update_sync_department_map(*, on_line: Any = lambda _line: None) -> str:
+def update_sync_department_map(
+    *, on_line: Any = lambda _line: None, expected: str | None = None
+) -> str:
     """rag-sync 의 DEPARTMENTS_JSON 을 지금 배포된 학과 전체로 맞춘다.
 
     **--update-env-vars 여야 한다.** --set-env-vars 는 env 를 통째로 치환하므로
     여기서 이 키 하나만 넘기면 버킷·코퍼스·Cloud Tasks 설정이 통째로 사라진다
     (그 목록은 deploy.ps1 의 $syncEnv 한 곳에만 있다).
+
+    ``expected`` 를 주면 그 값을 그대로 쓴다. 학과 철거 직후처럼 로컬 YAML 이
+    진실인 순간에는 Cloud 주석보다 그쪽이 먼저다.
     """
     gcloud = _gcloud_executable()
     if not gcloud:
@@ -3944,7 +4410,7 @@ def update_sync_department_map(*, on_line: Any = lambda _line: None) -> str:
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
     region = str(common.get("GCP_REGION") or "asia-northeast3")
-    expected = cloud_departments_json()
+    expected = expected if expected is not None else cloud_departments_json()
 
     ok, service = _gcloud_json(
         [
@@ -5993,6 +6459,23 @@ def department_teardown_plan_endpoint(code: str) -> JSONResponse:
         )
 
 
+@app.get("/api/v1/common-runtime/status")
+def common_runtime_status_endpoint() -> JSONResponse:
+    """운영 환경 화면의 공통 런타임 카드."""
+    try:
+        return JSONResponse(common_runtime_state())
+    except (OSError, RuntimeError, TypeError, ValueError, yaml.YAMLError) as exc:
+        return JSONResponse(
+            {
+                "status": "UNKNOWN",
+                "reason": str(exc)[:300],
+                "projectId": "",
+                "region": "",
+                "services": [],
+            }
+        )
+
+
 @app.get("/api/v1/common-runtime/teardown-plan")
 def common_runtime_teardown_plan_endpoint() -> JSONResponse:
     try:
@@ -6004,9 +6487,26 @@ def common_runtime_teardown_plan_endpoint() -> JSONResponse:
         )
 
 
-def _teardown_response(plan: dict[str, Any], confirm: str) -> JSONResponse:
+def _teardown_selection(payload: dict[str, Any]) -> list[str] | None:
+    """본문에 targets 가 없으면 계획의 기본 선택을 그대로 쓴다."""
+    raw = payload.get("targets")
+    if raw is None:
+        return None
+    if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+        raise ValueError("targets 는 문자열 목록이어야 합니다.")
+    return [item for item in raw]
+
+
+def _teardown_response(
+    plan: dict[str, Any], confirm: str, selected: list[str] | None = None
+) -> JSONResponse:
     try:
-        run = start_teardown_run(plan, confirm)
+        run = start_teardown_run(plan, confirm, selected)
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": {"code": "TEARDOWN_SELECTION_EMPTY", "message": str(exc)[:200]}},
+            status_code=422,
+        )
     except PermissionError as exc:
         return JSONResponse(
             {
@@ -6052,7 +6552,13 @@ async def create_department_teardown(code: str, request: Request) -> JSONRespons
             {"error": {"code": "TEARDOWN_PLAN_FAILED", "message": str(exc)[:400]}},
             status_code=422,
         )
-    return _teardown_response(plan, str(payload.get("confirm") or ""))
+    try:
+        selected = _teardown_selection(payload)
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": {"code": "INVALID_PAYLOAD", "message": str(exc)}}, status_code=400
+        )
+    return _teardown_response(plan, str(payload.get("confirm") or ""), selected)
 
 
 @app.post("/api/v1/common-runtime/teardown")
@@ -6071,7 +6577,13 @@ async def create_common_runtime_teardown(request: Request) -> JSONResponse:
             {"error": {"code": "TEARDOWN_PLAN_FAILED", "message": str(exc)[:400]}},
             status_code=422,
         )
-    return _teardown_response(plan, str(payload.get("confirm") or ""))
+    try:
+        selected = _teardown_selection(payload)
+    except ValueError as exc:
+        return JSONResponse(
+            {"error": {"code": "INVALID_PAYLOAD", "message": str(exc)}}, status_code=400
+        )
+    return _teardown_response(plan, str(payload.get("confirm") or ""), selected)
 
 
 @app.get("/api/v1/teardowns/{run_id}")

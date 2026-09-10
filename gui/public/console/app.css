@@ -651,6 +651,39 @@ button, select { cursor: pointer; }
 .teardown-warning > span { width: 17px; height: 17px; border-radius: 6px; color: #fff; background: var(--fail); display: grid; place-items: center; font-size: 9px; font-weight: 850; }
 .teardown-warning p { margin: 0; color: #96555f; font-size: 9px; line-height: 1.55; }
 .teardown-confirm span b { color: var(--fail); font-family: Consolas, monospace; }
+/* 선택형 철거. 계획 단계에서만 보이고, 실행이 시작되면 진행 목록으로 갈아탄다. */
+.teardown-select-bar { margin: 15px 0 8px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfe; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; }
+.teardown-select-bar b { display: block; color: #3e4d64; font-size: 9.5px; }
+.teardown-select-bar small { color: var(--muted); font-size: 8.5px; }
+.teardown-select-actions { display: flex; gap: 10px; }
+.teardown-select-actions .text-button { font-size: 9px; }
+.teardown-select-actions .text-button:hover { color: var(--primary); }
+.teardown-choice { cursor: pointer; }
+.teardown-choice:hover { border-color: #c9d5fb; background: #f9fbff; }
+.teardown-choice input { width: 15px; height: 15px; accent-color: var(--fail); cursor: pointer; }
+.teardown-choice.is-locked { cursor: default; border-style: dashed; background: #fafbfc; opacity: .82; }
+.teardown-choice.is-locked:hover { border-color: var(--line); background: #fafbfc; }
+.teardown-choice:has(input:checked) { border-color: #efd0d5; background: #fffafb; }
+.teardown-impact { margin: 4px 0 0; display: grid; gap: 6px; }
+.teardown-impact p { margin: 0; padding: 9px 11px; border-radius: 9px; color: #96555f; background: var(--fail-bg); font-size: 8.5px; line-height: 1.55; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 8px; }
+.teardown-impact p span { color: var(--fail); font-weight: 850; }
+.row-button.danger-button:hover { border-color: #efc3ca; color: var(--fail); background: var(--fail-bg); }
+/* 운영 환경의 공통 런타임 카드. 학과 화면의 DEPLOY 검사와 달리 공통 4종만 본다. */
+.runtime-panel { margin: 0 0 14px; }
+.runtime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.runtime-card { padding: 14px 15px; border: 1px solid var(--line); border-radius: 12px; background: white; display: grid; align-content: start; gap: 8px; }
+.runtime-card header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; }
+.runtime-card header b { display: block; color: #2f3d52; font-size: 11px; font-family: Consolas, monospace; overflow-wrap: anywhere; }
+.runtime-card header small { display: block; margin-top: 3px; color: var(--muted); font-size: 8.5px; }
+.runtime-chip { padding: 3px 8px; border-radius: 999px; color: #7e8999; background: #f0f3f6; font-size: 8px; font-weight: 800; white-space: nowrap; }
+.runtime-card.status-ok { border-color: #c8e6dc; } .runtime-card.status-ok .runtime-chip { color: var(--ok); background: var(--ok-bg); }
+.runtime-card.status-warn { border-color: #f0e0c3; } .runtime-card.status-warn .runtime-chip { color: var(--warn); background: var(--warn-bg); }
+.runtime-card.status-fail { border-color: #f0cbd0; } .runtime-card.status-fail .runtime-chip { color: var(--fail); background: var(--fail-bg); }
+.runtime-detail, .runtime-extra { margin: 0; color: #7e8999; font-size: 8.5px; line-height: 1.5; overflow-wrap: anywhere; }
+.runtime-extra { color: #96a1b0; }
+.runtime-card footer { margin-top: 3px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.runtime-card footer .button.compact { min-height: 28px; padding: 0 11px; font-size: 9px; }
+.runtime-empty { margin: 0; padding: 16px; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted); font-size: 9px; text-align: center; }
 .deployment-step[data-status="SKIPPED"] { border-style: dashed; background: #fafbfc; opacity: .82; }
 .deployment-step[data-status="SKIPPED"] .deployment-step-mark { color: #96a1b0; background: #eef1f5; }
 .deployment-step { min-height: 55px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; background: white; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; transition: 180ms ease; }
