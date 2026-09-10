@@ -22,6 +22,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -48,6 +49,8 @@ from scripts import dept_config
 CONFIG_DIR = ROOT / "config"
 DEPT_DIR = CONFIG_DIR / "departments"
 DEPLOYMENT_METADATA_ANNOTATION = "gcp-rag.dev/department-metadata"
+# 학과 라우팅 맵(DEPARTMENTS_JSON)을 들고 있는 공용 동기화 런타임.
+SYNC_SERVICE = "rag-sync"
 WEB_DIR = ROOT / "gui" / "public" / "console"
 
 DEPT_CODE_RE = re.compile(r"^[a-z][a-z0-9-]{1,19}$")
@@ -101,6 +104,7 @@ _SA_REPAIR_PLANS: dict[str, dict[str, Any]] = {}
 _SA_REPAIR_RUNS: dict[str, dict[str, Any]] = {}
 _SA_REPAIR_LOCK = threading.Lock()
 _MCP_DEPLOY_RUNS: dict[str, dict[str, Any]] = {}
+_MCP_DEPLOY_CONFIGS: dict[str, dict[str, Any]] = {}
 _MCP_DEPLOY_LOCK = threading.Lock()
 _MCP_DEPLOY_TTL_SECONDS = 60 * 60
 _COMMON_RUNTIME_DEPLOY_RUNS: dict[str, dict[str, Any]] = {}
@@ -114,6 +118,12 @@ _AUTH_PROCESS: subprocess.Popen[Any] | None = None
 _SYNC_AUTH_LOCK = threading.Lock()
 _SYNC_AUTH_TOKEN = ""
 _SYNC_AUTH_TOKEN_EXPIRES = 0.0
+_SYNC_TARGET_CACHE_LOCK = threading.Lock()
+_SYNC_TARGET_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_SYNC_TARGET_CACHE_TTL_SECONDS = 30
+_CLOUD_DEPARTMENT_CONFIG_CACHE_LOCK = threading.Lock()
+_CLOUD_DEPARTMENT_CONFIG_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+_CLOUD_DEPARTMENT_CONFIG_CACHE_TTL_SECONDS = 60
 
 PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, str]] = {
     "bucketHwp": {"kind": "bucket", "label": "HWP 원본 버킷"},
@@ -254,6 +264,11 @@ def _normalise_ids(value: Any) -> list[str]:
 
 def _config_revision(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _mapping_revision(value: dict[str, Any]) -> str:
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return "sha256:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _field_error(errors: dict[str, list[str]], field: str, message: str) -> None:
@@ -584,6 +599,15 @@ def department_public_config(code: str) -> dict[str, Any]:
     }
 
 
+def department_public_config_any(code: str) -> dict[str, Any]:
+    path = DEPT_DIR / f"{code}.yaml"
+    if path.exists():
+        result = department_public_config(code)
+        result["source"] = "local"
+        return result
+    return cloud_department_public_config(code)
+
+
 def list_department_records() -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     if not DEPT_DIR.exists():
@@ -633,6 +657,113 @@ def _decode_cloud_department_metadata(value: str) -> dict[str, Any] | None:
     if not DEPT_CODE_RE.fullmatch(code) or audience not in dept_config.AUDIENCES:
         return None
     return data
+
+
+def _cloud_department_yaml(metadata: dict[str, Any]) -> dict[str, Any]:
+    """v2의 YAML 전체 사본을 반환하고 기존 v1 주석도 계속 지원한다."""
+    uploaded = metadata.get("yaml")
+    if isinstance(uploaded, dict):
+        return copy.deepcopy(uploaded)
+    return {
+        "name": str(metadata.get("name") or metadata.get("code") or ""),
+        "corpora": copy.deepcopy(metadata.get("corpora") or {}),
+        "buckets": copy.deepcopy(metadata.get("buckets") or {}),
+        "drive": copy.deepcopy(metadata.get("drive") or {}),
+        "minInstances": copy.deepcopy(metadata.get("minInstances") or {}),
+    }
+
+
+def _public_cloud_yaml(value: Any) -> Any:
+    """브라우저용 Cloud 설정에서 키·토큰 계열 필드를 제거한다."""
+    if isinstance(value, dict):
+        return {
+            key: _public_cloud_yaml(child)
+            for key, child in value.items()
+            if key not in SECRET_FIELDS
+            and "token" not in key.lower()
+            and "secret" not in key.lower()
+        }
+    if isinstance(value, list):
+        return [_public_cloud_yaml(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def _load_cloud_department_config(
+    code: str, *, require_full: bool
+) -> tuple[dict[str, Any], str, bool]:
+    """교직원 MCP 주석에서 설정을 읽는다. v1은 상태 검사에만 허용한다."""
+    normalised = str(code or "").strip().lower()
+    if not DEPT_CODE_RE.fullmatch(normalised):
+        raise FileNotFoundError(normalised)
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    cache_key = (project, region, normalised)
+    now = time.monotonic()
+    with _CLOUD_DEPARTMENT_CONFIG_CACHE_LOCK:
+        cached = _CLOUD_DEPARTMENT_CONFIG_CACHE.get(cache_key)
+        if (
+            cached
+            and now - float(cached.get("created", 0))
+            < _CLOUD_DEPARTMENT_CONFIG_CACHE_TTL_SECONDS
+            and (not require_full or bool(cached.get("complete")))
+        ):
+            config = copy.deepcopy(cached["config"])
+            return config, _mapping_revision(config), bool(cached.get("complete"))
+    ok, service = _gcloud_json(
+        [
+            "run",
+            "services",
+            "describe",
+            f"rag-mcp-{normalised}-staff",
+            f"--region={region}",
+            f"--project={project}",
+        ],
+        timeout=30,
+    )
+    if not ok or not isinstance(service, dict):
+        raise FileNotFoundError(normalised)
+    metadata = _decode_cloud_department_metadata(_cloud_run_management_annotation(service))
+    if not metadata or metadata.get("code") != normalised:
+        raise FileNotFoundError(normalised)
+    uploaded = metadata.get("yaml")
+    complete = isinstance(uploaded, dict)
+    if require_full and not complete:
+        raise TypeError("기존 v1 배포에는 전체 YAML이 없습니다. 원래 환경에서 한 번 재배포해 주세요.")
+    config = copy.deepcopy(uploaded) if complete else _cloud_department_yaml(metadata)
+    with _CLOUD_DEPARTMENT_CONFIG_CACHE_LOCK:
+        _CLOUD_DEPARTMENT_CONFIG_CACHE[cache_key] = {
+            "created": now,
+            "config": copy.deepcopy(config),
+            "complete": complete,
+        }
+    return config, _mapping_revision(config), complete
+
+
+def cloud_department_config(code: str) -> tuple[dict[str, Any], str]:
+    """편집·키 조회용으로 v2의 학과 YAML 전체와 revision을 읽는다."""
+    config, revision, _complete = _load_cloud_department_config(code, require_full=True)
+    return config, revision
+
+
+def cloud_department_status_config(code: str) -> tuple[dict[str, Any], str, bool]:
+    """상태 검사용 설정. 전체 YAML이 없는 v1 메타데이터도 복원한다."""
+    return _load_cloud_department_config(code, require_full=False)
+
+
+def cloud_department_public_config(code: str) -> dict[str, Any]:
+    config, revision = cloud_department_config(code)
+    return {
+        "code": code,
+        "name": str(config.get("name") or code),
+        "corpora": copy.deepcopy(config.get("corpora") or {}),
+        "buckets": copy.deepcopy(config.get("buckets") or {}),
+        "drive": copy.deepcopy(config.get("drive") or {}),
+        "minInstances": copy.deepcopy(config.get("minInstances") or {}),
+        "corpusMode": "split" if (config.get("corpora") or {}).get("student") else "single",
+        "configRevision": revision,
+        "source": "cloud",
+    }
 
 
 def _cloud_run_env(service: dict[str, Any]) -> dict[str, str]:
@@ -749,6 +880,15 @@ def cloud_mcp_department_records() -> list[dict[str, Any]]:
                 "drive": {"driveIds": [], "syncFolderIds": [], "studentFolderIds": []},
                 "minInstances": {},
             }
+        cloud_yaml = _cloud_department_yaml(metadata)
+        if annotation_valid:
+            complete = isinstance(metadata.get("yaml"), dict)
+            with _CLOUD_DEPARTMENT_CONFIG_CACHE_LOCK:
+                _CLOUD_DEPARTMENT_CONFIG_CACHE[(project, region, code)] = {
+                    "created": time.monotonic(),
+                    "config": copy.deepcopy(cloud_yaml),
+                    "complete": complete,
+                }
         status_data = service.get("status") if isinstance(service.get("status"), dict) else {}
         conditions = status_data.get("conditions") if isinstance(status_data.get("conditions"), list) else []
         ready = any(
@@ -762,30 +902,27 @@ def cloud_mcp_department_records() -> list[dict[str, Any]]:
             code,
             {
                 "code": code,
-                "name": str(metadata.get("name") or code),
+                "name": str(cloud_yaml.get("name") or metadata.get("name") or code),
                 "path": "Cloud Run management metadata",
-                "configRevision": "",
+                "configRevision": _mapping_revision(cloud_yaml) if annotation_valid else "",
                 "lastStatus": "WARN",
                 "parseError": None,
                 "corpusMode": str(metadata.get("corpusMode") or "single"),
                 "cloudOnly": True,
+                "cloudEditable": annotation_valid and isinstance(metadata.get("yaml"), dict),
                 "metadataComplete": annotation_valid,
-                "metadata": {
-                    key: copy.deepcopy(metadata.get(key) or {})
-                    for key in ("corpora", "buckets", "drive", "minInstances")
-                },
+                "metadata": _public_cloud_yaml(cloud_yaml),
                 "cloudServices": [],
             },
         )
         if annotation_valid and not record["metadataComplete"]:
             record.update(
-                name=str(metadata.get("name") or code),
+                name=str(cloud_yaml.get("name") or metadata.get("name") or code),
                 corpusMode=str(metadata.get("corpusMode") or "single"),
+                cloudEditable=isinstance(metadata.get("yaml"), dict),
                 metadataComplete=True,
-                metadata={
-                    key: copy.deepcopy(metadata.get(key) or {})
-                    for key in ("corpora", "buckets", "drive", "minInstances")
-                },
+                metadata=_public_cloud_yaml(cloud_yaml),
+                configRevision=_mapping_revision(cloud_yaml),
             )
         record["cloudServices"].append(
             {
@@ -804,45 +941,86 @@ def cloud_mcp_department_records() -> list[dict[str, Any]]:
     for record in grouped.values():
         services = record["cloudServices"]
         all_ready = bool(services) and all(item["status"] == "READY" for item in services)
-        resource_ok = bool(
-            (record["metadata"].get("corpora") or {}).get("staff")
-            and (record["metadata"].get("buckets") or {}).get("hwpOriginal")
-            and (record["metadata"].get("buckets") or {}).get("source")
-        )
+        buckets_meta = record["metadata"].get("buckets") or {}
+        corpora_meta = record["metadata"].get("corpora") or {}
+        # 실제 상태 확인(_resource_status)과 이름을 맞춰서 GCS 버킷 · 코퍼스를
+        # 뭉뚱그린 하나의 배지가 아니라 리소스별로 나눠 보여준다.
+        resource_checks = [
+            _check(
+                "RESOURCE",
+                "bucket-hwp",
+                "OK" if buckets_meta.get("hwpOriginal") else "WARN",
+                buckets_meta.get("hwpOriginal") or "버킷 메타데이터 없음",
+            ),
+            _check(
+                "RESOURCE",
+                "bucket-source",
+                "OK" if buckets_meta.get("source") else "WARN",
+                buckets_meta.get("source") or "버킷 메타데이터 없음",
+            ),
+            _check(
+                "RESOURCE",
+                "rag-corpus-staff",
+                "OK" if corpora_meta.get("staff") else "WARN",
+                corpora_meta.get("staff") or "코퍼스 메타데이터 없음",
+            ),
+        ]
+        if corpora_meta.get("student"):
+            resource_checks.append(
+                _check("RESOURCE", "rag-corpus-student", "OK", corpora_meta.get("student")),
+            )
+        resource_ok = all(item["status"] == "OK" for item in resource_checks)
+        # DEPLOY·RUNTIME도 실제 상태 확인처럼 staff/student를 각자 나눠서 보여준다.
+        # cloudServices는 이미 audience별로 나뉘어 있으니 그대로 매핑만 하면 된다.
+        deploy_checks = [
+            _check(
+                "DEPLOY",
+                f"mcp-{record['code']}-{svc['audience']}",
+                "OK" if svc["status"] == "READY" else "WARN",
+                svc["latestReadyRevision"] or "Ready 확인 필요",
+            )
+            for svc in services
+        ] or [_check("DEPLOY", f"mcp-{record['code']}", "WARN", "Cloud Run MCP 서비스를 찾지 못했습니다.")]
+        runtime_checks = [
+            _check(
+                "RUNTIME",
+                f"mcp-{record['code']}-{svc['audience']}-health",
+                "OK" if svc["status"] == "READY" else "WARN",
+                region,
+            )
+            for svc in services
+        ] or [_check("RUNTIME", f"mcp-{record['code']}-health", "WARN", "Cloud Run MCP 서비스를 찾지 못했습니다.")]
         checks = [
             _check(
                 "LOCAL",
                 "cloud-metadata",
-                "WARN",
-                "로컬 YAML 없음 · Cloud Run 관리 메타데이터로 표시"
+                "OK" if record["metadataComplete"] else "WARN",
+                "Cloud Run 관리 메타데이터 확인"
                 if record["metadataComplete"]
                 else "구형 배포 · 학과명과 Drive 범위 메타데이터 없음",
+                hidden=bool(record["metadataComplete"]),
             ),
-            _check(
-                "RESOURCE",
-                "cloud-resources",
-                "OK" if resource_ok else "WARN",
-                "코퍼스·버킷 메타데이터 확인" if resource_ok else "리소스 메타데이터 일부 누락",
-            ),
-            _check(
-                "DEPLOY",
-                "cloud-mcp",
-                "OK" if all_ready else "WARN",
-                f"Cloud Run MCP {len(services)}개 · {'모두 Ready' if all_ready else 'Ready 확인 필요'}",
-            ),
-            _check("RUNTIME", "cloud-runtime", "OK" if all_ready else "WARN", region),
+            *resource_checks,
+            *deploy_checks,
+            *runtime_checks,
         ]
         record["lastStatus"] = (
             "OK"
             if record["metadataComplete"] and resource_ok and all_ready
             else "WARN"
         )
-        record["lastResult"] = {
+        cloud_result = {
             "code": record["code"],
             "overall": record["lastStatus"],
             "checkedAt": now,
             "checks": checks,
         }
+        latest = _LATEST.get(record["code"])
+        if latest and latest.get("configRevision") == record["configRevision"]:
+            record["lastStatus"] = str(latest.get("overall") or record["lastStatus"])
+            record["lastResult"] = latest
+        else:
+            record["lastResult"] = cloud_result
         records.append(record)
     return sorted(records, key=lambda item: item["code"])
 
@@ -850,9 +1028,10 @@ def cloud_mcp_department_records() -> list[dict[str, Any]]:
 def department_mcp_servers(code: str) -> dict[str, Any]:
     """학과별 교직원·학생 MCP Cloud Run 서비스의 실제 URL을 조회한다."""
     normalised = str(code or "").strip().lower()
-    if not DEPT_CODE_RE.fullmatch(normalised) or not (DEPT_DIR / f"{normalised}.yaml").exists():
+    if not DEPT_CODE_RE.fullmatch(normalised):
         raise FileNotFoundError(normalised)
-    config = _read_yaml(DEPT_DIR / f"{normalised}.yaml")
+    path = DEPT_DIR / f"{normalised}.yaml"
+    config = _read_yaml(path) if path.exists() else cloud_department_config(normalised)[0]
     split_enabled = bool((config.get("corpora") or {}).get("student"))
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
@@ -908,16 +1087,16 @@ def department_mcp_servers(code: str) -> dict[str, Any]:
 
 
 def department_mcp_key(code: str, audience: str) -> str:
-    """명시적인 로컬 복사 요청에만 MCP 키 하나를 읽어 반환한다."""
+    """명시적인 복사 요청에만 로컬 또는 Cloud 설정의 MCP 키 하나를 반환한다."""
     normalised = str(code or "").strip().lower()
     if not DEPT_CODE_RE.fullmatch(normalised):
         raise FileNotFoundError(normalised)
     if audience not in dept_config.AUDIENCES:
         raise ValueError("교직원 또는 학생 MCP 키를 선택해 주세요.")
     path = (DEPT_DIR / f"{normalised}.yaml").resolve()
-    if path.parent != DEPT_DIR.resolve() or not path.exists():
+    if path.parent != DEPT_DIR.resolve():
         raise FileNotFoundError(path)
-    data = _read_yaml(path)
+    data = _read_yaml(path) if path.exists() else cloud_department_config(normalised)[0]
     key = str((data.get("keys") or {}).get(audience) or "").strip()
     if not key or key in dept_config.PLACEHOLDER_KEYS:
         raise ValueError("복사할 MCP 키가 설정되어 있지 않습니다.")
@@ -979,6 +1158,83 @@ def _local_status(code: str) -> list[dict[str, Any]]:
     else:
         detail = "서로 다른 키 · 길이 기준 충족" if split_enabled else "기본 키 길이 기준 충족"
         checks.append(_check("LOCAL", "mcp-keys", "OK", detail))
+    checks[0]["latencyMs"] = round((time.perf_counter() - started) * 1000)
+    return checks
+
+
+def _cloud_config_status(
+    code: str, data: dict[str, Any], *, complete: bool
+) -> list[dict[str, Any]]:
+    """Cloud Run v2 주석을 로컬 YAML과 같은 설정 계층으로 검사한다."""
+    started = time.perf_counter()
+    checks = [
+        _check(
+            "LOCAL",
+            "cloud-metadata",
+            "OK",
+            f"rag-mcp-{code}-staff · Cloud Run 관리 메타데이터 {'v2' if complete else 'v1'}",
+            hidden=True,
+        )
+    ]
+    split_enabled = bool((data.get("corpora") or {}).get("student"))
+    if complete:
+        try:
+            audiences = _cloud_config_audiences(data)
+            mode_label = "Cloud 설정 · 교직원/학생" if len(audiences) == 2 else "Cloud 설정 · 단일 코퍼스"
+            checks.append(_check("LOCAL", "derived-env", "OK", mode_label))
+        except ValueError as exc:
+            checks.append(_check("LOCAL", "derived-env", "FAIL", str(exc)))
+    else:
+        checks.append(
+            _check(
+                "LOCAL",
+                "derived-env",
+                "SKIP",
+                "v1 메타데이터 복원 · 전체 YAML 확인은 v2 재배포 후 가능",
+                hidden=True,
+            )
+        )
+
+    drive = data.get("drive") or {}
+    sync_ids = set(_normalise_ids(drive.get("syncFolderIds")))
+    student_ids = set(_normalise_ids(drive.get("studentFolderIds")))
+    if not split_enabled:
+        checks.append(_check("LOCAL", "folder-scope", "SKIP", "단일 코퍼스 운영"))
+    elif student_ids and not student_ids - sync_ids:
+        checks.append(_check("LOCAL", "folder-scope", "OK", "student ⊆ sync"))
+    else:
+        missing = sorted(student_ids - sync_ids)
+        checks.append(
+            _check(
+                "LOCAL",
+                "folder-scope",
+                "FAIL",
+                "학생 폴더 없음" if not student_ids else "부분집합 위반: " + ", ".join(missing),
+            )
+        )
+
+    if complete:
+        keys = data.get("keys") or {}
+        audiences = dept_config.AUDIENCES if split_enabled else ("staff",)
+        weak = [audience for audience in audiences if len(str(keys.get(audience) or "")) < 24]
+        checks.append(
+            _check(
+                "LOCAL",
+                "mcp-keys",
+                "WARN" if weak else "OK",
+                "24자 미만: " + ", ".join(weak) if weak else "키 길이 기준 충족",
+            )
+        )
+    else:
+        checks.append(
+            _check(
+                "LOCAL",
+                "mcp-keys",
+                "SKIP",
+                "v1 주석에는 키 정보가 없음",
+                hidden=True,
+            )
+        )
     checks[0]["latencyMs"] = round((time.perf_counter() - started) * 1000)
     return checks
 
@@ -2699,6 +2955,29 @@ def _project_accessible(project_id: str) -> bool:
     return str(body.get("lifecycleState") or "ACTIVE") == "ACTIVE"
 
 
+def _expected_runtime_env() -> tuple[str, dict[str, str], str]:
+    """드리프트 기대값의 원본. 로컬 YAML 이 있으면 그것을, 없으면 Cloud v2 주석을 쓴다.
+
+    (기준 학과, 그 학과 env, 전 학과 DEPARTMENTS_JSON) 을 준다. 로컬 YAML 만
+    보던 시절에는 YAML 없는 운영 환경에서 이 검사가 통째로 UNKNOWN 으로 빠졌다
+    — rag-sync 의 학과 맵이 낡아도 경고 한 줄 없었다.
+    """
+    codes = dept_config.list_departments()
+    if codes:
+        return (
+            codes[0],
+            dept_config.build_env(codes[0], "staff"),
+            dept_config.departments_json(),
+        )
+    configs = _cloud_department_configs()
+    first = sorted(configs)[0]
+    return (
+        first,
+        dept_config.build_env_from_config(first, "staff", configs[first]),
+        dept_config.departments_json_from_configs(configs),
+    )
+
+
 def runtime_env_drift(cache: _StatusRunCache | None = None) -> dict[str, Any]:
     """배포된 Cloud Run env 가 지금 config 와 같은지 본다.
 
@@ -2710,9 +2989,6 @@ def runtime_env_drift(cache: _StatusRunCache | None = None) -> dict[str, Any]:
     DEPARTMENTS_JSON 하나에 전 학과의 버킷·코퍼스·폴더가 들어 있어 라우팅 드리프트는
     그 값 하나로 판정된다. parser 는 그 값을 안 받으므로 기본 학과 값으로 대조한다.
     """
-    codes = dept_config.list_departments()
-    if not codes:
-        return {"status": "UNKNOWN", "reason": "등록된 학과가 없습니다.", "services": []}
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
     region = str(common.get("GCP_REGION") or "asia-northeast3")
@@ -2720,9 +2996,8 @@ def runtime_env_drift(cache: _StatusRunCache | None = None) -> dict[str, Any]:
         return {"status": "UNKNOWN", "reason": "공통 설정이 없습니다.", "services": []}
 
     try:
-        base_env = dept_config.build_env(codes[0], "staff")
-        expected_departments = dept_config.departments_json()
-    except (OSError, SystemExit, TypeError, ValueError, yaml.YAMLError) as exc:
+        base_code, base_env, expected_departments = _expected_runtime_env()
+    except (OSError, RuntimeError, SystemExit, TypeError, ValueError, yaml.YAMLError) as exc:
         return {"status": "UNKNOWN", "reason": str(exc)[:200], "services": []}
 
     expected_by_service = {
@@ -2780,7 +3055,7 @@ def runtime_env_drift(cache: _StatusRunCache | None = None) -> dict[str, Any]:
         "status": "DRIFT" if drifted else "OK",
         "projectId": project,
         "region": region,
-        "baseDepartment": codes[0],
+        "baseDepartment": base_code,
         "services": services,
     }
 
@@ -2961,16 +3236,30 @@ def _execute_common_runtime_deployment(run_id: str) -> None:
     with _COMMON_RUNTIME_DEPLOY_LOCK:
         env_only = bool((_COMMON_RUNTIME_DEPLOY_RUNS.get(run_id) or {}).get("envOnly"))
     try:
-        exit_code = _run_common_runtime_deploy_script(
-            on_line=lambda line: _append_common_runtime_deploy_log(run_id, line),
-            env_only=env_only,
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"공통 런타임 배포 스크립트가 종료 코드 {exit_code}로 실패했습니다.")
-        for key in ("config", "images", "cloudRun", "workflow", "scheduler"):
-            _set_common_runtime_deploy_step(
-                run_id, key, status="COMPLETE", detail="배포 명령 완료"
+        if env_only and not dept_config.list_departments():
+            # deploy.ps1 -EnvOnly 는 학과 맵을 로컬 YAML 에서 만든다. YAML 을 두지
+            # 않는 운영 환경에서는 그 자리에서 죽어, 정작 낡기 쉬운 학과 라우팅
+            # 맵을 갱신할 방법이 없었다. 이 환경에서는 Cloud v2 주석에서 맵을
+            # 재구성해 그 키 하나만 갱신한다 — parser/sync 의 나머지 env 는
+            # deploy.ps1 의 $syncEnv 한 곳에만 두고 여기서 복제하지 않는다.
+            codes = update_sync_department_map(
+                on_line=lambda line: _append_common_runtime_deploy_log(run_id, line)
             )
+            for key in ("config", "cloudRun"):
+                _set_common_runtime_deploy_step(
+                    run_id, key, status="COMPLETE", detail=f"동기화 대상 학과: {codes}"
+                )
+        else:
+            exit_code = _run_common_runtime_deploy_script(
+                on_line=lambda line: _append_common_runtime_deploy_log(run_id, line),
+                env_only=env_only,
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"공통 런타임 배포 스크립트가 종료 코드 {exit_code}로 실패했습니다.")
+            for key in ("config", "images", "cloudRun", "workflow", "scheduler"):
+                _set_common_runtime_deploy_step(
+                    run_id, key, status="COMPLETE", detail="배포 명령 완료"
+                )
         _set_common_runtime_deploy_step(
             run_id, "ready", status="RUNNING", detail="배포 리소스 Ready 확인 중"
         )
@@ -3463,6 +3752,7 @@ def _cleanup_mcp_deployments() -> None:
     ]
     for run_id in expired:
         _MCP_DEPLOY_RUNS.pop(run_id, None)
+        _MCP_DEPLOY_CONFIGS.pop(run_id, None)
 
 
 def _set_mcp_deploy_step(run_id: str, key: str, **changes: Any) -> None:
@@ -3544,14 +3834,294 @@ def _run_mcp_deploy_script(
     return process.wait()
 
 
+def _gcloud_env_argument(values: dict[str, Any]) -> str:
+    rendered = {key: str(value) for key, value in values.items()}
+    delimiter = "~"
+    while any(delimiter in value for value in rendered.values()):
+        delimiter += "~"
+    return f"^{delimiter}^" + delimiter.join(
+        f"{key}={value}" for key, value in rendered.items()
+    )
+
+
+def _cloud_department_configs() -> dict[str, dict[str, Any]]:
+    """배포된 v2 주석에서 전 학과 설정을 모은다. rag-sync 라우팅 맵의 원본이다.
+
+    교직원 서비스만 조회한다 — 주석 하나에 학생 코퍼스·폴더까지 들어 있어
+    학생 서비스를 또 describe 할 이유가 없다.
+
+    v2 주석이 없는 학과가 하나라도 있으면 맵을 만들지 않고 죽는다. 그 학과를
+    빼고 맵을 씌우면 rag-sync 가 그 드라이브를 UnknownDriveError 로 건너뛰는데,
+    갱신 자체는 성공한 것처럼 보여 누락이 드러나지 않는다.
+    """
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    if not project:
+        raise RuntimeError("공통 설정에 GCP_PROJECT_ID가 없습니다.")
+    ok, rows = _gcloud_json(
+        [
+            "run",
+            "services",
+            "list",
+            "--platform=managed",
+            f"--region={region}",
+            f"--project={project}",
+        ],
+        timeout=30,
+    )
+    if not ok or not isinstance(rows, list):
+        raise RuntimeError(str(rows)[:300] or "Cloud Run 서비스 목록을 조회하지 못했습니다.")
+
+    names: list[str] = []
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        name = str((item.get("metadata") or {}).get("name") or item.get("name") or "")
+        if re.fullmatch(r"rag-mcp-[a-z][a-z0-9-]{1,19}-staff", name):
+            names.append(name)
+    if not names:
+        raise RuntimeError("배포된 MCP 서비스가 없어 학과 라우팅 맵을 만들 수 없습니다.")
+
+    configs: dict[str, dict[str, Any]] = {}
+    incomplete: list[str] = []
+    with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
+        futures = {
+            pool.submit(
+                _gcloud_json,
+                [
+                    "run",
+                    "services",
+                    "describe",
+                    name,
+                    f"--region={region}",
+                    f"--project={project}",
+                ],
+                30,
+            ): name
+            for name in names
+        }
+        for future in as_completed(futures):
+            name = futures[future]
+            code = str(re.fullmatch(r"rag-mcp-(.+)-staff", name).group(1))
+            service_ok, service = future.result()
+            metadata = (
+                _decode_cloud_department_metadata(
+                    _cloud_run_management_annotation(service)
+                )
+                if service_ok and isinstance(service, dict)
+                else None
+            )
+            uploaded = (metadata or {}).get("yaml")
+            if not metadata or metadata.get("code") != code or not isinstance(uploaded, dict):
+                incomplete.append(code)
+                continue
+            configs[code] = copy.deepcopy(uploaded)
+    if incomplete:
+        raise RuntimeError(
+            "전체 설정(v2) 주석이 없는 학과가 있어 라우팅 맵을 만들 수 없습니다: "
+            + ", ".join(sorted(incomplete))
+            + " · 해당 학과를 한 번 재배포해 주세요."
+        )
+    return configs
+
+
+def cloud_departments_json() -> str:
+    """Cloud v2 주석 기준 rag-sync DEPARTMENTS_JSON 한 줄."""
+    return dept_config.departments_json_from_configs(_cloud_department_configs())
+
+
+def update_sync_department_map(*, on_line: Any = lambda _line: None) -> str:
+    """rag-sync 의 DEPARTMENTS_JSON 을 지금 배포된 학과 전체로 맞춘다.
+
+    **--update-env-vars 여야 한다.** --set-env-vars 는 env 를 통째로 치환하므로
+    여기서 이 키 하나만 넘기면 버킷·코퍼스·Cloud Tasks 설정이 통째로 사라진다
+    (그 목록은 deploy.ps1 의 $syncEnv 한 곳에만 있다).
+    """
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        raise RuntimeError("gcloud를 찾을 수 없습니다.")
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    expected = cloud_departments_json()
+
+    ok, service = _gcloud_json(
+        [
+            "run",
+            "services",
+            "describe",
+            SYNC_SERVICE,
+            f"--region={region}",
+            f"--project={project}",
+        ],
+        timeout=30,
+    )
+    if not ok or not isinstance(service, dict):
+        raise RuntimeError(f"{SYNC_SERVICE} 조회 실패: {str(service)[:200]}")
+    if _cloud_run_env(service).get("DEPARTMENTS_JSON", "") == expected:
+        codes = ", ".join(sorted(json.loads(expected)))
+        on_line(f"{SYNC_SERVICE}: 학과 라우팅 맵이 이미 최신입니다 ({codes})")
+        return codes
+
+    on_line(f"{SYNC_SERVICE}: 학과 라우팅 맵 갱신 중")
+    # 값을 명령줄에 싣지 않고 flags-file 로 넘긴다. 학과 맵에는 콤마가 있어
+    # --update-env-vars 는 `^|^` 커스텀 구분자를 요구하는데, Windows 에서
+    # gcloud 는 .cmd 배치 shim 이라 그 `^` 를 cmd.exe 가 먼저 먹는다. 그러면
+    # gcloud 는 콤마마다 값을 끊어 "Bad syntax for dict arg" 로 죽는다(실측).
+    # flags-file 은 YAML 이라 셸 인용 규칙을 전혀 타지 않는다.
+    handle = tempfile.NamedTemporaryFile(
+        "w", suffix=".yaml", delete=False, encoding="utf-8"
+    )
+    try:
+        yaml.safe_dump(
+            [{"--update-env-vars": {"DEPARTMENTS_JSON": expected}}],
+            handle,
+            allow_unicode=False,
+            default_flow_style=False,
+        )
+        handle.close()
+        args = [
+            gcloud,
+            "run",
+            "services",
+            "update",
+            SYNC_SERVICE,
+            f"--region={region}",
+            f"--project={project}",
+            "--platform=managed",
+            f"--flags-file={handle.name}",
+            "--quiet",
+        ]
+        update_ok, output = _run_command(args, timeout=600)
+    finally:
+        handle.close()
+        Path(handle.name).unlink(missing_ok=True)
+    if not update_ok:
+        raise RuntimeError(f"{SYNC_SERVICE}: {str(output or '갱신 실패')[:400]}")
+    # 동기화 탭은 배포된 맵을 30초 캐시로 읽는다. 방금 올린 학과가 곧바로
+    # 목록에 뜨도록 비운다.
+    with _SYNC_TARGET_CACHE_LOCK:
+        _SYNC_TARGET_CACHE.clear()
+    codes = ", ".join(sorted(json.loads(expected)))
+    on_line(f"{SYNC_SERVICE}: 학과 라우팅 맵 갱신 완료 ({codes})")
+    return codes
+
+
+def _cloud_config_audiences(config: dict[str, Any]) -> tuple[str, ...]:
+    corpora = config.get("corpora") if isinstance(config.get("corpora"), dict) else {}
+    drive = config.get("drive") if isinstance(config.get("drive"), dict) else {}
+    keys = config.get("keys") if isinstance(config.get("keys"), dict) else {}
+    staff_key = str(keys.get("staff") or "").strip()
+    if not staff_key or staff_key in dept_config.PLACEHOLDER_KEYS:
+        raise ValueError("keys.staff가 없어 Cloud 설정을 배포할 수 없습니다.")
+    student_parts = (
+        bool(str(corpora.get("student") or "").strip()),
+        bool(_normalise_ids(drive.get("studentFolderIds"))),
+        bool(str(keys.get("student") or "").strip()),
+    )
+    if any(student_parts) and not all(student_parts):
+        raise ValueError("학생 분리는 corpus, 폴더, MCP 키가 모두 필요합니다.")
+    if all(student_parts) and str(keys.get("student") or "") == staff_key:
+        raise ValueError("교직원과 학생 MCP 키가 같습니다.")
+    return dept_config.AUDIENCES if all(student_parts) else ("staff",)
+
+
+def _update_cloud_department_config(
+    code: str, config: dict[str, Any], *, on_line: Any = lambda _line: None
+) -> list[str]:
+    """로컬 파일 없이 기존 MCP 서비스의 env와 전체-YAML 주석을 갱신한다."""
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        raise RuntimeError("gcloud를 찾을 수 없습니다.")
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    corpora = config.get("corpora") or {}
+    buckets = config.get("buckets") or {}
+    keys = config.get("keys") or {}
+    mins = config.get("minInstances") or {}
+    effective_buckets = {
+        "hwpOriginal": str(
+            buckets.get("hwpOriginal") or common.get("GCS_HWP_ORIGINAL_BUCKET") or "unused"
+        ),
+        "source": str(buckets.get("source") or common.get("GCS_SOURCE_BUCKET") or "unused"),
+    }
+    audiences = _cloud_config_audiences(config)
+    updated: list[str] = []
+    for audience in audiences:
+        service = f"rag-mcp-{code}-{audience}"
+        env_for_metadata = {
+            "GCS_HWP_ORIGINAL_BUCKET": effective_buckets["hwpOriginal"],
+            "GCS_SOURCE_BUCKET": effective_buckets["source"],
+        }
+        annotation = dept_config._deployment_metadata_b64(
+            code,
+            audience,
+            config,
+            env_for_metadata,
+            staff_corpus=str(corpora.get("staff") or ""),
+            student_corpus=str(corpora.get("student") or ""),
+        )
+        environment = {
+            "GCP_PROJECT_ID": project,
+            "GCP_REGION": region,
+            "RAG_CORPUS_NAME": str(corpora.get(audience) or ""),
+            "GCS_HWP_ORIGINAL_BUCKET": effective_buckets["hwpOriginal"],
+            "GCS_SOURCE_BUCKET": effective_buckets["source"],
+            "FIRESTORE_DATABASE": str(common.get("FIRESTORE_DATABASE") or "rag-sync-state"),
+            "DOC_STATE_COLLECTION": str(common.get("DOC_STATE_COLLECTION") or "doc_state"),
+            "MCP_API_KEY": str(keys.get(audience) or ""),
+            "TOP_K_DEFAULT": str(common.get("TOP_K_DEFAULT") or 5),
+            "SEARCH_FETCH_MULTIPLIER": str(common.get("SEARCH_FETCH_MULTIPLIER") or 3),
+            "SEARCH_FETCH_MAX": str(common.get("SEARCH_FETCH_MAX") or 60),
+        }
+        args = [
+            gcloud,
+            "run",
+            "services",
+            "update",
+            service,
+            f"--region={region}",
+            f"--project={project}",
+            "--platform=managed",
+            (
+                "--update-labels="
+                f"gcp-rag-managed=true,gcp-rag-dept={code},"
+                f"gcp-rag-audience={audience},gcp-rag-schema=v2"
+            ),
+            f"--update-annotations={DEPLOYMENT_METADATA_ANNOTATION}={annotation}",
+            f"--set-env-vars={_gcloud_env_argument(environment)}",
+            f"--concurrency={int(common.get('MCP_CONCURRENCY') or 40)}",
+            f"--min-instances={int(mins.get(audience, 0) or 0)}",
+            "--quiet",
+        ]
+        on_line(f"{service}: Cloud 설정 배포 중")
+        ok, output = _run_command(args, timeout=600)
+        if not ok:
+            clean = str(output or "Cloud Run 업데이트 실패")
+            for secret in keys.values():
+                if secret:
+                    clean = clean.replace(str(secret), "***")
+            raise RuntimeError(f"{service}: {clean[:400]}")
+        updated.append(service)
+        on_line(f"{service}: Cloud 설정 배포 완료")
+    return updated
+
+
 def _execute_mcp_deployment(run_id: str) -> None:
     with _MCP_DEPLOY_LOCK:
         run = copy.deepcopy(_MCP_DEPLOY_RUNS[run_id])
+        cloud_config = copy.deepcopy(_MCP_DEPLOY_CONFIGS.get(run_id))
     code = run["code"]
     try:
-        config_path = DEPT_DIR / f"{code}.yaml"
-        config = _read_yaml(config_path)
-        audiences = dept_config.configured_audiences(code)
+        if cloud_config is not None:
+            config = cloud_config
+            audiences = _cloud_config_audiences(config)
+        else:
+            config_path = DEPT_DIR / f"{code}.yaml"
+            config = _read_yaml(config_path)
+            audiences = dept_config.configured_audiences(code)
         secrets_to_redact = [
             str((config.get("keys") or {}).get(audience) or "") for audience in audiences
         ]
@@ -3562,30 +4132,43 @@ def _execute_mcp_deployment(run_id: str) -> None:
             detail=f"{len(audiences)}개 MCP 설정 검증 완료",
         )
 
-        common = _common()
-        project = str(common.get("GCP_PROJECT_ID") or "")
-        region = str(common.get("GCP_REGION") or "asia-northeast3")
-        repository = str(common.get("ARTIFACT_REPO") or "rag-mcp")
-        image = f"{region}-docker.pkg.dev/{project}/{repository}/mcp:latest"
-        _set_mcp_deploy_step(run_id, "image", status="RUNNING", detail="Artifact Registry 확인 중")
-        image_ok, _image_info = _gcloud_json(
-            ["artifacts", "docker", "images", "describe", image], timeout=30
-        )
-        _set_mcp_deploy_step(
-            run_id,
-            "image",
-            status="COMPLETE",
-            detail="기존 MCP 이미지 사용" if image_ok else "이미지 없음 · 이번 배포에서 빌드",
-        )
-
         _set_mcp_deploy_step(run_id, "deploy", status="RUNNING", detail="Cloud Run 배포 시작")
-        exit_code = _run_mcp_deploy_script(
-            code,
-            skip_build=image_ok,
-            on_line=lambda line: _append_mcp_deploy_log(run_id, line, secrets_to_redact),
-        )
-        if exit_code != 0:
-            raise RuntimeError(f"MCP 배포 스크립트가 종료 코드 {exit_code}로 실패했습니다.")
+        if cloud_config is not None:
+            _set_mcp_deploy_step(
+                run_id, "image", status="COMPLETE", detail="현재 배포 이미지 유지"
+            )
+            _update_cloud_department_config(
+                code,
+                config,
+                on_line=lambda line: _append_mcp_deploy_log(
+                    run_id, line, secrets_to_redact
+                ),
+            )
+        else:
+            common = _common()
+            project = str(common.get("GCP_PROJECT_ID") or "")
+            region = str(common.get("GCP_REGION") or "asia-northeast3")
+            repository = str(common.get("ARTIFACT_REPO") or "rag-mcp")
+            image = f"{region}-docker.pkg.dev/{project}/{repository}/mcp:latest"
+            _set_mcp_deploy_step(
+                run_id, "image", status="RUNNING", detail="Artifact Registry 확인 중"
+            )
+            image_ok, _image_info = _gcloud_json(
+                ["artifacts", "docker", "images", "describe", image], timeout=30
+            )
+            _set_mcp_deploy_step(
+                run_id,
+                "image",
+                status="COMPLETE",
+                detail="기존 MCP 이미지 사용" if image_ok else "이미지 없음 · 이번 배포에서 빌드",
+            )
+            exit_code = _run_mcp_deploy_script(
+                code,
+                skip_build=image_ok,
+                on_line=lambda line: _append_mcp_deploy_log(run_id, line, secrets_to_redact),
+            )
+            if exit_code != 0:
+                raise RuntimeError(f"MCP 배포 스크립트가 종료 코드 {exit_code}로 실패했습니다.")
         _set_mcp_deploy_step(run_id, "deploy", status="COMPLETE", detail="Cloud Run 배포 명령 완료")
 
         _set_mcp_deploy_step(run_id, "ready", status="RUNNING", detail="Cloud Run Ready 확인 중")
@@ -3623,6 +4206,22 @@ def _execute_mcp_deployment(run_id: str) -> None:
             status="COMPLETE",
             detail=f"{len(servers)}개 서비스 정상 응답",
         )
+
+        # MCP 만 올리고 끝내면 rag-sync 의 DEPARTMENTS_JSON 이 그대로라 이 학과의
+        # 드라이브가 라우팅 맵에 없다. 그 상태에서는 동기화 탭에 학과가 뜨지도
+        # 않고, 실행해도 UnknownDriveError 로 건너뛴다(실측 — cs 가 그랬다).
+        # 배포의 마지막 단계로 묶어야 학과 추가 때마다 사람이 기억해야 하는
+        # 수동 절차가 되지 않는다.
+        _set_mcp_deploy_step(
+            run_id, "syncMap", status="RUNNING", detail="rag-sync 학과 라우팅 맵 갱신 중"
+        )
+        codes = update_sync_department_map(
+            on_line=lambda line: _append_mcp_deploy_log(run_id, line, secrets_to_redact)
+        )
+        _set_mcp_deploy_step(
+            run_id, "syncMap", status="COMPLETE", detail=f"동기화 대상 학과: {codes}"
+        )
+
         with _MCP_DEPLOY_LOCK:
             current = _MCP_DEPLOY_RUNS[run_id]
             current.update(
@@ -3630,6 +4229,7 @@ def _execute_mcp_deployment(run_id: str) -> None:
                 servers=servers,
                 finishedEpoch=time.time(),
             )
+            _MCP_DEPLOY_CONFIGS.pop(run_id, None)
     except (OSError, RuntimeError, SystemExit, TypeError, ValueError, yaml.YAMLError) as exc:
         message = str(exc)[:500]
         with _MCP_DEPLOY_LOCK:
@@ -3643,14 +4243,26 @@ def _execute_mcp_deployment(run_id: str) -> None:
             if running_step:
                 running_step.update(status="FAILED", detail=message)
             current.update(status="FAILED", error=message, finishedEpoch=time.time())
+            _MCP_DEPLOY_CONFIGS.pop(run_id, None)
 
 
-def start_mcp_deployment(code: str) -> dict[str, Any]:
+def start_mcp_deployment(
+    code: str, *, cloud_config: dict[str, Any] | None = None
+) -> dict[str, Any]:
     normalised = str(code or "").strip().lower()
-    if not DEPT_CODE_RE.fullmatch(normalised) or not (DEPT_DIR / f"{normalised}.yaml").exists():
+    if not DEPT_CODE_RE.fullmatch(normalised):
         raise FileNotFoundError(normalised)
-    config = department_public_config(normalised)
-    audiences = dept_config.configured_audiences(normalised)
+    local = (DEPT_DIR / f"{normalised}.yaml").exists()
+    if cloud_config is None and local:
+        config = department_public_config(normalised)
+        audiences = dept_config.configured_audiences(normalised)
+    else:
+        full_config = copy.deepcopy(cloud_config) if cloud_config is not None else cloud_department_config(normalised)[0]
+        audiences = _cloud_config_audiences(full_config)
+        config = {
+            "name": str(full_config.get("name") or normalised),
+            "corpusMode": "split" if len(audiences) == 2 else "single",
+        }
     services = [f"rag-mcp-{normalised}-{audience}" for audience in audiences]
     with _MCP_DEPLOY_LOCK:
         _cleanup_mcp_deployments()
@@ -3679,11 +4291,14 @@ def start_mcp_deployment(code: str) -> dict[str, Any]:
                 {"key": "deploy", "label": "Cloud Run 배포", "status": "PENDING", "detail": "대기 중"},
                 {"key": "ready", "label": "Ready 확인", "status": "PENDING", "detail": "대기 중"},
                 {"key": "health", "label": "Health 확인", "status": "PENDING", "detail": "대기 중"},
+                {"key": "syncMap", "label": "학과 라우팅 반영", "status": "PENDING", "detail": "대기 중"},
             ],
             "logs": [],
             "createdEpoch": time.time(),
         }
         _MCP_DEPLOY_RUNS[run_id] = run
+        if not local or cloud_config is not None:
+            _MCP_DEPLOY_CONFIGS[run_id] = full_config
     threading.Thread(
         target=_execute_mcp_deployment,
         args=(run_id,),
@@ -4469,9 +5084,62 @@ def _execution_run_id(row: dict[str, Any]) -> str:
     return str(labels.get("run_id") or _execution_arguments(row).get("runId") or "")
 
 
+def _deployed_sync_department_map() -> dict[str, dict[str, Any]]:
+    """rag-sync가 실제 사용하는 학과 라우팅 맵을 Cloud Run env에서 읽는다.
+
+    데이터 동기화는 MCP 주석보다 이 값이 중요하다. 주석에 학과가 있어도
+    rag-sync의 DEPARTMENTS_JSON에 아직 반영되지 않았다면 실행 즉시
+    UnknownDriveError가 나기 때문이다. 실행 이력 화면은 5초마다 갱신되므로 짧은
+    프로세스 캐시로 describe 호출만 줄이고, 배포 변경은 최대 30초 안에 반영한다.
+    """
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    if not project:
+        return {}
+    cache_key = (project, region)
+    now = time.monotonic()
+    with _SYNC_TARGET_CACHE_LOCK:
+        cached = _SYNC_TARGET_CACHE.get(cache_key)
+        if cached and now - float(cached.get("created", 0)) < _SYNC_TARGET_CACHE_TTL_SECONDS:
+            return copy.deepcopy(cached["departments"])
+
+    ok, service = _gcloud_json(
+        [
+            "run",
+            "services",
+            "describe",
+            "rag-sync",
+            f"--region={region}",
+            f"--project={project}",
+        ],
+        timeout=30,
+    )
+    if not ok or not isinstance(service, dict):
+        return {}
+    raw = _cloud_run_env(service).get("DEPARTMENTS_JSON", "")
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+
+    departments = {
+        str(code).strip().lower(): copy.deepcopy(value)
+        for code, value in parsed.items()
+        if DEPT_CODE_RE.fullmatch(str(code).strip().lower()) and isinstance(value, dict)
+    }
+    with _SYNC_TARGET_CACHE_LOCK:
+        _SYNC_TARGET_CACHE[cache_key] = {
+            "created": now,
+            "departments": copy.deepcopy(departments),
+        }
+    return departments
+
+
 def _sync_department_targets() -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     departments: dict[str, dict[str, Any]] = {}
-    drive_owners: dict[str, str] = {}
     for code in dept_config.list_departments():
         try:
             config = _read_yaml(DEPT_DIR / f"{code}.yaml")
@@ -4487,6 +5155,26 @@ def _sync_department_targets() -> tuple[dict[str, dict[str, Any]], dict[str, str
             "corpora": config.get("corpora") or {},
         }
         departments[code] = target
+
+    # 로컬 YAML이 없는 운영 환경에서는 rag-sync에 배포된 맵이 영속 원본이다.
+    # 로컬 항목이 있더라도 배포 맵의 라우팅 필드는 실제 실행값으로 덮어쓴다.
+    for code, config in _deployed_sync_department_map().items():
+        existing = departments.get(code) or {}
+        departments[code] = {
+            "code": code,
+            "name": str(existing.get("name") or config.get("name") or code),
+            "driveIds": _normalise_ids(config.get("driveIds")),
+            "syncFolderIds": _normalise_ids(config.get("syncFolderIds")),
+            "studentFolderIds": _normalise_ids(config.get("studentFolderIds")),
+            "corpora": {
+                "staff": str(config.get("staffCorpus") or ""),
+                "student": str(config.get("studentCorpus") or ""),
+            },
+            "source": "cloud-run-env",
+        }
+
+    drive_owners: dict[str, str] = {}
+    for code, target in departments.items():
         for drive_id in target["driveIds"]:
             drive_owners[drive_id] = code
     return departments, drive_owners
@@ -4978,15 +5666,27 @@ def _run_department_status(
     code: str, offline: bool, cache: _StatusRunCache | None = None
 ) -> dict[str, Any]:
     path = DEPT_DIR / f"{code}.yaml"
-    checks = _local_status(code)
-    if not path.exists() or any(item["status"] == "FAIL" for item in checks):
+    cfg: dict[str, Any] | None = None
+    config_revision: str | None = None
+    if path.exists():
+        checks = _local_status(code)
+        if not any(item["status"] == "FAIL" for item in checks):
+            cfg = _read_yaml(path)
+            config_revision = _config_revision(path)
+    else:
+        try:
+            cfg, config_revision, complete = cloud_department_status_config(code)
+            checks = _cloud_config_status(code, cfg, complete=complete)
+        except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError, yaml.YAMLError) as exc:
+            checks = [_check("LOCAL", "cloud-metadata", "FAIL", str(exc))]
+
+    if cfg is None or any(item["status"] == "FAIL" for item in checks):
         for layer in ("RESOURCE", "DEPLOY", "RUNTIME", "SYNC"):
-            checks.append(_check(layer, "prerequisite", "SKIP", "LOCAL 검사 실패"))
+            checks.append(_check(layer, "prerequisite", "SKIP", "설정 검사 실패"))
     elif offline:
         for layer in ("RESOURCE", "DEPLOY", "RUNTIME", "SYNC"):
             checks.append(_check(layer, "offline", "SKIP", "오프라인 검사"))
     else:
-        cfg = _read_yaml(path)
         common = _common()
         checks.extend(_resource_status(code, cfg, common, cache))
         deploy_checks = _deploy_and_runtime_status(code, common, cfg, cache)
@@ -4997,7 +5697,7 @@ def _run_department_status(
         "code": code,
         "overall": _overall(checks),
         "checkedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "configRevision": _config_revision(path) if path.exists() else None,
+        "configRevision": config_revision,
         "checks": checks,
     }
     _LATEST[code] = result
@@ -6108,10 +6808,10 @@ async def create(request: Request) -> JSONResponse:
 @app.get("/api/v1/departments/{code}/config")
 def get_department_config(code: str) -> JSONResponse:
     try:
-        return JSONResponse(department_public_config(code))
-    except (FileNotFoundError, OSError, TypeError, UnicodeError, yaml.YAMLError):
+        return JSONResponse(department_public_config_any(code))
+    except (FileNotFoundError, OSError, TypeError, UnicodeError, ValueError, yaml.YAMLError) as exc:
         return JSONResponse(
-            {"error": {"code": "NOT_FOUND", "message": "학과 설정을 찾을 수 없습니다."}},
+            {"error": {"code": "NOT_FOUND", "message": str(exc) or "학과 설정을 찾을 수 없습니다."}},
             status_code=404,
         )
 
@@ -6130,8 +6830,8 @@ async def preview_update(code: str, request: Request) -> JSONResponse:
             status_code=400,
         )
     try:
-        current = department_public_config(code)
-    except (FileNotFoundError, OSError, TypeError, UnicodeError, yaml.YAMLError):
+        current = department_public_config_any(code)
+    except (FileNotFoundError, OSError, TypeError, UnicodeError, ValueError, yaml.YAMLError):
         return JSONResponse(
             {"error": {"code": "NOT_FOUND", "message": "학과 설정을 찾을 수 없습니다."}},
             status_code=404,
@@ -6169,8 +6869,8 @@ async def update(code: str, request: Request) -> JSONResponse:
             status_code=400,
         )
     try:
-        current = department_public_config(code)
-    except (FileNotFoundError, OSError, TypeError, UnicodeError, yaml.YAMLError):
+        current = department_public_config_any(code)
+    except (FileNotFoundError, OSError, TypeError, UnicodeError, ValueError, yaml.YAMLError):
         return JSONResponse(
             {"error": {"code": "NOT_FOUND", "message": "학과 설정을 찾을 수 없습니다."}},
             status_code=404,
@@ -6180,7 +6880,7 @@ async def update(code: str, request: Request) -> JSONResponse:
             {
                 "error": {
                     "code": "REVISION_CONFLICT",
-                    "message": "파일이 다른 곳에서 변경되었습니다. 다시 열어 주세요.",
+                    "message": "설정이 다른 곳에서 변경되었습니다. 다시 열어 주세요.",
                 }
             },
             status_code=409,
@@ -6210,6 +6910,41 @@ async def update(code: str, request: Request) -> JSONResponse:
     conflict = _unacked_drive_conflicts(payload, result)
     if conflict:
         return conflict
+    if current.get("source") == "cloud":
+        try:
+            existing, cloud_revision = cloud_department_config(code)
+            if cloud_revision != current["configRevision"]:
+                raise RuntimeError("Cloud 설정이 변경되었습니다. 다시 열어 주세요.")
+            merged = copy.deepcopy(existing)
+            for key in ("name", "corpora", "buckets", "drive", "minInstances"):
+                merged[key] = copy.deepcopy(candidate[key])
+            run = start_mcp_deployment(code, cloud_config=merged)
+        except FileExistsError as exc:
+            return JSONResponse(
+                {
+                    "error": {
+                        "code": "MCP_DEPLOYMENT_RUNNING",
+                        "message": "이 학과의 MCP 배포가 이미 진행 중입니다.",
+                        "runId": str(exc),
+                    }
+                },
+                status_code=409,
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, yaml.YAMLError) as exc:
+            return JSONResponse(
+                {"error": {"code": "CLOUD_UPDATE_FAILED", "message": str(exc)[:400]}},
+                status_code=422,
+            )
+        return JSONResponse(
+            {
+                "code": code,
+                "path": "Cloud Run management metadata",
+                "updated": True,
+                "configRevision": _mapping_revision(merged),
+                "deployment": run,
+            },
+            status_code=202,
+        )
     try:
         target = update_department(
             code, candidate, allow_duplicate_drives=bool(payload.get("allowDuplicateDriveIds"))
@@ -6393,10 +7128,21 @@ async def start_status(request: Request) -> JSONResponse:
     _require_local_session(request)
     payload = await request.json()
     requested = payload.get("departments") if isinstance(payload, dict) else []
-    codes = sorted(str(item) for item in requested) if requested else dept_config.list_departments()
-    known = set(dept_config.list_departments())
-    if not codes or any(code not in known for code in codes):
+    local_codes = set(dept_config.list_departments())
+    if requested:
+        codes = sorted({str(item).strip().lower() for item in requested})
+    else:
+        cloud_codes = {str(item.get("code") or "") for item in cloud_mcp_department_records()}
+        codes = sorted(local_codes | cloud_codes)
+    if not codes or any(not DEPT_CODE_RE.fullmatch(code) for code in codes):
         raise HTTPException(status_code=404, detail="department not found")
+    for code in codes:
+        if code in local_codes:
+            continue
+        try:
+            cloud_department_status_config(code)
+        except (FileNotFoundError, OSError, RuntimeError, TypeError, ValueError, yaml.YAMLError):
+            raise HTTPException(status_code=404, detail="department not found") from None
     offline = bool(payload.get("offline", False))
     with _RUN_LOCK:
         _cleanup_runs()

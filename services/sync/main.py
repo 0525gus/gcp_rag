@@ -12,6 +12,7 @@ Workflows 호출 순서:
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 import re
@@ -30,6 +31,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+# shared 모듈 import
 from shared.config import Settings, UnknownDriveError, get_settings  # noqa: E402
 from shared.drive import DriveClient, parse_drive_size  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
@@ -81,6 +83,35 @@ _SPREADSHEET_COPY_MIMES = frozenset(
         "application/vnd.ms-excel.sheet.macroenabled.12",
     }
 )
+
+
+def _pdf_has_extractable_text(data: bytes) -> tuple[bool, str | None]:
+    """Vertex 기본 파서가 받을 수 있는 텍스트 PDF인지 빠르게 판정한다.
+
+    스캔 이미지뿐인 PDF는 Vertex ``import_files``가 요청 자체는 성공시킨 뒤
+    파일 단위 ``INVALID_ARGUMENT``로 거부한다. 그 상태를 일시 오류처럼
+    재시도하면 같은 배치의 정상 파일까지 계속 지우고 다시 색인한다. 적어도
+    한 페이지에서 텍스트가 나오면 원본을 그대로 보내고, 전 페이지가 비었거나
+    PDF 자체를 읽지 못하면 경로 사이드카만 색인하도록 호출자에게 알린다.
+    """
+    from pypdf import PdfReader  # noqa: PLC0415
+
+    try:
+        reader = PdfReader(io.BytesIO(data))
+    except Exception as exc:  # noqa: BLE001
+        return False, f"PDF_UNREADABLE:{type(exc).__name__}:{exc}"
+
+    extraction_errors = 0
+    for page in reader.pages:
+        try:
+            if (page.extract_text() or "").strip():
+                return True, None
+        except Exception:  # noqa: BLE001
+            extraction_errors += 1
+    reason = "PDF_NO_EXTRACTABLE_TEXT"
+    if extraction_errors:
+        reason += f":extractErrors={extraction_errors}"
+    return False, reason
 
 app = FastAPI(title="Drive Sync Service (GCS-only index)", version="2.0.0")
 
@@ -1588,9 +1619,29 @@ def _ingest_direct(
     audience = _resolve_audience(drive, settings, body)
     data = drive.download_file(body.file_id)
 
+    # Vertex 기본 PDF 파서는 OCR을 하지 않는다. 이미지 스캔본을 원본 URI로
+    # 보내면 파일 단위 INVALID_ARGUMENT가 나고, Cloud Tasks가 같은 배치 전체를
+    # 반복한다. 본문은 넣을 수 없어도 파일명·폴더 경로는 검색할 수 있게 원본만
+    # 제외하고 아래의 사이드카 경로를 그대로 사용한다.
+    index_original = True
+    skip_reason: str | None = None
+    if ext.lower() == ".pdf":
+        index_original, skip_reason = _pdf_has_extractable_text(data)
+        if not index_original:
+            logger.warning(
+                "PDF 본문 추출 불가 %s (%s): %s — 사이드카만 색인한다",
+                body.file_id,
+                name,
+                skip_reason,
+            )
+
     # PDF 는 한도를 넘으면 버리지 말고 페이지 경계로 쪼갠다.
     pdf_parts: list[bytes] | None = None
-    if ext.lower() == ".pdf" and len(data) > _effective_limit(settings, ext):
+    if (
+        index_original
+        and ext.lower() == ".pdf"
+        and len(data) > _effective_limit(settings, ext)
+    ):
         try:
             pdf_parts = split_pdf(data, _effective_limit(settings, ext))
             logger.info(
@@ -1601,7 +1652,7 @@ def _ingest_direct(
             logger.warning("PDF split failed %s: %s", body.file_id, exc)
             pdf_parts = None  # 아래 게이트가 큐로 보낸다
 
-    if pdf_parts is None:
+    if pdf_parts is None and index_original:
         # 스프레드시트 원본은 RAG 로 가지 않는다 — 색인되는 건 변환된 .md 뿐이다.
         # 원본을 RAG 한도로 재면 색인되지도 않을 크기 때문에 문서를 통째로 잃는다.
         # (실측: 27.7MB xlsx 가 여기서 떨어져 사이드카로도 못 찾게 됐다)
@@ -1618,8 +1669,6 @@ def _ingest_direct(
 
     body_text: str | None = None
     # 원본 바이트를 RAG 로 보낼지. 스프레드시트는 변환에 실패하면 보내지 않는다.
-    index_original = True
-    skip_reason: str | None = None
     if mime in _SPREADSHEET_COPY_MIMES:
         try:
             body_text = xlsx_to_markdown(data)
@@ -3058,17 +3107,18 @@ def delete_file(body: DeleteBody) -> dict[str, Any]:
         settings = _settings_for_drive(settings, drive_id)
     gcs = GcsClient(settings)
 
-    ok = RagEngineClient(settings).delete_by_file_id(body.file_id)
-    # 학생 코퍼스에서도 반드시 빼야 한다. 여기를 빠뜨리면 Drive 에서 지운 문서가
-    # 학생에게만 계속 검색되는, 가장 알아채기 어려운 형태의 잔존이 된다.
-    if settings.audience_split_enabled:
-        try:
+    try:
+        ok = RagEngineClient(settings).delete_by_file_id(body.file_id)
+        # 학생 코퍼스에서도 반드시 빼야 한다. 여기를 빠뜨리면 Drive 에서 지운 문서가
+        # 학생에게만 계속 검색되는, 가장 알아채기 어려운 형태의 잔존이 된다.
+        if settings.audience_split_enabled:
             RagEngineClient(
                 settings, corpus_name=settings.rag_corpus_name_student
             ).delete_by_file_id(body.file_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("학생 코퍼스 삭제 실패 fileId=%s", body.file_id)
-            raise
+    except RagImportThrottledError as exc:
+        # 쿼터 문제를 500으로 위장하면 Workflow가 일반 서버 오류로 보고 즉시
+        # 재시도해 같은 분당 창을 더 두드린다. 429로 보존해 backoff 의미를 살린다.
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
 
     # RAG import 산출물 + raw 원본을 prefix 로 훑어 지운다.
     #

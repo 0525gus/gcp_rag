@@ -46,6 +46,8 @@ test("ships the finished Korean console without starter artifacts", async () => 
   assert.match(js, /\/api\/v1\/mcp-deployments/);
   assert.match(js, /\/api\/v1\/cloud-mcp-services/);
   assert.match(js, /CLOUD METADATA/);
+  assert.match(js, /editingSource/);
+  assert.match(js, /Cloud 설정 배포를 시작했습니다/);
   assert.match(css, /\.cloud-only-mark/);
   assert.match(js, /data-deploy-mcp/);
   assert.match(html, /id="drivePreflightStatus"/);

@@ -357,6 +357,34 @@ def test_delete_file_also_clears_the_raw_original(monkeypatch) -> None:
     assert "abc123.hwp" in backend.deleted
 
 
+def test_delete_preserves_vertex_quota_as_http_429(monkeypatch) -> None:
+    import pytest
+
+    class Store:
+        pass
+
+    class ThrottledRag:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def delete_by_file_id(self, _file_id: str) -> bool:
+            raise rag_engine.RagImportThrottledError("quota")
+
+    settings = type(
+        "SettingsStub",
+        (),
+        {"departments": (), "audience_split_enabled": False},
+    )()
+    monkeypatch.setattr(sync_main, "DocStateStore", Store)
+    monkeypatch.setattr(sync_main, "get_settings", lambda: settings)
+    monkeypatch.setattr(sync_main, "GcsClient", lambda _settings: object())
+    monkeypatch.setattr(sync_main, "RagEngineClient", ThrottledRag)
+
+    with pytest.raises(sync_main.HTTPException) as caught:
+        sync_main.delete_file(sync_main.DeleteBody(fileId="abc123"))
+    assert caught.value.status_code == 429
+
+
 # ------------------------------------------------------------- 빈 fileId
 def test_ingest_rejects_blank_file_id() -> None:
     """빈 fileId 는 400 이어야 한다 — Firestore 경로가 `doc_state/` 가 되어 500 났다."""
@@ -439,9 +467,10 @@ def test_workflow_runs_explicit_recovery_after_all_drives() -> None:
     assert names.index("for_each_drive") < names.index("check_recovery_enabled")
     gate = next(step["check_recovery_enabled"] for step in data["main"]["steps"] if "check_recovery_enabled" in step)
     assert gate["switch"][0]["condition"] == "${run_recovery == false}"
-    assert gate["switch"][0]["next"] == "return_summary"
+    assert gate["switch"][0]["next"] == "finalize_summary"
     assert names.index("recover_pending_index") < names.index("recover_failed")
-    assert names.index("recover_failed") < names.index("return_summary")
+    assert names.index("recover_failed") < names.index("finalize_summary")
+    assert names.index("finalize_summary") < names.index("return_summary")
 
 
 def test_workflow_recovery_calls_both_endpoints() -> None:
@@ -476,21 +505,37 @@ def test_throttle_retry_unwraps_runtime_error_args(monkeypatch) -> None:
     assert len(calls) == 2
 
 
-def test_list_files_retries_lazy_pager_iteration(monkeypatch) -> None:
+def test_list_files_retries_current_page_without_restarting(monkeypatch) -> None:
     from google.api_core import exceptions as gcp_exceptions
 
-    calls = 0
+    calls: list[str | None] = []
 
-    def lazy_list_files(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            def failed_page():
-                raise gcp_exceptions.ResourceExhausted("quota")
-                yield None
+    class Page:
+        def __init__(self, files, next_token: str) -> None:
+            self.rag_files = files
+            self.next_page_token = next_token
 
-            return failed_page()
-        return iter(["rag-file"])
+    class Pager:
+        def __init__(self, page: Page) -> None:
+            self.pages = iter([page])
+
+    def lazy_list_files(*_args, page_size=None, page_token=None, **_kwargs):
+        assert page_size == 100
+        calls.append(page_token)
+        if page_token is None:
+            return Pager(Page(["first-page"], "page-2"))
+        if calls.count("page-2") == 1:
+            class FailedPager:
+                @property
+                def pages(self):
+                    def failed_page():
+                        raise gcp_exceptions.ResourceExhausted("quota")
+                        yield None
+
+                    return failed_page()
+
+            return FailedPager()
+        return Pager(Page(["second-page"], ""))
 
     monkeypatch.setattr(rag_engine.rag, "list_files", lazy_list_files)
     monkeypatch.setattr(rag_engine.time, "sleep", lambda _seconds: None)
@@ -498,8 +543,10 @@ def test_list_files_retries_lazy_pager_iteration(monkeypatch) -> None:
     client = object.__new__(rag_engine.RagEngineClient)
     client.corpus_name = "corpus/test"
 
-    assert client.list_files() == ["rag-file"]
-    assert calls == 2
+    assert client.list_files() == ["first-page", "second-page"]
+    # 두 번째 페이지의 429만 재시도한다. 첫 페이지로 돌아가면 대형 코퍼스는
+    # 매번 같은 지점에서 쿼터를 소진해 절대 완주하지 못한다.
+    assert calls == [None, "page-2", "page-2"]
 
 
 def test_import_retries_on_corpus_busy(monkeypatch) -> None:

@@ -1,4 +1,4 @@
-# Cloud Run / Workflows / Scheduler 배포
+﻿# Cloud Run / Workflows / Scheduler 배포
 # 사용: .\scripts\deploy.ps1
 #       .\scripts\deploy.ps1 -SkipMcp       parser/sync/Workflows/Scheduler 만
 #       .\scripts\deploy.ps1 -ShowKeys      MCP 요약표에 키 노출
@@ -102,7 +102,7 @@ $PARSER_MAX_INSTANCES = Get-EnvOr PARSER_MAX_INSTANCES "10"
 $SYNC_CONCURRENCY = Get-EnvOr SYNC_CONCURRENCY "4"
 # MCP 공개 여부. deploy_mcp.ps1 이 같은 스위치를 본다 — 아래 안내문에만 쓴다.
 # 기본 true: FactChat 커넥터가 정적 헤더만 보내므로 Cloud Run IAM 을 열어야 한다.
-# 경계는 앱 계층 키(MCP_API_KEY)뿐이다 — 키가 새면 코퍼스 전량이 열린다.
+# 경계는 앱 계층 키(MCP_API_KEY)뿐이다 - 키가 새면 코퍼스 전량이 열린다.
 $ALLOW_UNAUTH = Get-EnvOr ALLOW_UNAUTH "true"
 $INGEST_CONC = Get-EnvOr INGEST_CONCURRENCY "8"
 $RAG_DEL_PACE = Get-EnvOr RAG_DELETE_PACING_SECONDS "1.1"
@@ -362,7 +362,7 @@ if ($SkipMcp) {
   Write-Host "MCP 는 건너뛰었다 (-SkipMcp). 올리려면: .\scripts\deploy_mcp.ps1 -All"
 } elseif ($ALLOW_UNAUTH -eq "true") {
   Write-Host "MCP 는 공개(--allow-unauthenticated). 경계는 API 키뿐이다."
-  Write-Host "FactChat 커넥터: {URL}/mcp · Streamable HTTP · Authorization: Bearer {키}"
+  Write-Host "FactChat 커넥터: {URL}/mcp / Streamable HTTP / Authorization: Bearer {키}"
 } else {
   Write-Host "MCP 는 IAM 전용(ALLOW_UNAUTH=$ALLOW_UNAUTH). FactChat 은 붙지 못한다."
 }

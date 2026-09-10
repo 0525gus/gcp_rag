@@ -1,608 +1,497 @@
-# 문서 검색(RAG) 시스템 개발명세
+# 문서 검색(RAG) 시스템 개발 명세
 
-- 작성: 2026. 7. 28. / 개정: 2026. 8. 26.
-- 대상: 한국공학대학교 문서 검색 파이프라인 (Drive → GCS → Vertex RAG → FactChat)
-- 규모·품질 수치는 2026. 7. 28. 운영 실측. 아키텍처는 현행 코드 기준
+- 최종 개정: 2026-09-01
+- 대상: 한국공학대학교 학과별 문서 검색 파이프라인
+- 기준: 현재 저장소 코드와 운영 설정
 
-## 목차
+이 문서는 시스템이 **현재 어떻게 동작하는지**를 설명한다. 과거 실측값은 기준일을
+명시한 참고 자료이며, 현재 운영 건수나 성능 보장을 뜻하지 않는다.
 
-- [Ⅰ. 개요](#ⅰ-개요)
-- [Ⅱ. 시스템 구성](#ⅱ-시스템-구성)
-- [Ⅲ. 처리 명세](#ⅲ-처리-명세)
-- [Ⅳ. 검색 품질 실측](#ⅳ-검색-품질-실측-2026-7-28-단일-코퍼스)
-- [Ⅴ. 운영](#ⅴ-운영)
-- [Ⅵ. 제약·과제](#ⅵ-제약과제)
-- [부록. 평가 재현](#부록-평가-재현)
+## 1. 목적과 범위
 
----
+Google Drive의 학과 문서를 수집·변환하여 Vertex AI RAG Engine에 색인하고,
+FactChat이 MCP를 통해 문서를 검색할 수 있게 한다.
 
-## Ⅰ. 개요
+포함 범위:
 
-### 1. 목적
+- 공유 Drive 변경분 조회 및 전체 백필
+- HWP/HWPX md변환 및 문서의 GCS 적재
+- 학과별 교직원·학생 코퍼스 분리 
+- Cloud Tasks 기반 코퍼스별 비동기 색인과 재시도
+- Firestore 기반 문서 상태, 실행 상태, Drive file ID ↔ RagFile 매핑
+- 벡터 검색, 어휘 재정렬, 문서·청크 단위 후처리
+- MCP의 `search`, `answer` 도구
+- 학과 설정과 운영 상태를 확인하는 로컬 관리 콘솔
 
-- 교내 공문·규정·양식을 자연어로 검색하고 근거 문서와 함께 반환
-- FactChat이 MCP로 호출하는 검색 도구 제공
-- 답변 생성은 호출 측 LLM. 본 시스템은 근거 검색·출처 제공
+제외 범위:
 
-### 2. 범위
+- 최종 답변 문장 생성: Fact Chat의 LLM을 사용, RAG서버만 운용.
+- 문서별 ACL: 현재 경계는 Drive 폴더 - 교직원·학생 코퍼스로 나뉨
+- ZIP 내부 문서 자동 해제
+- 스캔 문서 OCR (구글 DocAI Fallback 필요) 
 
-- 포함
-  - Drive 공유드라이브 수집·변환·색인
-  - HWP/HWPX → 마크다운
-  - 단일 코퍼스 또는 학생/교직원 코퍼스 분리 (Drive 경로 기준)
-  - 벡터 검색 및 후처리
-  - MCP 연동 (조직당 기본 1개, 학생 분리 시 2개)
-  - 학과별 YAML 생성·수정과 GCP 리소스 상태 확인용 로컬 관리 콘솔
-- 제외
-  - 답변 문장 생성
-  - 문서 단위 ACL (부서·기밀등급). 분리는 폴더 트리 + 코퍼스 2개까지
+## 2. 현재 아키텍처
 
-### 3. 현행 규모 (2026. 7. 28.)
-
-| 구분 | 수량 |
-|---|---:|
-| 색인 문서 | 1,211건 |
-| 색인 객체(URI) | 1,418건 |
-| 범위 외 제외 | 394건 |
-| 원본 저장 | hwp-original 271MB / source 530MB |
-
----
-
-## Ⅱ. 시스템 구성
-
-### 1. 전체 구조
-
-`rag-parser`, `rag-sync`, Firestore는 공통 실행 환경을 사용한다. Drive 수집 범위,
-GCS 버킷 2개와 기본 RAG 코퍼스·MCP 서비스는 학과별로 분리한다. 학생 분리 모드는
-학생 코퍼스·MCP를 각각 하나씩 추가한다.
-`rag-sync`는 `DEPARTMENTS_JSON`의 Drive ID → 학과 매핑으로 요청을 해당 학과
-리소스에 라우팅한다.
-
-```
-학과별 Google Drive
-  driveIds / syncFolderIds / studentFolderIds
-      │
-      ▼
- 공통 rag-sync ───── HWP/HWPX ─────▶ 공통 rag-parser
-      │
-      ├─ 학과별 GCS hwp-original / source (객체 키 = fileId)
-      ├─ 공통 Firestore DB (`FIRESTORE_DATABASE`, 현행 rag-sync-state)
-      │     doc_state.audience = STUDENT | STAFF
-      ▼
-      ├─ 학과별 교직원 코퍼스  ← 해당 학과 전량
-      └─ 학과별 학생 코퍼스    ← audience=STUDENT 만
-             ▲                         ▲
-             │                         │
- rag-mcp-{dept}-staff      rag-mcp-{dept}-student
-             │                         │
-          FactChat                  FactChat
+```mermaid
+flowchart LR
+    SCH[Cloud Scheduler] --> WF[Cloud Workflows\nrag-daily-sync]
+    WF --> SYNC[Cloud Run\nrag-sync]
+    DRIVE[학과별 Google Drive] <--> SYNC
+    SYNC --> PARSER[Cloud Run\nrag-parser]
+    SYNC --> GCS[학과별 GCS\nhwp-original / source]
+    SYNC <--> FS[(Firestore\nrag-sync-state)]
+    SYNC --> QF[Cloud Tasks\nfaculty-rag-sync-queue]
+    SYNC --> QS[Cloud Tasks\nstudent-rag-sync-queue]
+    QF --> SYNC
+    QS --> SYNC
+    SYNC --> RF[학과별 교직원 RAG 코퍼스]
+    SYNC --> RS[학과별 학생 RAG 코퍼스]
+    RF --> MF["rag-mcp-{dept}-staff"]
+    RS --> MS["rag-mcp-{dept}-student"]
+    MF --> FC[FactChat]
+    MS --> FC
 ```
 
-포함 관계: 교직원 코퍼스 ⊇ 학생 코퍼스.
+구성 원칙:
 
-### 2. 구성요소
+- `rag-sync`, `rag-parser`, Workflow, Scheduler, Firestore, metadata 버킷과
+  Cloud Tasks 큐는 공용이다.
+- Drive 범위, GCS 버킷, RAG 코퍼스와 MCP 서비스는 학과별로 분리한다.
+- `DEPARTMENTS_JSON`이 Drive ID를 학과 설정으로 라우팅한다. 등록되지 않은
+  Drive를 기본 학과로 보내지 않고 실패시켜 자료 혼입을 막는다.
+- 교직원 코퍼스는 해당 학과의 동기화 대상 전체를 담는다.
+- 학생 코퍼스는 `studentFolderIds` 아래 문서만 담는다.
+- 따라서 정상 상태에서는 `교직원 코퍼스 ⊇ 학생 코퍼스`다.
+- RAG 입력은 항상 GCS URI다. Drive 커넥터를 직접 사용하지 않는다.
 
-#### 가. rag-sync
+### 주요 런타임
 
-- Drive 변경 감지 → 다운로드 → 변환 위임 → GCS 적재 → RAG 색인
-- 전 학과 설정을 비밀값이 없는 `DEPARTMENTS_JSON`으로 받아 Drive ID별 학과를 결정
-- 공유드라이브 ID는 학과 간 중복 불가. 중복이면 배포 전 설정 검증에서 실패
-- CPU 2 / MEM 2Gi / timeout 3600s / concurrency 4 (`SYNC_CONCURRENCY`)
-- 엔드포인트
+| 구성요소 | 현재 배포값 | 역할 |
+|---|---|---|
+| `rag-sync` | 2 CPU, 2GiB, timeout 3600초, concurrency 4 | 변경 조회, 변환 조정, 상태 관리, 색인 작업 처리 |
+| `rag-parser` | 2 CPU, 2GiB, timeout 540초, concurrency 4, max instances 10 | HWP/HWPX → Markdown |
+| `rag-mcp-{dept}-{audience}` | 1 CPU, 1GiB, timeout 60초, concurrency 40 | 코퍼스 검색을 MCP로 제공 |
+| faculty/student 큐 | 큐별 concurrency 1, 0.2 dispatch/s | 동일 코퍼스 요청 직렬화와 재시도 |
 
-| 경로 | 기능 |
+모든 Cloud Tasks 요청은 OIDC로 `rag-sync`의 내부 worker를 호출한다. 두 큐는
+서로 다른 코퍼스를 담당하므로 병렬로 동작할 수 있지만, 같은 코퍼스 안에서는
+동시에 import/delete하지 않는다.
+
+## 3. 데이터와 상태
+
+### 3.1 GCS
+
+| 저장소 | 내용 |
 |---|---|
-| `POST /sync/changes` | Drive 델타, MIME 라우팅 |
-| `POST /sync/ingest` | Drive → GCS. `audience` 기록 |
-| `POST /sync/index-gcs` | GCS → 교직원 코퍼스 import 후 학생 코퍼스 동기화 |
-| `POST /sync/reindex-pending` | 누락분 또는 전량 재색인 |
-| `POST /sync/delete` | 양쪽 코퍼스 + GCS 정리 |
-| `GET /sync/jobs/{id}` | 장시간 작업 진행률 |
+| 학과별 `hwp-original` 버킷 | HWP/HWPX 원본. 파싱·재파싱에 사용 |
+| 학과별 `source` 버킷 | RAG에 전달할 Markdown, 원본 통과 문서, 경로 sidecar |
+| 공용 `RAG_METADATA_BUCKET` | Vertex import 결과 NDJSON. 30일 후 자동 삭제 |
 
-- IAM만 허용 (공개 아님)
-- `corpora.staff`는 항상 필요하다. 학생 분리는 `corpora.student`,
-  `drive.studentFolderIds`, `keys.student`가 모두 있을 때만 활성화한다
+주요 객체 키는 Drive `fileId`를 기준으로 만든다.
 
-#### 나. rag-parser
-
-- HWP/HWPX → 마크다운, 품질 게이트
-- CPU 2 / MEM 2Gi / timeout 540s (`PARSER_TIMEOUT`) / concurrency 4 (`PARSER_CONCURRENCY`) / max 10 인스턴스
-  - sync 의 httpx 타임아웃 600s 보다 짧아야 한다 — 서버가 먼저 포기해야 sync 가 오류를 받는다
-- 엔진: `.hwp` = rhwp, `.hwpx` = python-hwpx (부재 시 rhwp)
-- 게이트: `log` / `reject` / `fallback`
-  - 실제 발동은 G1 밀도, G2 표 손실, EMPTY_TEXT
-  - 기본 `QG_MODE=log` — 미달이어도 색인 계속, 로그만
-  - EMPTY_TEXT만 모드와 무관하게 422
-- rag-sync 서비스계정만 호출
-
-#### 다. rag-mcp-{dept}-staff / rag-mcp-{dept}-student
-
-- MCP 도구 `search`, `answer`
-- CPU 1 / MEM 1Gi / timeout 60s / concurrency 40 (`MCP_CONCURRENCY`)
-- 기동 시 코퍼스 하나. 툴 인자로 대상을 고르지 않음
-- API 키 (`Authorization: Bearer` 또는 `X-API-Key`). 서비스마다 키를 다르게 둠
-- 배포: `deploy.ps1` 이 전 학과 x 교직원·학생을 올린다(`deploy_mcp.ps1 -All` 에 위임).
-  공개 여부는 `ALLOW_UNAUTH` (기본 `true` = 공개)
-- `scripts/deploy_mcp.ps1` 은 MCP 만 재배포할 때
-- 학생 MCP 는 학과 yaml 에 `corpora.student` + `drive.studentFolderIds` 가 둘 다 있을 때만 의미가 있다
-- 서비스 이름은 규칙으로 만든다: `rag-mcp-{학과}-{staff|student}` (저장하지 않음)
-
+```text
+gs://{hwp-original}/{fileId}.hwp
+gs://{hwp-original}/{fileId}.hwpx
+gs://{source}/{fileId}.md
+gs://{source}/{fileId}.meta.md
+gs://{source}/{fileId}.{pdf|docx|pptx|...}
 ```
-.\scripts\deploy_mcp.ps1 -Dept cs -Audience student
+
+`source` 객체에는 파일명·Drive 경로 등 검색 결과 복원에 필요한 메타데이터를
+기록한다. 학과 격리는 객체 경로가 아니라 버킷으로 수행한다.
+
+### 3.2 Firestore
+
+데이터베이스는 Native mode의 `rag-sync-state`다.
+
+| 경로 | 용도 |
+|---|---|
+| `doc_state/{driveFileId}` | 파일명, Drive, MIME, 해시, 경로, audience, 처리 상태, source URI |
+| `doc_state/{driveFileId}/rag_files/{mappingId}` | 코퍼스별 Vertex RagFile resource 매핑 |
+| `sync_tokens/{driveId}` | 마지막으로 확정한 Drive pageToken |
+| `sync_jobs/{jobId}` | 백필·복구·비동기 색인 작업 상태 |
+| `sync_jobs/{jobId}/parts/{faculty|student}` | 코퍼스별 작업 상태와 결과 |
+| `doc_dlq/*` | 사람이 확인해야 하는 처리 실패 |
+| `doc_split_queue/*` | 자동 처리하지 못한 크기 초과 문서 |
+
+문서 상태:
+
+| 상태 | 의미 |
+|---|---|
+| `PENDING` | 처리 전 또는 안전한 재처리가 필요함 |
+| `PARSED` | GCS 준비 완료, 필요한 모든 코퍼스 색인 전 |
+| `INDEXED` | 필요한 모든 코퍼스 작업이 성공함 |
+| `FAILED` | 처리 실패, 재시도 또는 확인 필요 |
+| `DELETED` | 삭제 경로가 실행되어 상태에 기록됨. 후속 GCS 정리 실패 시 실행은 실패로 반환되어 재시도됨 |
+| `SKIPPED` | 동기화 대상이지만 처리할 수 없는 형식/상태 |
+| `EXCLUDED` | 지정한 동기화 폴더 밖이어서 대상이 아님 |
+
+`audience`는 `STUDENT` 또는 `STAFF`다. 값이 없거나 판정에 실패하면
+`STAFF`로 처리하여 학생 코퍼스로 잘못 공개되는 것을 막는다.
+
+### 3.3 RagFile 매핑
+
+Drive 파일 하나는 여러 GCS 객체를 만들 수 있고, 두 코퍼스에 동시에 존재할 수
+있다. 따라서 단일 `ragFileId` 필드가 아니라 다음 1:N 매핑을 사용한다.
+
+```text
+doc_state/{driveFileId}/rag_files/{mappingId}
+  corpusType       FACULTY | STUDENT
+  corpusName       projects/.../ragCorpora/...
+  ragFileName      projects/.../ragFiles/...
+  gcsUri           gs://...
+  generation       현재 import 세대
+  status           ACTIVE
+  importResultSink gs://{metadata-bucket}/...
+  updatedAt        Timestamp
+```
+
+정상 import 후 Vertex의 import result를 읽어 매핑을 교체한다. 같은 파일·코퍼스의
+이전 세대 매핑은 한 배치에서 제거되므로 독자는 반쪽짜리 세대를 보지 않는다.
+운영 플래그는 현재 write/read/fallback scan이 모두 켜져 있다.
+
+## 4. 변경분 동기화
+
+### 4.1 처리 순서
+
+Scheduler가 매일 00:00 KST에 Workflow를 실행한다. 수동 실행도 같은 Workflow를
+사용한다.
+
+1. `/sync/changes`가 현재 커밋된 pageToken부터 Drive 변경을 읽는다.
+2. 지정 폴더 밖 항목은 `EXCLUDED`, 폴더 자체는 처리 대상에서 제외한다.
+3. 삭제는 `/sync/delete`, 나머지는 `/sync/ingest`로 처리한다.
+4. ingest가 `GCS_READY`로 반환한 URI만 모은다.
+5. `/sync/index-gcs-async`로 교직원·학생 색인 작업을 큐에 넣는다.
+6. Workflow가 `/sync/index-jobs/{jobId}`를 5초 간격으로 조회한다.
+7. 모든 필수 part가 끝나면 `/sync/reconcile`로 집계 정합성을 확인한다.
+8. 처리·색인·정합성이 모두 성공한 경우에만 `/sync/commit-token`을 호출한다.
+
+`/sync/changes`는 다음 pageToken 후보를 반환할 뿐 즉시 저장하지 않는다. 따라서
+중간에 실패하면 이전 토큰이 유지되고 다음 실행이 같은 변경을 다시 회수한다.
+
+커밋 조건은 다음과 같다.
+
+```text
+pending pageToken 존재
+AND 처리 실패 = 0
+AND 색인 실패 = 0
+AND 실제 색인 수 = 요청 URI 수
+AND reconcile 성공
+```
+
+`DLQ`와 `SPLIT_QUEUED`는 이미 별도 대기열로 분류한 항목이므로 `parked`로 집계하며
+pageToken 커밋을 막지 않는다. 그렇지 않으면 같은 변경 페이지가 영구 반복된다.
+
+### 4.2 화면 집계 의미
+
+| 항목 | 의미 |
+|---|---|
+| 변경 감지 | `/sync/changes`가 반환한 파일 변경 중 `UNCHANGED`를 뺀 수. 범위 밖 이동(`EXCLUDED`)은 포함 |
+| GCS 업로드 | 이번 실행에서 `GCS_READY`가 된 Drive 파일 수 |
+| 색인 | 교직원 코퍼스에서 실제 import 성공한 URI 수 |
+| 실패 | ingest/delete 등 파일 처리 실패 수 |
+| 색인 실패 | 별도 내부 집계. 실패 시 pageToken을 커밋하지 않음 |
+
+파일 처리 내역 UI는 파일만 표시한다. Drive 폴더의 “건너뜀” 카드는 표시하지
+않는다. 해시가 같아 실제 처리할 일이 없는 `UNCHANGED`/`HASH_UNCHANGED` 항목도
+일반 파일 내역에서 숨긴다.
+
+### 4.3 전체 백필과 복구
+
+- 전체 백필은 Drive 대상 범위를 다시 열거해 ingest한다.
+- `reindex-pending`은 `PARSED` 등 미색인 문서를 회수한다.
+- `retry-failed`는 실패/DLQ 문서를 다시 ingest한다.
+- 일반 변경분 실행은 전역 backlog 복구를 자동으로 섞지 않는다. 복구가 필요한
+  경우 Workflow의 `runRecovery=true` 또는 전용 API로 명시한다.
+- Vertex import 1회 최대 URI 수는 25개다. 복구 기본 배치는 파일 하나가 본문과
+  sidecar 2개를 만들 수 있음을 고려해 24개로 둔다.
+
+## 5. 수집과 변환
+
+### 5.1 MIME 라우팅
+
+| 입력 | 처리 | RAG 입력 |
+|---|---|---|
+| HWP | `rhwp`로 Markdown 변환 | `{fileId}.md` |
+| HWPX | `python-hwpx` 우선, 필요 시 HWP 계열 fallback | `{fileId}.md` |
+| Google Docs | DOCX export | DOCX |
+| Google Slides | PPTX export | PPTX |
+| Google Sheets | XLSX export 후 Markdown 표 변환 | Markdown |
+| XLSX/XLSM | 셀을 Markdown 표로 변환 | Markdown |
+| PDF | 한도 이하면 원본, 초과 시 분할 가능 | PDF 또는 분할 PDF |
+| DOC/DOCX/PPTX/TXT/MD/HTML/CSV/RTF | Drive에서 GCS로 직접 복사 | 원본 형식 |
+| ZIP, 구형 XLS | 원본은 색인하지 않고 경로 sidecar만 생성 | `.meta.md` |
+| 그 밖의 미지원 MIME | `SKIPPED` | 없음 |
+| Drive 폴더 | 처리·파일 내역 표시 대상에서 제외 | 없음 |
+
+XLSX/XLSM은 Vertex에 원본을 직접 넣지 않는다. 셀을 Markdown으로 변환한 뒤
+색인한다. 과거 XLSX 색인 오류는 포맷 미지원이 아니라 API 요청 배열이 중첩되어
+FastAPI가 문자열 대신 배열을 받은 422 오류였으며, 현재 Workflow는 URI와 fileId를
+평탄한 문자열 배열로 전달한다.
+
+ZIP과 구형 `.xls`는 본문을 파싱하지 못하므로 파일명·Drive 경로의 존재만 검색할
+수 있게 sidecar를 만든다. 원본을 Vertex에 보내 반복 실패시키지 않는다.
+
+### 5.2 해시와 변경 없음
+
+ingest는 최종 산출물과 검색에 영향을 주는 경로 정보를 포함해 해시를 계산한다.
+기존 상태가 `INDEXED`이고 해시가 같으면 `HASH_UNCHANGED`로 종료하고 modified time과
+audience만 갱신한다. 이 경우 새 GCS URI를 색인 큐에 보내지 않는다.
+
+현재 주의점: 내용이 같고 학생/교직원 폴더 사이만 이동한 경우 Firestore의
+`audience`는 바뀌지만 새 URI가 없어서 학생 코퍼스 동기화 worker가 호출되지 않는다.
+따라서 코퍼스 소속은 다음 실제 재색인 또는 전체 재색인 전까지 이전 상태로 남을 수
+있다. 이는 현재 구현 제약이며 별도 audience-only 작업이 필요하다.
+
+### 5.3 크기 제한과 품질 게이트
+
+- Vertex 입력 한도: PDF/DOCX 50MiB, 그 밖의 형식 기본 10MiB
+- sync 다운로드 메모리 상한: `MAX_GCS_BYTES`, 현재 기본 150MiB
+- XLSX 변환 자체 제한: 8MiB, 300,000 cells
+- 큰 PDF는 가능한 경우 페이지 단위로 분할한다.
+- 자동 분할할 수 없는 초과 문서는 `doc_split_queue`로 보낸다.
+
+HWP 품질 게이트는 텍스트 밀도, 표 손실, 빈 본문을 검사한다. `QG_MODE`는
+`log`, `reject`, `fallback`을 지원하며 현재 `log`다. 빈 본문은 모드와 관계없이
+실패한다. Document AI fallback은 별도 설정을 켜야 한다.
+
+## 6. 색인과 삭제
+
+### 6.1 비동기 코퍼스별 색인
+
+`/sync/index-gcs-async`는 `sync_jobs/{jobId}`와 part 문서를 만든 후 다음 작업을
+독립 큐에 등록한다.
+
+| part | 큐 | 동작 |
+|---|---|---|
+| `faculty` | `faculty-rag-sync-queue` | 기존 RagFile 삭제 → 전체 URI import → 매핑 기록 |
+| `student` | `student-rag-sync-queue` | 관련 fileId를 학생 코퍼스에서 먼저 삭제 → `audience=STUDENT` URI만 import → 매핑 기록 |
+
+part 상태는 `QUEUED → RUNNING → DONE`이며 예외가 나면 `RETRYING`으로 기록하고
+non-2xx를 반환하여 Cloud Tasks가 재시도하게 한다. 이미 `DONE`인 part가 다시
+호출되면 성공으로 응답하는 멱등 경로가 있다.
+
+현재 큐 재시도 정책:
+
+- 최대 5회, 최대 재시도 기간 900초
+- 최소 backoff 2초, 최대 60초, 최대 doubling 5
+- queue dispatch 0.2/s, 동시 실행 1
+- job deadline 900초
+
+한 part가 429 또는 일시적 5xx로 실패해도 성공한 다른 코퍼스 part를 되돌리지
+않는다. 두 필수 part가 모두 `DONE`일 때만 파일 상태를 `INDEXED`로 올린다.
+부분 import는 성공으로 확정하지 않고 `PARSED`에 남겨 자동 회수 경로를 보존한다.
+
+`POST /sync/index-gcs` 동기 API는 호환성과 수동 복구를 위해 유지하지만, 현재
+Workflow의 정상 변경분 경로는 비동기 API를 사용한다.
+
+### 6.2 삭제
+
+삭제 요청은 다음 순서로 처리한다.
+
+1. Firestore의 `rag_files` 매핑을 Drive fileId로 조회한다.
+2. 매핑의 정확한 `ragFileName`으로 해당 코퍼스에서 직접 삭제한다.
+3. 매핑이 없거나 조회가 실패하고 fallback이 켜져 있으면 코퍼스를 순회해 찾는다.
+4. 교직원·학생 코퍼스, 학과별 GCS 객체, Firestore 상태와 매핑을 정리한다.
+
+매핑이 정상인 경우 코퍼스 전체 `ListRagFiles`가 필요 없어 삭제 조회가 O(1)에
+가깝다. fallback scan은 기존 자료나 매핑 누락을 안전하게 처리하기 위한 경로다.
+기존 코퍼스에는 `/sync/backfill-rag-mappings`를 dry-run 후 적용하여 매핑을 채운다.
+
+## 7. 검색
+
+MCP 서비스 하나는 배포 시 정해진 코퍼스 하나만 조회한다. 요청자가 도구 인자로
+교직원·학생 코퍼스를 바꾸지 못한다.
+
+검색 순서:
+
+1. 요청 `top_k`를 1~20으로 제한한다. 기본값은 5다.
+2. 후보 청크를 `min(60, max(top_k × 3, top_k))`개 가져온다.
+3. 벡터 거리 0.30을 초과한 후보를 제거한다.
+4. 남은 후보에서 BM25 순위와 벡터 순위를 RRF로 결합해 재정렬한다.
+5. `doc_state`가 `INDEXED`가 아닌 문서와 대상 코퍼스에 맞지 않는 문서를 제거한다.
+6. 파일별 최대 3청크, 전체 최대 15청크로 병합한다.
+7. 파일명, Drive 링크, 수정 시각과 함께 반환한다.
+
+RAG 청킹 기본값은 chunk size 1024, overlap 256이다. `answer` 도구는 검색 결과를
+답변 생성용 payload로 정리할 뿐 자체 LLM 답변을 만들지 않는다.
+
+## 8. API 계약
+
+### `rag-sync`
+
+| 메서드·경로 | 용도 | 호출 주체 |
+|---|---|---|
+| `GET /health` | 상태 확인 | 운영 도구 |
+| `POST /sync/bootstrap` | 최초 Drive token 기준점 생성 | 운영자 |
+| `POST /sync/backfill`, `/sync/backfill-run` | 전체 수집 준비·실행 | Workflow/운영자 |
+| `POST /sync/changes` | 변경 목록과 다음 token 후보 조회 | Workflow |
+| `POST /sync/ingest` | 파일 변환·GCS 적재 | Workflow |
+| `POST /sync/delete` | RAG/GCS/상태 삭제 | Workflow |
+| `POST /sync/index-gcs-async` | 코퍼스별 색인 job/Task 생성 | Workflow |
+| `POST /sync/index-gcs-task` | 큐 worker | Cloud Tasks |
+| `GET /sync/index-jobs/{jobId}` | 비동기 색인 상태 | Workflow/UI |
+| `POST /sync/reconcile` | 페이지 집계 정합성 검사 | Workflow |
+| `POST /sync/commit-token` | 검증된 Drive token 확정 | Workflow |
+| `POST /sync/reindex-pending` | 미색인 문서 복구 | 운영자/복구 실행 |
+| `POST /sync/retry-failed` | 실패 문서 재처리 | 운영자/복구 실행 |
+| `POST /sync/backfill-rag-mappings` | 기존 RagFile 매핑 생성 | 운영자 |
+| `GET /sync/jobs/{jobId}` | 장시간 작업 진행률 | UI/운영자 |
+| `POST /sync/index-gcs` | 동기 색인 호환 경로 | 운영자/구 경로 |
+| `POST /sync/process` | 파일 단건 통합 처리 | 운영 도구 |
+
+`rag-sync`와 `rag-parser`는 IAM 인증이 필요하다. 내부 endpoint를 공개하지 않는다.
+
+### `rag-parser`
+
+| 메서드·경로 | 용도 |
+|---|---|
+| `GET /health` | 상태 확인 |
+| `POST /parse` | HWP/HWPX 파싱과 품질 검사 |
+
+### MCP
+
+| 도구 | 용도 |
+|---|---|
+| `search(query, top_k?)` | 근거 문서와 청크 검색 |
+| `answer(query, top_k?)` | 답변 생성기가 사용할 검색 payload 반환 |
+
+MCP는 FactChat 연결을 위해 기본적으로 공개 Cloud Run URL을 사용하며, 애플리케이션
+계층에서 `Authorization: Bearer` 또는 `X-API-Key`를 확인한다.
+`ALLOW_UNAUTH=false`이면 Cloud Run IAM 전용이 되어 일반 FactChat 연결은 동작하지
+않는다.
+
+## 9. 설정과 배포
+
+### 공통 설정
+
+현재 `config/common.yaml`의 핵심값:
+
+| 설정 | 현재값 | 의미 |
+|---|---:|---|
+| `FIRESTORE_DATABASE` | `rag-sync-state` | 공용 상태 DB |
+| `INGEST_CONCURRENCY` | 8 | ingest 병렬 worker 수 |
+| `SYNC_CONCURRENCY` | 4 | Cloud Run sync concurrency |
+| `RAG_DELETE_CONCURRENCY` | 1 | RagFile 삭제 동시성 |
+| `RAG_DELETE_PACING_SECONDS` | 1.1 | 삭제 호출 간격 |
+| `RAG_MAPPING_WRITE_ENABLED` | true | import 성공 후 매핑 기록 |
+| `RAG_MAPPING_READ_ENABLED` | true | 삭제 시 매핑 우선 사용 |
+| `RAG_MAPPING_FALLBACK_SCAN_ENABLED` | true | 매핑 누락 시 코퍼스 순회 |
+| `CLOUD_TASKS_ENABLED` | true | 비동기 분리 색인 사용 |
+| `INDEX_JOB_TIMEOUT_SECONDS` | 900 | 색인 job deadline |
+| `TOP_K_DEFAULT` | 5 | 기본 검색 문서 수 |
+| `SEARCH_FETCH_MULTIPLIER` | 3 | 후보 청크 여유 배수 |
+| `SEARCH_FETCH_MAX` | 60 | 후보 청크 상한 |
+| `ALLOW_UNAUTH` | true | MCP Cloud Run 공개 여부 |
+
+학과별 YAML은 Drive ID와 동기화/학생 폴더, 두 GCS 버킷, 교직원·학생 코퍼스,
+MCP API 키를 정의한다. 학생 코퍼스와 학생 폴더가 없으면 학생 분리는 꺼진다.
+
+배포 진입점:
+
+```powershell
+.\scripts\deploy.ps1
 .\scripts\deploy_mcp.ps1 -All
 ```
 
-- 실측 지연 (단일 MCP, 2026. 7. 28.): 중앙값 1.14초 / 최대 1.39초
+`deploy.ps1`은 parser/sync 배포, Cloud Tasks 큐와 IAM, MCP 배포, Workflow,
+Scheduler를 구성한다. 학과를 추가한 뒤에는 Cloud Run의 `DEPARTMENTS_JSON`뿐 아니라
+Scheduler가 Workflow에 넘기는 `driveIds`도 갱신해야 한다.
 
-#### 라. 저장소
+## 10. 관리 콘솔과 관측성
 
-| 저장소 | 용도 |
-|---|---|
-| 학과별 GCS `hwp-original` (`buckets.hwpOriginal`) | HWP/HWPX **만** 들어간다. parser 전달·재파싱용. 파싱 성공 뒤에도 지우지 않는다. 객체 키 = `{fileId}{확장자}` |
-| 학과별 GCS `source` (`buckets.source`) | RAG import 산출물(MD, 사이드카, 통과 PDF 등). PDF·DOCX 등 HWP 외 포맷은 parser·hwp-original을 안 거치고 여기로 직행. 객체 키 = `{fileId}{확장자}` |
-| 공통 Firestore DB (`FIRESTORE_DATABASE`, 현행 `rag-sync-state`) | Native 모드. Datastore 모드는 사용 불가. 첫 실행 GUI에서 생성 가능 — 아래 컬렉션 5종을 담는 그릇(컬렉션은 첫 쓰기 때 자동 생성) |
-| 컬렉션 `doc_state` (`DOC_STATE_COLLECTION`) | 파일별 상태·경로·해시·`audience`. |
-| 컬렉션 `doc_dlq` | 처리 실패 |
-| 컬렉션 `doc_split_queue` | 크기 초과 대기. 소비 코드 없음 |
-| 컬렉션 `sync_tokens` | Drive pageToken |
-| 컬렉션 `sync_jobs` (`SYNC_JOB_COLLECTION`) | 장시간 작업 진행률 |
-
-객체 키에 학과나 student/staff를 넣지 않는다. 격리는 버킷 자체로 수행한다.
-
-```
-gs://{hwp-original 버킷}/{fileId}{.hwp|.hwpx}
-gs://{source 버킷}/{fileId}.md
-gs://{source 버킷}/{fileId}.meta.md
-gs://{source 버킷}/{fileId}{.pdf|…}
-```
-
-#### 마. 학과 설정·상태 관리 콘솔
-
-- 실행: `python scripts/dept_gui.py`
-- 주소: `http://127.0.0.1:8765` (외부 인터페이스 bind 금지)
-- 공통 설정이 없으면 gcloud 로그인 → 프로젝트·리전 → 기존 Artifact Registry·Native
-  Firestore 선택 순서로 `config/common.yaml`을 생성
-- 공통 설정 화면은 `config/common.yaml` 존재 여부만 보고 **즉시** 뜬다. gcloud 상태는
-  뒤에서 채운다 — 이 경로에 gcloud 왕복을 넣으면 수 초짜리 빈 화면이 된다
-- 프로젝트는 **전량을 받지 않는다**. 접근 가능한 프로젝트가 수천 개인 계정에서
-  `gcloud projects list`가 6초 넘게 걸리고, 그 목록은 드롭다운으로 쓸 수도 없다.
-  현재 gcloud 프로젝트와 최근 선택(브라우저 로컬 저장)을 먼저 보여주고, 나머지는
-  검색으로 찾는다. 검색은 gcloud CLI가 아니라 Resource Manager REST를 쓴다
-  (CLI는 기동만 1.4초라 대화형 검색에 못 쓴다)
-- 프로젝트 접근 권한은 전량 목록 멤버십이 아니라 단건 조회로 확인한다
-- 신규 프로젝트라 둘 중 하나라도 없으면 같은 화면에서 만들 수 있다. **계획 →
-  확인 → 실행** 2단계이며, 계획 단계는 외부를 바꾸지 않고 켤 API와 만들 리소스만
-  보여준다. 실행 단계에서 필요한 API(`artifactregistry`, `firestore`)를 먼저 켜고
-  생성한다 — API가 꺼진 채로는 생성이 실패하기 때문이다
-- Firestore는 Native 모드로만 만들며 위치는 `GCP_REGION`을 그대로 쓴다(생성 후
-  변경 불가). `(default)` 데이터베이스는 Datastore 모드로 굳으면 되돌릴 수 없어
-  이름으로 거부한다. 삭제는 GUI에서 제공하지 않는다
-- 실행 환경 화면의 `Drive 확인 서비스 계정`은 실제 임시 접근 토큰을 발급해
-  연결 상태를 확인한다. 새 프로젝트는 Compute Engine API가 꺼져 있어 기본 SA 자체가 없거나
-  (`computeApi`), SA는 있어도 현재 계정에 서비스 계정 사용 권한이 없어(`tokenCreator`)
-  `HTTP 404`로 막힌다. 둘은 조치가 달라 구분해서 알린다
-- 조치도 계획 → 확인 → 실행이다. 계획에 켤 API와 부여할 역할
-  (`roles/iam.serviceAccountTokenCreator`)을 먼저 보여주고, 확인을 눌러야 적용한다.
-  적용 뒤에는 같은 임시 접근 토큰 발급으로 재확인한다 — 명령 성공만 믿지 않는다
-- 학과 추가·수정 시 실제 Vertex RAG 코퍼스와 같은 리전의 보호된 GCS 버킷을
-  목록에서 선택하거나 웹 콘솔에서 새로 생성한다
-- 신규 학과 코드는 기존 `config/departments/{code}.yaml`과 중복될 수 없으며 입력 중
-  가용성을 확인하고 서버에서 생성 직전에 다시 검사한다
-- 리소스 생성은 `계획 미리보기 → 사용자 확인 → 백그라운드 실행 → 결과 검증` 순서다.
-  버킷은 uniform access, public access prevention, Standard, soft delete 7일로 생성한다
-- 계획에 자동 생성된 버킷 이름과 코퍼스 표시 이름은 생성 전에 수정할 수 있고 서버가
-  형식과 중복을 다시 검증한다. 단일 모드는 `{code}-rag-corpus` 하나, 학생
-  분리 모드는 `{code}-rag-corpus-student`를 추가한다
-- 생성은 누락 리소스만 대상으로 하며 부분 실패 시 성공한 리소스를 유지하고 실패
-  항목만 다시 시도한다. 상태 확인만으로는 리소스를 생성하지 않는다
-- `hwpOriginal`과 `source`는 서로 달라야 한다. 학생 분리 시 두 코퍼스도 달라야 한다
-- 생성 후 단일/학생 분리 모드 전환은 일반 설정 수정에서 막는다. 코퍼스 재색인과 기존
-  MCP 서비스 정리가 필요한 별도 마이그레이션으로 처리한다
-- 학과 생성이 끝나면 대시보드로 이동하고 `deploy.ps1 -SkipMcp`로 공통 런타임
-  (Parser, Sync, Workflow, Scheduler)을 먼저 배포한다. 공통 런타임이 완료된 뒤
-  MCP 배포 확인 창을 연다. Parser/Sync가 없거나 Ready가 아니면 상태 상세의
-  `공통 런타임 배포` 버튼으로 같은 작업을 수동 실행할 수 있다.
-  MCP 배포는 이어서 뜨는 확인 창과 상태 상세의 `미배포` 항목에서 시작할 수 있다.
-  단일 모드는 기본 MCP 1개, 학생 분리 모드는 2개를 배포하며 설정·이미지·Cloud Run·
-  Ready·Health 단계를 백그라운드 작업으로 표시한다. 출력의 MCP 키와 토큰은 제거한다
-- 버킷 선택 시 기존 사용 학과를 표시한다. 공유드라이브 ID가 다른 학과와 겹치면
-  생성·저장을 막지 않고 확인 창에서 진행 여부를 고른다. 확인 없이는
-  `409 DRIVE_ID_CONFLICT`다. 배포 맵 검증은 여전히 중복을 거부한다
-- `폴더 정보 확인`은 입력한 `syncFolderIds`를 Compute SA로 Drive API에서 조회한다.
-- 공유드라이브 연결 확인이 성공하면 최상위 폴더부터 표시하며, 폴더를 펼칠 때 직속
-  하위 폴더(2단계)까지 병렬로 미리 조회하고 접힌 트리로 표시한다. 이후 단계는 펼칠 때
-  지연 조회한다. 트리에서 체크한 폴더 ID를 `syncFolderIds`로 저장하고 학생 분리 범위도
-  같은 선택 목록에서 정한다. 상위 폴더 선택 시 이미 선택한 하위 폴더는 제거하고 해당
-  가지를 잠근다. ID 직접 입력은 고급 옵션으로 남긴다
-  설정에 저장되는 ID는 유지하고, 확인된 실제 폴더명을 태그와 학생 폴더 선택 목록에 표시한다.
-  GUI 라벨은 `동기화 폴더 ID`, `학생 폴더 ID`를 사용하고 라벨 옆 `?` 툴팁으로
-  전자가 전체 수집 범위이며 후자가 그 부분집합임을 설명한다
-  폴더가 아닌 항목·휴지통 항목·접근 불가 ID는 개별 실패로 안내한다
-- `동기화 관리` 탭은 학과별 변경분 동기화 또는 전체 backfill을 수동 실행한다.
-- `데이터 동기화`의 현재 실행 카드는 학과, 활성 Drive, 동기화 폴더 범위, Workflow
-  단계와 실행 ID를 표시한다. backfill은 Firestore 실행 진행 문서에 최근 처리 파일명·ID·
-  경로·결과를 주기적으로 기록하며 콘솔이 이를 2초 간격으로 갱신한다
-  선택 학과의 Drive만 Workflow 인자로 넘기며, 같은 Drive에 ACTIVE 실행이 있으면 중복 실행을
-  거부한다. backfill은 확인 창을 거친 뒤 실행한다
-- GUI가 만든 수동 실행은 `runId`를 Workflow와 `rag-sync`에 전달한다. backfill 중간 상태는
-  Firestore `sync_tokens/__run__{runId}`에 단계·처리 건수·누적 totals로 기록하며 GUI가
-  Workflow 실행 상태와 함께 2초 간격으로 조회한다. 진행 기록 실패는 실제 동기화를 중단하지 않는다
-- 학과 YAML을 새로 생성하면 `동기화 관리`로 이동해 해당 학과가 선택된다. 생성만으로
-  backfill을 자동 시작하지 않으며 비용이 드는 전체 적재는 항상 사용자가 명시적으로 실행한다
-- 학과 목록 행을 누르면 실제 Cloud Run 교직원·학생 MCP URL과 준비 상태를 표시한다.
-  상세 패널에서 각 URL과 해당 범위의 MCP 키를 개별 복사할 수 있다. 키는 버튼을 누른
-  순간에만 로컬 세션 검증 POST 응답으로 전달하며 목록·설정 API에는 포함하지 않는다.
-  클립보드에는 FactChat 인증 헤더에 바로 쓸 수 있는 `Bearer {key}` 형식으로 기록한다
-- MCP 실제 배포 시 Cloud Run에 관리 라벨(`gcp-rag-managed`, 학과, 대상, 스키마)과
-  `gcp-rag.dev/department-metadata` 주석을 함께 기록한다. 주석은 base64url JSON이며
-  학과명·대상·코퍼스·버킷·Drive/폴더 범위·최소 인스턴스만 포함하고 MCP 키는 제외한다.
-  콘솔은 이를 조회해 로컬 학과 YAML이 없는 항목도 `CLOUD` 읽기 전용 학과로 합친다.
-  구형 배포는 서비스 환경변수의 비밀값 아닌 항목만 제한적으로 복원한다
-- `코퍼스 확인` 탭은 기본이 Vertex RAG 검색 근거 조회다. `Gemini 답변`을 켜면
-  같은 gcloud 계정으로 `gemini-2.5-flash-lite`(Vertex global endpoint) 답을 붙이며
-  별도 API 키가 필요 없다. 토큰은 서버 밖으로 노출하지 않는다
-- 공유드라이브 ID는 저장 전에 현재 프로젝트의 기본 Compute SA
-  (`{projectNumber}-compute@developer.gserviceaccount.com`)로 실제 접근 및 변경 토큰을 확인
-- 기존 YAML 수정 시 MCP 키는 API로 반환하지 않고 그대로 보존한다. revision hash가
-  달라지면 `409 REVISION_CONFLICT`로 동시 수정을 막는다
-- 상태 확인은 LOCAL → RESOURCE → DEPLOY → RUNTIME → SYNC 순서이며 GCP 리소스를
-  변경하지 않는다. 공통 조회는 실행당 한 번 캐시하고 학과 검사는 최대 4개 병렬 수행
-
-설정 책임은 다음과 같이 나눈다.
-
-| 파일 | 내용 |
-|---|---|
-| `config/common.yaml` | 프로젝트, 리전, Artifact Registry, Firestore, 성능·검색 기본값 |
-| `config/departments/{code}.yaml` | 학과명, 코퍼스 1~2개, 버킷 2개, Drive 범위, MCP 키, 최소 인스턴스 |
-
-`dept_config.py`는 레거시 공용 버킷 키를 읽을 수 있지만, 현행 GUI와 신규 학과 운영은
-학과 YAML의 버킷 2개를 필수로 취급한다. 한쪽만 지정하거나 두 값이 같으면 거부한다.
-
-학과 설정 검증 계약:
-
-- 파일명과 `code`는 영문 소문자로 시작하는 2~20자 영숫자·하이픈
-- 기본 코퍼스는 common의 프로젝트·리전과 일치해야 한다. 학생 분리 시 학생 코퍼스도
-  같은 조건을 만족하고 기본 코퍼스와 달라야 함
-- 두 버킷은 common의 리전에 있고 uniform bucket-level access와 public access
-  prevention이 적용된 실제 리소스이며 서로 달라야 함
-- `driveIds`, `syncFolderIds`, `studentFolderIds`는 중복·공백을 정규화한다. 학생
-  분리 시 `studentFolderIds`는 필수이며 `syncFolderIds`의 부분집합이어야 함
-- 공유드라이브 ID가 다른 학과와 겹치면 GUI는 확인 후 저장할 수 있다.
-  배포용 `DEPARTMENTS_JSON` 검증은 여전히 중복을 거부한다
-- 활성화된 범위의 `minInstances`는 0 이상의 정수
-- 기본 키는 항상 자동 발급하며 학생 분리 시 별도의 학생 키를 자동 발급
-
-상태 레이어:
-
-| 레이어 | 검사 |
-|---|---|
-| LOCAL | YAML 파싱·스키마·공통 설정 일치·MCP 키 존재/분리/길이 |
-| RESOURCE | gcloud 로그인, 버킷 위치, Native Firestore, 코퍼스 ACTIVE, Drive SA 실접근 |
-| DEPLOY | parser·sync·학과별 활성 MCP 1~2개의 Ready 및 latest revision 일치 |
-| RUNTIME | 준비된 서비스의 `/health`; parser·sync는 사용자 ID token으로 호출 |
-| SYNC | `rag-daily-sync` 최근 실행 상태와 완료 후 경과 시간 |
-
-전체 상태 우선순위는 `FAIL > WARN > UNKNOWN > OK`다. YAML이 없거나 LOCAL이
-실패하면 이후 레이어는 `SKIP`; 설정 파일이 바뀌면 이전 결과는 `STALE`로 표시한다.
-
-주요 로컬 API는 다음과 같다. 변경 요청은 `/api/v1/session`이 발급한
-`X-Local-Session` 값이 필요하다.
-
-| 메서드·경로 | 기능 |
-|---|---|
-| `GET /api/v1/environment` | common 설정, gcloud 로그인·프로젝트, Drive 확인용 SA 표시 |
-| `POST /api/v1/gcloud-auth/login` | 시스템 브라우저에서 gcloud 사용자 로그인 유도 |
-| `GET /api/v1/projects/search` | 프로젝트 부분 일치 검색(Resource Manager REST). 전량 조회를 대체한다 |
-| `GET /api/v1/common-config/resources` | 선택 프로젝트의 Artifact Registry·Firestore 조회 |
-| `GET /api/v1/drive-service-account/status` | Drive 확인 SA의 임시 접근 토큰을 발급해 연결 상태 판정 |
-| `POST /api/v1/drive-service-account/repair-plans` | 켤 API·부여할 역할만 계산(외부 변경 없음) |
-| `POST /api/v1/drive-service-account/repairs` | 확인된 계획 적용 후 같은 방법으로 재확인(계획 1회용) |
-| `GET /api/v1/drive-service-account/repairs/{runId}` | 조치 진행 상태 |
-| `POST /api/v1/common-config/resource-plans` | 켤 API와 만들 공통 리소스를 계산만 한다(외부 변경 없음) |
-| `POST /api/v1/common-config/resource-provisioning` | 확인된 계획으로 API 활성화 후 공통 리소스 생성(계획 1회용) |
-| `GET /api/v1/common-config/resource-provisioning/{runId}` | 공통 리소스 생성 진행 상태 |
-| `POST /api/v1/common-config` | 최초 공통 설정 생성(기존 파일 덮어쓰기 금지) |
-| `GET /api/v1/departments/resource-options` | 표시 이름이 포함된 코퍼스와 보호된 리전 버킷 조회 |
-| `GET /api/v1/cloud-mcp-services` | Cloud Run 메타데이터에서 YAML 없는 배포 학과와 Ready 상태 조회 |
-| `POST /api/v1/departments/drive-preflight` | 입력한 공유드라이브 ID의 Compute SA 실접근 확인. 다른 학과와 겹치면 `driveConflicts`를 함께 반환 |
-| `POST /api/v1/departments/drive-folders` | 공유드라이브 또는 폴더의 직속 하위 폴더를 Compute SA로 지연 조회 |
-| `POST /api/v1/departments/preview` | 신규 YAML 정규화·검증·비밀값 제거 preview. Drive 중복은 `driveConflicts` 경고 |
-| `POST /api/v1/departments` | 신규 학과 YAML 원자적 생성과 MCP 키 자동 생성. Drive 중복은 확인 전 `409 DRIVE_ID_CONFLICT` |
-| `GET /api/v1/departments/{code}/config` | 비밀 키를 제외한 기존 학과 설정 조회 |
-| `POST /api/v1/departments/{code}/mcp-keys/{audience}` | 명시적으로 선택한 MCP 키 1개 복사 |
-| `POST /api/v1/departments/{code}/mcp-deployments` | 학과별 MCP Cloud Run 백그라운드 배포 시작 |
-| `GET /api/v1/mcp-deployments[/{runId}]` | 진행 중·완료된 MCP 배포 단계와 정제 로그 조회 |
-| `POST /api/v1/common-runtime-deployments` | Parser·Sync·Workflow·Scheduler 백그라운드 배포 시작 |
-| `GET /api/v1/common-runtime-deployments[/{runId}]` | 공통 런타임 배포 단계와 정제 로그 조회 |
-| `POST /api/v1/corpus-query` | 선택한 학과·범위 코퍼스 검색. `generate=true`면 같은 gcloud 토큰으로 Gemini 답변 |
-| `POST /api/v1/departments/{code}/preview` | 수정안 검증과 preview |
-| `PUT /api/v1/departments/{code}` | revision 확인 후 수정, 기존 MCP 키 보존. Drive 중복은 확인 전 `409 DRIVE_ID_CONFLICT` |
-| `POST /api/v1/status-runs` | 전체 또는 지정 학과 온라인 상태 검사 시작 |
-| `GET /api/v1/status-runs/{runId}` | 진행률·검사 결과 조회 |
-| `DELETE /api/v1/status-runs/{runId}` | 실행 취소 요청 |
-
-보안 경계:
-
-- 목록·설정 응답에 MCP 키, gcloud access/ID token, Authorization 헤더를 포함하지 않는다.
-  MCP 키는 로컬 세션이 검증된 명시적 복사 POST에서 선택한 값 하나만 반환한다
-- YAML preview의 키는 `<자동 생성>` 또는 `<기존 키 유지>`로만 표시한다
-- 서버는 loopback 주소에만 bind하며 Origin, CSP, frame 차단 헤더를 적용한다
-- subprocess는 인자 배열과 `shell=False`를 사용한다
-- SA JSON 키를 만들지 않고 짧은 수명의 impersonated access token만 사용한다
-
-
----
-
-## Ⅲ. 처리 명세
-
-### 1. 수집·변환
-
-| 형식 | 처리 |
-|---|---|
-| HWP / HWPX | parser → MD 색인 |
-| PDF / PPTX / DOCX / TXT | 복사 후 색인. PDF는 필요 시 분할 |
-| Google 문서 | export 후 색인 |
-| XLSX | 셀 → MD 표. 원본은 색인 안 함 |
-| 이미지 / 압축 | 제외 |
-
-- 색인 확장자: `.md` `.meta.md` `.pdf` `.txt` `.html` `.docx` `.pptx` `.csv`
-- 일 배치: Scheduler 00:00 KST → Workflows → rag-sync
-  - `/sync/changes` 기본 200건. pageToken은 색인 성공 후에만 커밋
-  - 토큰 없으면 `/sync/backfill-run`
-
-### 1-1. Drive 경로 → 소속
-
-- `DRIVE_IDS`: 공유 드라이브 ID (`folders/` URL의 `0A…`)
-- `SYNC_FOLDER_IDS`: 수집 범위. 지정 폴더와 하위. **배포 필수**(비우면 거부)
-- `STUDENT_FOLDER_IDS`: 학생 코퍼스에 실을 폴더. `SYNC_FOLDER_IDS`의 부분집합. 여기서 빼면 수집 자체가 안 됨
-- 판정: ingest 때 조상 폴더가 `STUDENT_FOLDER_IDS` 안이면 `STUDENT`, 아니면 `STAFF`
-- 실패·필드 없음·모르는 값 → `STAFF`
-- `STUDENT`: 양쪽 코퍼스. `STAFF`: 교직원만
-- 범위 밖(`SYNC` 밖): `EXCLUDED`. 다운로드·색인 없음. 기존 청크는 회수
-- `SKIPPED`: 대상인데 처리 못 함 (미지원 MIME, 암호 파일 등)
-
-| 폴더 | 교직원 코퍼스 | 학생 코퍼스 |
-|---|---|---|
-| `STUDENT_FOLDER_IDS` 안 | 들어감 | 들어감 |
-| `SYNC` 안, 학생 폴더 밖 | 들어감 | 안 들어감 |
-| `SYNC` 밖 | 안 들어감 | 안 들어감 |
-
-검색은 `audience`를 다시 보지 않음. MCP가 가리키는 코퍼스에 들어 있는 것만 나옴.
-
-**제약 — 내용 그대로 폴더만 이동하면 코퍼스가 안 따라감**
-
-- Drive에서 파일을 학생↔교직원 폴더로 끌어다 옮기기만 하면 소속 변경이 코퍼스에 반영되지 않음
-  - `modifiedTime`이 안 바뀌면(이동만 하면 보통 안 바뀜) ingest 앞단에서 `UNCHANGED`로 끊김 — 소속 재판정도 안 함
-  - 바뀌어도 내용 해시가 같으면 `HASH_UNCHANGED` — `doc_state.audience`만 갱신되고 코퍼스는 그대로
-  - 코퍼스 반영 지점은 `/sync/index-gcs`의 `_sync_student_corpus` 하나뿐인데, 두 경로 모두 URI를 안 넘김
-- 결과: 학생→교직원 이동분은 **학생 코퍼스에 계속 남고**, 교직원→학생 이동분은 **안 들어옴**
-- 수용 사유: 실무에서 자료 위치 이동이 사실상 없음. 자동 감지 비용(전량 소속 재판정)이 빈도에 비해 큼
-- 필요할 때의 회피
-  - 파일 내용을 실제로 수정 → 해시가 달라져 정상 경로를 탐
-  - 또는 `doc_state`에서 해당 `fileId` 문서를 지우고 재동기화 → 신규로 취급
-- 삭제(`/sync/delete`)와 범위 밖 이탈(EXCLUDE)은 이 제약과 무관 — 양쪽 코퍼스에서 모두 회수됨
-
-### 1-2. XLSX → 마크다운 표
-
-- RAG 기본 파서가 xlsx를 못 읽음. 셀을 MD 표로 뽑아 `{fileId}.md` 색인
-- [`shared/xlsx_md.py`](../shared/xlsx_md.py) — openpyxl 읽기전용·값모드
-- 실측 116건: 변환 89 / 암호(OLE2) 27
-- 상한: 셀 300,000 (`MAX_CELLS`), 출력 8MB (`MAX_BYTES`). 잘리면 본문 끝에 표기
-- 제약: 병합셀은 좌상단만 값. 수식은 캐시 없으면 빈칸. `cellStyle` name 없으면 복구 재시도
-
-### 2. 크기 한도
-
-- RAG: PDF·DOCX 50MB, MD·텍스트 10MB
-- PDF 초과: `{fileId}.partN.pdf` 분할 (안전계수 0.85). 검색 시 `.partN` 떼고 원문으로
-- 한 페이지가 한도면 DLQ
-- 그 외 포맷은 분할 없음. `doc_split_queue` + `FAILED`. 큐 소비 코드 없음
-- HWP→md 실측 최대 ≈ 64KB (한도의 0.6%). PPTX 한도 초과는 이미지 용량이라 분할해도 텍스트가 안 늘음
-
-### 3. 색인
-
-| 항목 | 값 |
-|---|---|
-| 청크 | 1,024 / 중첩 256 |
-| 임베딩 | `text-multilingual-embedding-002` |
-| 벡터 DB | RagManagedDb |
-| import | 호출당 URI 최대 25. 배치 24 |
-
-- 같은 fileId는 선삭제 후 import
-- `index-gcs`: 교직원 코퍼스 먼저, 이어서 `_sync_student_corpus`
-  - 학생 쪽은 이번 배치 fileId를 학생 코퍼스에서 지운 뒤 `audience=STUDENT`만 다시 import
-  - 학생 폴더 → 교직원 폴더 이동은 여기서만 학생 노출이 내려감
-- `import_files`는 호출 실패만 예외. 파일 거부는 카운트 (`imported` / `failed` / `skipped`)
-- 부분 실패면 `INDEXED`로 올리지 않음 (`PARSED` 유지 → 다음 주기 회수)
-- `skipped`는 성공으로 셈 (이미 코퍼스에 있는 경우). WARNING 로그는 남김
-- 전량 재색인 실측: 1,211건 / 약 50분 / 실패 0
-
-### 4. 검색
-
-```
-질의 → retrieveContexts(fetch_k, 거리상한 0.30)
-     → 어휘 재정렬(BM25 + RRF)
-     → SKIPPED / EXCLUDED / DELETED 제외
-     → 문서 단위 병합(문서당 최대 3청크)
-     → 상위 k건
-```
-
-| 항목 | 값 |
-|---|---|
-| `TOP_K_DEFAULT` | 5 (1~20) |
-| `SEARCH_FETCH_MULTIPLIER` | 3 |
-| `SEARCH_FETCH_MAX` | 60 |
-| `SEARCH_DISTANCE_THRESHOLD` | 0.30 |
-| `SEARCH_LEXICAL_RERANK` | true |
-| `SEARCH_MAX_CHUNKS_PER_FILE` | 3 |
-| `SEARCH_MAX_TOTAL_CHUNKS` | 15 |
-
-- Vertex `score`는 거리(작을수록 유사). 유사도로 변환하면 순위가 뒤집힘. RRF는 순위만 결합
-- 거리 0.30 근거 (골든 100): 정답 0.118~0.275, 무관 질의 0.330~. 여유 ≈ 0.05
-- Vertex `metadata_filter`는 retrieve에 인자가 있으나 호출하지 않음. 소속 차단은 코퍼스 분리로 함
-
-### 5. 켜는 순서
-
-이미 INDEXED인 문서는 ingest가 `UNCHANGED`로 빠져 `audience`를 안 찍음. `reindex-pending`도 경로를 다시 판정하지 않음.
-
-1. 학과 yaml 에 `drive.studentFolderIds` / `corpora.student` 설정 후 `rag-sync` 재배포
-2. 기존 문서 `audience` 일괄 기록. 건너면 학생 코퍼스는 빈 채
-3. 학생 코퍼스 적재
-4. 학생 MCP 배포 (위 다항). 4를 먼저 하면 학생 검색만 빔
-
----
-
-## Ⅳ. 검색 품질 실측 (2026. 7. 28., 단일 코퍼스)
-
-### 1. 방법
-
-- 색인 1,211건에서 시드 고정 무작위 100건. 본문 읽고 질의. 제목 어휘 베끼지 않음 (중복률 17%)
-- 본문 없는 문서(엑셀 스텁, 텍스트층 없는 PDF) 제외
-- 대상: 배포 MCP `search` 전 구간
-- 데이터 [`tests/golden100.json`](../tests/golden100.json) / 전량 [`GOLDEN_EVAL.md`](./GOLDEN_EVAL.md)
-
-| 기준 | 정의 |
-|---|---|
-| 정확히 그 파일 | 기대 fileId가 상위 k (본문 동일 사본 포함) |
-| 같은 자료묶음 | 동일 폴더의 공문·붙임 |
-
-### 2. 결과 (top_k=5)
-
-| 기준 | hit@1 | hit@3 | hit@5 | MRR |
-|---|---:|---:|---:|---:|
-| 정확히 그 파일 | 46% | 81% | 94% | 0.652 |
-| 같은 자료묶음 | 63% | 90% | 97% | 0.766 |
-
-- 빈 결과 1/100, 무관 질의 차단 6/6, 평균 본문 9,006자
-- hit@5는 신규 62건이 본문 200자 이상 필터라 유리. 기존 38건 hit@5는 89%. 구간으로 89~94%
-- hit@1은 두 구간이 45% vs 47%
-
-### 3. 미검출 6건
-
-| 유형 | 건수 |
-|---|---:|
-| 같은 묶음이 대신 검출 | 4 |
-| 실제 미검출 | 2 |
-
-- 18번: 표 셀 한 칸, 거리 임계로 제외
-- 39번: 일상어 질의면 전량 차단. 문서 어휘로 바꾸면 1위 (거리 0.283)
-
-### 4. 개선 시도
-
-| 시도 | 결과 | 판정 |
-|---|---|---|
-| 문서 단위 청크 병합 | 조문 누락 완화 | 채택 |
-| 거리 임계값 | 무관 질의 6/6 | 채택 |
-| 어휘 재정렬(BM25+RRF) | 편향 골든셋 기준. 무편향 재측정 없음 | 유지, 효과 미확정 |
-| 중복 사본 제거 | hit@1 +1 | 미미 |
-| 내용 없는 문서 제외 | hit@1 -2%p | 없음 |
-| 머리말 축약 | MRR +0.003, hit@3 -5%p | 가설 기각 |
-| 청크 2048 | 미실시 | 보류 |
-
----
-
-## Ⅴ. 운영
-
-### 1. 로컬 관리 콘솔
-
-저장소 루트에서 실행한다.
+로컬 관리 콘솔:
 
 ```powershell
 pip install -r requirements-gui.txt
 python scripts/dept_gui.py
 ```
 
-- 기본 브라우저가 `http://127.0.0.1:8765`로 열린다
-- `전체 상태 확인`은 YAML 구조, GCP 인증, 학과별 버킷·코퍼스·Drive SA,
-  Cloud Run 배포·`/health`, 최근 Workflow 실행을 검사한다
-- gcloud 로그인 창을 닫은 경우 `로그인 다시 열기`로 기존 로그인 프로세스를 정리하고 재시도한다
-- 상태 조회는 읽기 전용이다. 학과 생성·수정과 최초 common 생성만 파일을 변경한다
-- 2026. 8. 26. 실측: 학과 2개 전체 확인 5.7초(콜드 스타트 없음)
+- 주소는 `http://127.0.0.1:8765`이며 외부 인터페이스에 bind하지 않는다.
+- 학과 설정 생성·수정, GCP 리소스 상태, 최근 Workflow 실행을 확인한다.
+- `전체 상태 확인`과 학과별 다시 확인은 각 검사를 순서대로 수행하되, 완료된
+  검사 결과는 즉시 UI에 반영한다.
+- 상태 재확인 중에는 기존 “정상” 배지를 그대로 확정 상태처럼 두지 않고
+  “조회 중”으로 표시한다.
+- 실행 상세는 Workflow 실행 ID로 로그를 조회해 RAG 색인, 삭제, 정합성 검사 등의
+  경고·오류와 영향받은 파일을 보여준다.
+- 상태 조회는 읽기 전용이다. 설정 저장이나 배포 버튼을 누르기 전에는 GCP 리소스를
+  변경하지 않는다.
 
-검증:
+운영 로그의 핵심 식별자는 Workflow execution ID, async index `jobId`, Drive
+`fileId`, Cloud Trace ID다. 지연 분석 시 Workflow 전체 시간과 큐 대기, Vertex
+import 시간을 분리해서 본다.
+
+## 11. 보안과 유지보수
+
+현재 보안 경계:
+
+| 대상 | 방식 |
+|---|---|
+| `rag-sync`, `rag-parser` | Cloud Run IAM |
+| Cloud Tasks → `rag-sync` | 서비스 계정 OIDC + Run Invoker |
+| 교직원 MCP | 공개 URL + 교직원 API 키 |
+| 학생 MCP | 공개 URL + 별도 학생 API 키 |
+| Drive | GCP IAM과 별개인 공유 Drive 멤버 권한 |
+
+운영 전 개선이 필요한 항목:
+
+- MCP 키를 학과 YAML·환경변수 평문에서 Secret Manager로 이동
+- 기본 Compute 서비스 계정 대신 서비스별 전용 계정과 최소 권한 적용
+- Firestore PITR/삭제 보호와 학과별 GCS versioning 정책 검토
+- Cloud Monitoring 알림과 예산 정책의 실제 적용 확인
+- MCP 콜드 스타트가 문제이면 학과별 `minInstances`를 1 이상으로 조정
+- `doc_split_queue` 소비자 구현 또는 운영자 처리 절차 마련
+- Vertex SDK의 deprecation 추적과 후속 API 마이그레이션 계획 수립
+
+## 12. 현재 알려진 제약
+
+- 내용 불변 상태에서 학생/교직원 폴더만 이동하면 Firestore audience만 갱신되고
+  코퍼스 이동은 다음 재색인까지 지연될 수 있다.
+- 암호화되거나 손상된 XLSX/PDF는 자동 변환하지 못한다.
+- 텍스트 레이어가 없는 스캔 PDF는 OCR 설정 없이 본문 검색이 불가능하다.
+- ZIP과 구형 XLS는 경로 sidecar만 색인하므로 본문 검색은 불가능하다.
+- 같은 파일의 초안·최종본을 자동 판별하지 않는다.
+- `doc_split_queue`는 적재 경로만 있고 자동 소비자가 없다.
+- 매핑 누락 시 fallback scan이 정확성을 보장하지만 코퍼스 크기에 비례한 지연이
+  다시 발생한다. 매핑 coverage를 지속 관찰해야 한다.
+
+## 13. 기준일이 있는 품질·성능 참고값
+
+다음 수치는 **2026-07-28 단일 코퍼스** 기준이며 현재 건수나 SLO가 아니다.
+
+| 항목 | 실측값 |
+|---|---:|
+| 색인 문서 | 1,211건 |
+| 색인 객체 | 1,418건 |
+| MCP 검색 지연 중앙값 / 최대 | 1.14초 / 1.39초 |
+
+골든셋 100건, `top_k=5` 결과:
+
+| 기준 | Hit@1 | Hit@3 | Hit@5 | MRR |
+|---|---:|---:|---:|---:|
+| 정확한 파일 | 46% | 81% | 94% | 0.652 |
+| 같은 자료 묶음 허용 | 63% | 90% | 97% | 0.766 |
+
+운영 구조 변경 후에는 학과·audience별로 별도 기준선을 다시 측정해야 한다.
+
+## 14. 검증과 평가 재현
 
 ```powershell
-python -X utf8 -m pytest -q tests/test_dept_gui.py
+python -X utf8 -m pytest -q
 cd gui
 npm test
 ```
 
-### 2. 자동화
-
-- Scheduler → Workflows → rag-sync, 매일 00:00 KST
-- 변경 없을 때 약 18초
-
-### 3. 처리량
-
-| 항목 | 값 |
-|---|---|
-| Vertex RagDataService | 300 req/min |
-| import 지연 | 약 21초/회 (URI 수 무관) |
-| 재색인 배치 | URI 24 |
-| 삭제 동시 / 페이싱 | 1 / 1.1초 (`RAG_DELETE_CONCURRENCY` / `RAG_DELETE_PACING_SECONDS`) |
-
-### 4. 접근제어
-
-| 서비스 | 방식 |
-|---|---|
-| `rag-mcp-{dept}-staff` | 공개 URL + 학과 교직원 키 (`ALLOW_UNAUTH=false`면 IAM 전용) |
-| `rag-mcp-{dept}-student` | 같은 학과의 별도 학생 키. 공개 여부는 위와 같음 |
-| rag-sync | 프로젝트 IAM |
-| rag-parser | rag-sync SA |
-
-Drive 권한은 GCP IAM과 별개다. 현재 프로젝트의 기본 Compute SA를 각 학과
-공유드라이브 멤버(뷰어 이상)로 추가해야 한다. 콘솔의 `연결 확인`은 이 멤버십과
-Drive 변경 토큰 발급을 실제로 확인하지만 SA 생성이나 Drive 멤버 추가는 수행하지 않는다.
-
-### 5. 상태 (2026. 7. 28.)
-
-```
-INDEXED 1,211 / SKIPPED·EXCLUDED 394 / FAILED 0 / PENDING 0
-DLQ 0 / 분할 대기 0 / 고아 객체 0
-```
-
-당시 단일 코퍼스. 분리 켠 뒤의 코퍼스별 건수는 재집계 필요.
-
----
-
-## Ⅵ. 제약·과제
-
-### 1. 기능
-
-- 암호 xlsx 27건: OLE2라 변환 불가
-- 스캔 PDF: 텍스트 계층 없으면 본문 없음 (표본 50건 중 3)
-- 동일 파일명 사본 122건(10.1%), 초안·의견수렴본 201건(16.6%). 최신본 판별 없음
-- 기존 INDEXED는 경로가 안 바뀌면 `audience`가 안 갱신됨. 이미 색인된 코퍼스에서 분리를 켜면 일괄 기록이 필요 (빈 `doc_state`에서 전량 backfill로 시작하면 해당 없음)
-- 내용 불변 + 폴더만 이동하면 학생 코퍼스가 안 따라감 — 수용된 제약, 상세는 Ⅲ-1-1
-
-### 2. 운영 (PoC 밖)
-
-| 과제 | 사유 |
-|---|---|
-| MCP 키 → Secret Manager | 현재 Cloud Run 환경변수와 학과 YAML에 평문 저장 |
-| 서비스별 전용 SA·최소 권한 | 기본 Compute SA의 프로젝트 단위 과도한 권한 축소 필요 |
-| 알림·예산 정책 적용 확인 | 설정 스크립트는 있으나 실제 GCP 적용 여부 별도 확인 필요 |
-| Firestore PITR·삭제 보호 | 상태 DB 오조작 시 즉시 복구 수단 없음 |
-| 학과별 GCS 버전관리·IAM 분리 | 원본 공문 보호와 덮어쓰기 복구 필요 |
-| MCP `minInstances` 조정 | 0이면 첫 요청에 콜드 스타트 지연 발생 |
-| `doc_split_queue` 소비자 구현 | 분할 불가능한 한도 초과 문서는 현재 큐에만 적재 |
-
-### 3. 품질
-
-- 측정 없는 개선은 권하지 않음 (Ⅳ-4)
-- 어휘 재정렬 on/off 재측정
-- 암호·스캔 문서는 검색 불가로 남김
-
----
-
-## 부록. 평가 재현
+검색 평가:
 
 ```bash
-export MCP_URL=https://<서비스>/mcp
-export MCP_API_KEY=<키>
+export MCP_URL=https://<service>/mcp
+export MCP_API_KEY=<key>
 python scripts/eval_golden.py tests/golden100.json
+python scripts/gen_eval_doc.py <result.json> docs/GOLDEN_EVAL.md
+python scripts/analyze_chunking.py <corpus-directory>
 ```
 
-- 골든셋: `tests/golden100.json` (100건, 시드 고정)
-- 결과 문서: `python scripts/gen_eval_doc.py <결과.json> docs/GOLDEN_EVAL.md`
-- 청크 분석: `python scripts/analyze_chunking.py <코퍼스 디렉터리>`
-- 학생 MCP를 재려면 URL·키를 학생 서비스로 둔다. 골든셋은 교직원 코퍼스 기준이라 학생 hit는 따로 봐야 함
+골든셋 `tests/golden100.json`은 교직원 코퍼스 기준이다. 학생 MCP는 학생에게 실제로
+공개되는 문서만으로 별도 골든셋을 구성해 평가해야 한다.

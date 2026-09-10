@@ -1,7 +1,23 @@
 """HWPX → Markdown (python-hwpx).
 
-HWPX 는 ZIP+XML(OWPML) 이라 네이티브 확장 없이 읽힘. 
-PyO3 네이티브 휠이라 libfreetype ABI 에 묶여 있어 HWPX 는 순수 파이썬 경로로 뺌.
+한글 문서 중 hwpx 포맷만 이 모듈이 담당한다. hwp(바이너리)는
+rhwp_parser 가 처리한다.
+
+HWPX 는 ZIP 안에 OWPML XML 이 들어 있는 형식 
+순수 파이썬 python-hwpx 로 연다. 
+(rhwp-python 은 PyO3 휠이라 libfreetype ABI 에 묶여 
+Cloud Run 이미지가 깨졌음 그래서 사용하지 않음)
+
+흐름:
+
+1. 해당 바이트를 HwpxDocument.open 으로 연다.
+2. export_markdown() 으로 GFM 을 뽑는다.
+3. 라이브러리 표 출력 결함(병합 셀 절단, 셀 안 개행으로 행이 찢어짐)이
+   있으면 _repair_tables 가 고친다. 멀쩡하면 원문을 한 글자도 안 바꾼다.
+4. OWPML 표 개수·텍스트 길이를 ParseMetrics 에 실어 품질 게이트가
+   조용한 표 소실을 잡게 한다.
+
+진입점은 parse_hwpx_bytes. 반환은 rhwp_parser.ParseOutput 과 같다.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
-# 배포 전 GCP 실물 검사. 버킷·DB·코퍼스는 만들지 않는다(존재만 본다).
-# 예외 두 가지만 고친다 — 둘 다 "없으면 배포가 조용히 헛도는" 것들이다.
+﻿# 배포 전 GCP 실물 검사. 버킷·DB·코퍼스는 만들지 않는다(존재만 본다).
+# 예외 두 가지만 고친다 - 둘 다 "없으면 배포가 조용히 헛도는" 것들이다.
 #   1) 기본 컴퓨팅 SA 가 없으면 물어보고 compute.googleapis.com 을 켠다
-#      (SA 를 직접 만들 수는 없다 — API 를 켜야 Google 이 만든다)
+#      (SA 를 직접 만들 수는 없다 - API 를 켜야 Google 이 만든다)
 #   2) 공유드라이브에 그 SA 가 없으면 물어보고 뷰어로 초대한다(대화형일 때만)
 # 자동 조치를 끄려면 $env:PREFLIGHT_NO_FIX = "1"
 #
@@ -180,7 +180,7 @@ function New-ImpersonatedToken {
     .SYNOPSIS
       SA 를 가장한 액세스 토큰을 발급한다. 스코프를 지정할 수 있는 게 핵심이다.
     .NOTES
-      호출자는 cloud-platform 스코프면 충분하다 — Drive 스코프는 발급받는 토큰에
+      호출자는 cloud-platform 스코프면 충분하다 - Drive 스코프는 발급받는 토큰에
       붙는다. 대신 호출자에게 그 SA 의 roles/iam.serviceAccountTokenCreator 가
       있어야 한다. 부여 직후에는 IAM 전파에 수십 초가 걸린다.
   #>
@@ -196,7 +196,7 @@ function New-ImpersonatedToken {
 function Test-SaDriveAccess {
   <#
     .SYNOPSIS
-      SA 가 실제로 그 공유드라이브를 읽는지 본다. 멤버 목록 조회보다 정확하다 —
+      SA 가 실제로 그 공유드라이브를 읽는지 본다. 멤버 목록 조회보다 정확하다 -
       "봇이 읽을 수 있나" 를 런타임 신원으로 직접 답한다.
     .NOTES
       startPageToken 까지 보는 이유: DRIVE_IDS 에 폴더 ID 를 넣으면 파일 조회는
@@ -274,7 +274,7 @@ function Test-RagCorpusUsable {
     .NOTES
       Test-RagCorpusExists 는 존재만 본다. state 가 ACTIVE 가 아니면 색인이
       전부 실패하는데 워크플로는 그래도 SUCCEEDED 로 끝나 조용히 빈 코퍼스로
-      남는다 — 배포·백필 전에 여기서 막는다.
+      남는다 - 배포·백필 전에 여기서 막는다.
       corpusStatus 가 없는 응답(구 API)은 통과로 본다. 못 읽는 것과
       비정상인 것을 섞으면 정상 코퍼스까지 배포가 막힌다.
   #>
@@ -300,7 +300,7 @@ function Test-RagCorpusUsable {
 function Get-RagCorpusFileCount {
   <#
     .SYNOPSIS
-      코퍼스에 실린 파일 수. 조회 실패는 -1 — 0 과 섞으면 멀쩡한 코퍼스에
+      코퍼스에 실린 파일 수. 조회 실패는 -1 - 0 과 섞으면 멀쩡한 코퍼스에
       전체 백필을 다시 걸게 된다.
     .NOTES
       용도는 "비었는가" 판정이라 상한($Max)까지만 센다.
@@ -366,7 +366,7 @@ function Assert-GcpPrereqs {
 
   Write-Host "== preflight (GCP resources) =="
   if (-not (Get-Command gcloud -ErrorAction SilentlyContinue)) {
-    throw "gcloud not on PATH — https://cloud.google.com/sdk/docs/install"
+    throw "gcloud not on PATH - https://cloud.google.com/sdk/docs/install"
   }
 
   $errs = [System.Collections.Generic.List[string]]::new()
@@ -413,14 +413,14 @@ function Assert-GcpPrereqs {
   if ($token) {
     Add-PreflightResult $errs (Test-RagCorpusExists -Name $corpus -Token $token) `
       "RAG corpus" `
-      "missing $corpus — Vertex AI RAG 콘솔에서 코퍼스를 만든 뒤 RAG_CORPUS_NAME 에 경로를 넣을 것"
+      "missing $corpus - Vertex AI RAG 콘솔에서 코퍼스를 만든 뒤 RAG_CORPUS_NAME 에 경로를 넣을 것"
     if ($student) {
       Add-PreflightResult $errs (Test-RagCorpusExists -Name $student -Token $token) `
         "RAG corpus (student)" `
         "missing $student"
     }
   } else {
-    $errs.Add("gcloud auth print-access-token failed — gcloud auth login")
+    $errs.Add("gcloud auth print-access-token failed - gcloud auth login")
   }
 
   $numR = Get-GcloudText -GcloudArgs @("projects", "describe", $project, "--format=value(projectNumber)")
@@ -430,10 +430,10 @@ function Assert-GcpPrereqs {
     # 주소를 조립만 하고 ok 를 찍던 자리다. 기본 컴퓨팅 SA 는 Compute Engine API 를
     # 켤 때 생기므로, 안 켠 프로젝트에는 **계정 자체가 없다**. 그런데도 ok 로 넘어가면
     # 다음 Drive 단계에서 "Google 계정이 없는 이메일 주소" 라는 엉뚱한 메시지를 만나
-    # 공유 정책 문제로 오해하게 된다 — 실제로는 없는 계정을 공유하려 한 것이다.
+    # 공유 정책 문제로 오해하게 된다 - 실제로는 없는 계정을 공유하려 한 것이다.
     $saOk = Test-ServiceAccountExists -Project $project -Email $sa
     if (-not $saOk) {
-      Write-Host "MISS Cloud Run SA $sa — 없다"
+      Write-Host "MISS Cloud Run SA $sa - 없다"
       if (Confirm-PreflightAction "     생성하시겠습니까? (compute.googleapis.com 활성화)") {
         $saOk = Restore-DefaultComputeSa -Project $project -Email $sa
       }
@@ -441,7 +441,7 @@ function Assert-GcpPrereqs {
     Add-PreflightResult $errs $saOk `
       "Cloud Run SA $sa" `
       ("service account missing. 수동: gcloud services enable compute.googleapis.com --project=$project " +
-       "— 켠 뒤에도 안 생기면 GCP 콘솔 IAM 및 관리자 > 서비스 계정 에서 확인할 것")
+       "- 켠 뒤에도 안 생기면 GCP 콘솔 IAM 및 관리자 > 서비스 계정 에서 확인할 것")
   } else {
     $errs.Add("project number: cannot resolve default compute SA")
   }
@@ -449,7 +449,7 @@ function Assert-GcpPrereqs {
   $driveIds = @((Get-EnvOr DRIVE_IDS "") -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
   # Drive 호출은 토큰을 따로 잡는다. `auth print-access-token` 은 cloud-platform
   # 스코프뿐이라 Drive API 가 403 을 낸다. Drive 스코프는 ADC 쪽에만 붙일 수 있어
-  # (`auth application-default login --scopes=...`) 그쪽을 우선 쓴다 — 이걸 안 하면
+  # (`auth application-default login --scopes=...`) 그쪽을 우선 쓴다 - 이걸 안 하면
   # 실패 안내문대로 재로그인해도 preflight 는 계속 같은 403 을 낸다.
   $adcR = Get-GcloudText -GcloudArgs @("auth", "application-default", "print-access-token")
   $driveToken = if ($adcR.Ok -and $adcR.Text) { $adcR.Text.Split("`n")[0].Trim() } else { $token }
@@ -470,7 +470,7 @@ function Assert-GcpPrereqs {
         Write-Host "FAIL Drive $did : 파일은 읽히는데 델타 시작점이 없다 (HTTP $($probe.Code))"
         Write-Host "     DRIVE_IDS 가 공유드라이브가 아니라 폴더 ID 일 가능성이 높다"
         Write-Host "     폴더는 SYNC_FOLDER_IDS 로 옮기고 DRIVE_IDS 에는 0A... 형태를 넣을 것"
-        $errs.Add("Drive ${did}: 델타 시작점 없음 — 공유드라이브 ID 가 맞는지 확인")
+        $errs.Add("Drive ${did}: 델타 시작점 없음 - 공유드라이브 ID 가 맞는지 확인")
         continue
       } elseif ($probe.Stage -eq "access") {
         Write-Host "MISS Drive $did : SA 가 접근하지 못한다 (HTTP $($probe.Code))"
@@ -494,7 +494,7 @@ function Assert-GcpPrereqs {
         if (Confirm-PreflightAction "     뷰어로 초대하시겠습니까?") {
           $add = Add-DriveMember -DriveId $did -Email $sa -Role "reader" -Token $driveToken
           if ($add.Ok) {
-            Write-Host "     초대 완료 — SA 실접근으로 다시 확인한다"
+            Write-Host "     초대 완료 - SA 실접근으로 다시 확인한다"
             $again = Test-SaDriveAccess -Sa $sa -DriveId $did -CallerToken $token
             if ($again.Ok) {
               $hit = $true; $conclusive = $true
@@ -517,7 +517,7 @@ function Assert-GcpPrereqs {
           "Cloud Run SA 가 접근하지 못함. .\scripts\share_drive.ps1 또는 공유드라이브 관리에서 $sa 를 뷰어 이상으로 초대"
       } else {
         # 확인 경로가 둘 다 막혔다. 여기서 실패로 처리하면 Token Creator 도 Drive
-        # 스코프도 없는 정상 환경(예: CI)까지 배포가 막힌다 — 경고로 남긴다.
+        # 스코프도 없는 정상 환경(예: CI)까지 배포가 막힌다 - 경고로 남긴다.
         Write-Host "WARN Drive $did share($sa) : 확인 불가. 콘솔에서 $sa 를 뷰어 이상으로 초대할 것"
       }
     }

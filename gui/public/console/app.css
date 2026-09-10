@@ -302,6 +302,13 @@ button, select { cursor: pointer; }
 .status-table tbody tr { transition: background 120ms ease; }
 .status-table tbody tr:hover { background: #fbfcff; }
 .status-table tbody tr:last-child td { border-bottom: 0; }
+.status-table .service-lookup-row:hover { background: transparent; }
+.service-lookup-row td { height: 190px; text-align: center; }
+.service-lookup-row td > div { display: inline-flex; align-items: center; gap: 11px; color: var(--primary); text-align: left; }
+.service-lookup-row .loader-ring { width: 21px; height: 21px; flex: none; }
+.service-lookup-row td span:not(.loader-ring) { display: grid; gap: 3px; }
+.service-lookup-row b { color: var(--ink); font-size: 12px; }
+.service-lookup-row small { color: var(--muted); font-size: 9px; }
 .department-cell { display: flex; align-items: center; gap: 11px; min-width: 165px; }
 .department-avatar { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; color: var(--primary); background: var(--primary-soft); font-size: 11px; font-weight: 800; text-transform: uppercase; }
 .department-cell > span { display: grid; gap: 3px; }

@@ -774,7 +774,7 @@ main:
     - check_recovery_enabled:
         switch:
           - condition: ${run_recovery == false}
-            next: return_summary
+            next: finalize_summary
 
     - recover_pending_index:
         try:
@@ -863,7 +863,7 @@ main:
                   severity: "ERROR"
                   text: ${"retry-failed failed " + json.encode_to_string(retry_err)}
             - retry_skip:
-                next: return_summary
+                next: finalize_summary
 
     - check_retry_result:
         switch:
@@ -878,7 +878,7 @@ main:
                     severity: "ERROR"
                     text: ${"retry-failed incomplete " + json.encode_to_string(default(retry_resp.body.totals, empty_map))}
               - finish_after_retry_incomplete:
-                  next: return_summary
+                  next: finalize_summary
 
     - log_retry:
         call: sys.log
@@ -898,9 +898,16 @@ main:
                     # 보고하면 매일 거짓 경보가 된다. 대신 여기서 눈에 띄게 남긴다.
                     text: ${"parked " + string(totals.parked) + " docs (dlq=" + string(totals.dlq) + " splitQueued=" + string(totals.splitQueued) + ") — 큐에 남아 있고 자동 회수되지 않는다"}
 
+    # Workflow 실행 상태도 실제 결과와 같아야 한다. return ok=false 는 콘솔에서
+    # SUCCEEDED 로 보이므로 Scheduler/알림이 부분 실패를 정상으로 오인한다.
+    - finalize_summary:
+        switch:
+          - condition: ${totals.failed > 0 or totals.indexFailed > 0}
+            raise: ${"sync incomplete " + json.encode_to_string(totals)}
+
     - return_summary:
         return:
-          ok: ${totals.failed == 0 and totals.indexFailed == 0}
+          ok: true
           totals: ${totals}
           region: ${region}
           projectId: ${project_id}

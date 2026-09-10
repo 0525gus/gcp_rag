@@ -32,6 +32,13 @@ _CORPUS_INDEX_CACHE: dict[str, tuple[float, dict[str, list[str]]]] = {}
 _CORPUS_DIRTY_IDS: dict[str, set[str]] = {}
 _INDEX_TTL_SECONDS = 300.0
 
+# ragFiles.list 는 페이지당 최대 100건이다. 큰 코퍼스를 pager에 한 번에 맡기면
+# 중간 페이지의 429에서 전체 순회가 첫 페이지부터 재시작돼 영원히 완주하지 못한다.
+# 페이지 토큰을 직접 보존하고 60 RPM 지역 쿼터에 여유를 둔다.
+_RAG_LIST_PAGE_SIZE = 100
+_RAG_LIST_PAGE_INTERVAL_SECONDS = 1.5
+_RAG_LIST_PAGE_RETRIES = 10
+
 
 @dataclass(frozen=True)
 class ImportOutcome:
@@ -386,12 +393,55 @@ class RagEngineClient:
         return []
 
     def list_files(self) -> list[Any]:
-        # SDK는 호출 시 pager만 만들고 실제 RPC는 순회할 때 보낼 수 있다. list()가
-        # 재시도 바깥에 있으면 그 지연 RPC의 429가 그대로 500으로 빠진다.
-        return _with_throttle_retry(
-            lambda: list(rag.list_files(corpus_name=self.corpus_name)),
-            what="list_files",
+        """코퍼스 파일을 페이지별로, 진행 지점을 잃지 않고 조회한다.
+
+        SDK pager 전체를 ``list()``로 감싸 재시도하면 60번째 페이지에서 429가 난
+        경우에도 첫 페이지부터 다시 읽는다. 페이지 토큰을 호출자가 관리해야 현재
+        페이지에서만 기다렸다가 이어갈 수 있다.
+        """
+        files: list[Any] = []
+        page_token: str | None = None
+        page_number = 0
+
+        while True:
+            current_token = page_token
+
+            def _fetch_page(token: str | None = current_token) -> tuple[list[Any], str]:
+                pager = rag.list_files(
+                    corpus_name=self.corpus_name,
+                    page_size=_RAG_LIST_PAGE_SIZE,
+                    page_token=token,
+                )
+                # pager.pages의 첫 값은 생성 시 이미 받은 응답이다. 다음 페이지는
+                # 새 토큰으로 별도 호출해야 429 재시도 때 앞 페이지를 반복하지 않는다.
+                try:
+                    response = next(iter(pager.pages))
+                except StopIteration:
+                    return [], ""
+                return (
+                    list(getattr(response, "rag_files", ())),
+                    str(getattr(response, "next_page_token", "") or ""),
+                )
+
+            page_files, page_token = _with_throttle_retry(
+                _fetch_page,
+                what=f"list_files page={page_number + 1}",
+                max_retries=_RAG_LIST_PAGE_RETRIES,
+            )
+            files.extend(page_files)
+            page_number += 1
+            if not page_token:
+                break
+            time.sleep(_RAG_LIST_PAGE_INTERVAL_SECONDS)
+
+        logger.info(
+            "RAG files listed corpus=%s pages=%s files=%s",
+            self.corpus_name,
+            page_number,
+            len(files),
         )
+        return files
+
     def _file_index(self, wanted: set[str] | None = None) -> dict[str, list[str]]:
         """fileId → RagFile resource_name 목록.
 

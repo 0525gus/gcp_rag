@@ -207,7 +207,10 @@ def test_text_file_keeps_breadcrumb_body_path() -> None:
     assert "본문 내용" in gcs.md[0][1]
 
 
-def test_binary_file_keeps_copy_plus_sidecar() -> None:
+def test_binary_file_keeps_copy_plus_sidecar(monkeypatch) -> None:
+    # 이 테스트의 관심사는 일반 바이너리 업로드 계약이다. PDF 텍스트 판정은
+    # 아래의 실제 blank PDF 테스트에서 별도로 고정한다.
+    monkeypatch.setattr(sync_main, "_pdf_has_extractable_text", lambda _data: (True, None))
     res, gcs, _ = _run(
         b"%PDF-1.4 fake",
         body=_body(name="문서.pdf", mime="application/pdf"),
@@ -215,6 +218,27 @@ def test_binary_file_keeps_copy_plus_sidecar() -> None:
     assert gcs.blobs == ["f1.pdf"]
     assert gcs.sidecars == ["f1"]
     assert gcs.md == []
+
+
+def test_scanned_pdf_falls_back_to_sidecar() -> None:
+    """텍스트 없는 스캔 PDF가 Vertex 배치 전체를 반복 실패시키면 안 된다."""
+    from pypdf import PdfWriter  # noqa: PLC0415
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    buf = io.BytesIO()
+    writer.write(buf)
+
+    res, gcs, store = _run(
+        buf.getvalue(),
+        body=_body(name="스캔본.pdf", mime="application/pdf"),
+    )
+
+    assert res["status"] == "GCS_READY"
+    assert res["gcsUris"] == ["gs://nb/f1.meta.md"]
+    assert gcs.blobs == []
+    assert gcs.sidecars == ["f1"]
+    assert "PDF_NO_EXTRACTABLE_TEXT" in (store.upserts[-1].error or "")
 
 
 # ------------------------------------------------- 본문 추출 수단이 없는 형식
@@ -315,6 +339,7 @@ def test_split_pdf_parts_are_not_measured_against_the_original_size(monkeypatch)
     결과물이 하나도 업로드되지 않는다 — 로컬 종단 검증에서 실제로 잡힌 결함이다.
     """
     parts = [b"%PDF-1.4 part1", b"%PDF-1.4 part2"]
+    monkeypatch.setattr(sync_main, "_pdf_has_extractable_text", lambda _data: (True, None))
     monkeypatch.setattr(sync_main, "split_pdf", lambda data, limit: parts)
     # 분할 트리거와 사후 게이트가 함께 쓰는 한도만 낮춘다.
     # 다운로드 전 게이트는 max_gcs_bytes 를 쓰므로 영향받지 않는다.
@@ -338,6 +363,7 @@ def test_unsplittable_oversized_pdf_still_goes_to_split_queue(monkeypatch) -> No
     def _boom(data, limit):  # noqa: ANN001
         raise PdfSplitError("깨진 PDF")
 
+    monkeypatch.setattr(sync_main, "_pdf_has_extractable_text", lambda _data: (True, None))
     monkeypatch.setattr(sync_main, "split_pdf", _boom)
     monkeypatch.setattr(sync_main, "_effective_limit", lambda settings, ext: 4)
 

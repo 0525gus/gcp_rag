@@ -1,4 +1,4 @@
-# config/ 로더 + 배포 필수값 검사.
+﻿# config/ 로더 + 배포 필수값 검사.
 # deploy.ps1 / deploy_mcp.ps1 / preflight.ps1 / share_drive.ps1 / backfill.ps1 /
 # setup_alerts.ps1 이 dot-source 한다.
 #
@@ -261,7 +261,7 @@ function Require-McpDeployEnv {
       $errs.Add("RAG_CORPUS_NAME: student deploy must use RAG_CORPUS_NAME_STUDENT")
     }
   } elseif ($env:RAG_CORPUS_NAME_STUDENT -and $env:RAG_CORPUS_NAME -eq $env:RAG_CORPUS_NAME_STUDENT) {
-    $errs.Add("MCP_AUDIENCE: student corpus on staff service $service — set MCP_AUDIENCE=student")
+    $errs.Add("MCP_AUDIENCE: student corpus on staff service $service - set MCP_AUDIENCE=student")
   }
   Assert-EnvErrors $errs
 }

@@ -4,6 +4,7 @@
   const state = {
     nonce: "",
     departments: [],
+    cloudServicesLoading: false,
     environment: null,
     currentView: "dashboard",
     currentStep: 1,
@@ -12,6 +13,7 @@
     selectedCode: null,
     pollTimer: null,
     editingCode: null,
+    editingSource: null,
     editingRevision: null,
     setupResourceRequest: 0,
     setupMode: "create",
@@ -429,10 +431,19 @@
         return statusDiff || a.code.localeCompare(b.code);
       });
 
-    $("#departmentMeta").textContent = `${state.departments.length}개 서비스`;
-    $("#emptyState").classList.toggle("hidden", state.departments.length > 0);
-    $(".table-wrap").classList.toggle("hidden", state.departments.length === 0);
-    $("#departmentRows").innerHTML = rows.map((dept) => {
+    $("#departmentMeta").innerHTML = state.cloudServicesLoading
+      ? (state.departments.length ? `${state.departments.length}개 서비스` : "")
+      : `${state.departments.length}개 서비스`;
+    $("#emptyState").classList.toggle(
+      "hidden", state.cloudServicesLoading || state.departments.length > 0,
+    );
+    $(".table-wrap").classList.toggle(
+      "hidden", !state.cloudServicesLoading && state.departments.length === 0,
+    );
+    const loadingRow = state.cloudServicesLoading && state.departments.length === 0
+      ? '<tr class="service-lookup-row"><td colspan="9"><div><span class="loader-ring" aria-hidden="true"></span><span><b>등록 서비스 조회 중</b><small>Cloud Run에서 배포된 학과 서비스를 확인하고 있습니다.</small></span></div></td></tr>'
+      : "";
+    $("#departmentRows").innerHTML = loadingRow + rows.map((dept) => {
       const result = dept.lastResult;
       const overall = effectiveStatus(dept);
       const checkedAt = result?.checkedAt;
@@ -443,11 +454,11 @@
         <td>${badge(overall)}</td>
         ${layers.map((layer) => `<td>${badge(overall === "CHECKING" ? "CHECKING" : layerStatus(result, layer))}</td>`).join("")}
         <td class="time-cell" title="${escapeHtml(checkedAt || "")}">${overall === "CHECKING" ? "확인 중" : relativeTime(checkedAt)}</td>
-        <td><div class="row-actions"><button class="row-button" data-action="check" title="${dept.cloudOnly ? "Cloud 메타데이터 항목" : "다시 확인"}" aria-label="${escapeHtml(dept.name)} 다시 확인" ${dept.cloudOnly ? "disabled" : ""}>↻</button><button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세">›</button></div></td>
+        <td><div class="row-actions"><button class="row-button" data-action="check" title="다시 확인" aria-label="${escapeHtml(dept.name)} 다시 확인">↻</button><button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세">›</button></div></td>
       </tr>`;
     }).join("");
 
-    $$("#departmentRows tr").forEach((row) => {
+    $$("#departmentRows tr[data-code]").forEach((row) => {
       row.addEventListener("click", (event) => {
         const button = event.target.closest("button");
         const code = row.dataset.code;
@@ -459,6 +470,8 @@
   }
 
   async function loadDepartments() {
+    state.cloudServicesLoading = true;
+    renderDepartments();
     try {
       // Cloud 조회는 로컬 YAML과 동시에 시작하되, 느린 gcloud 왕복 때문에 로컬 목록
       // 표시까지 늦어지지 않게 먼저 렌더한다.
@@ -483,12 +496,15 @@
       });
       state.departments = [...merged.values()];
       state.mcpServers.clear();
+      state.cloudServicesLoading = false;
       renderDepartments();
       renderCorpusDepartmentOptions();
       if (!cloudResult.ok) {
         toast("Cloud MCP 목록을 읽지 못했습니다", cloudResult.error.message, "fail");
       }
     } catch (error) {
+      state.cloudServicesLoading = false;
+      renderDepartments();
       toast("학과 목록을 불러오지 못했습니다", error.message, "fail");
     }
   }
@@ -523,6 +539,13 @@
     return state.syncTargets.find((item) => item.code === code) || null;
   }
 
+  function syncTargetName(target) {
+    return state.departments.find((item) => item.code === target?.code)?.name
+      || target?.name
+      || target?.code
+      || "학과";
+  }
+
   function syncTargetRows(target) {
     if (!target) return '<p>학과를 선택하면 대상 범위를 표시합니다.</p>';
     const corpora = target.corpora || {};
@@ -535,7 +558,7 @@
     const select = $("#syncDepartment");
     const current = state.syncPreferredDepartment || select.value;
     select.innerHTML = '<option value="">학과 선택</option>' + state.syncTargets.map((target) =>
-      `<option value="${escapeHtml(target.code)}">${escapeHtml(target.name)} · ${escapeHtml(target.code)}</option>`
+      `<option value="${escapeHtml(target.code)}">${escapeHtml(syncTargetName(target))} · ${escapeHtml(target.code)}</option>`
     ).join("");
     if (state.syncTargets.some((item) => item.code === current)) select.value = current;
     else if (state.syncTargets.length === 1) select.value = state.syncTargets[0].code;
@@ -866,7 +889,7 @@
       submitManualSync();
       return;
     }
-    $("#syncConfirmTarget").innerHTML = `<div class="sync-target-row"><span>학과</span><b>${escapeHtml(target.name)} · ${escapeHtml(target.code)}</b></div>${syncTargetRows(target)}`;
+    $("#syncConfirmTarget").innerHTML = `<div class="sync-target-row"><span>학과</span><b>${escapeHtml(syncTargetName(target))} · ${escapeHtml(target.code)}</b></div>${syncTargetRows(target)}`;
     $("#syncConfirmModal").classList.add("open");
     $("#syncConfirmModal").setAttribute("aria-hidden", "false");
     $("#confirmManualSync").focus();
@@ -888,7 +911,7 @@
       closeSyncConfirmModal();
       toast(
         state.syncMode === "backfill" ? "전체 다시 적재를 시작했습니다" : "변경분 동기화를 시작했습니다",
-        `${target.name} · ${run.executionId || "Workflow 실행"}`,
+        `${syncTargetName(target)} · ${run.executionId || "Workflow 실행"}`,
         "ok",
       );
       await loadSyncRuns(true);
@@ -1816,6 +1839,7 @@
         return;
       }
       state.activeRunId = null;
+      updateCheckAllButton();
       state.checkingCodes.clear();
       $("#runStrip").classList.add("hidden");
       $("#lastChecked").textContent = `마지막 확인 ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`;
@@ -1829,6 +1853,7 @@
       await loadDepartments();
     } catch (error) {
       state.activeRunId = null;
+      updateCheckAllButton();
       state.checkingCodes.clear();
       $("#runStrip").classList.add("hidden");
       renderDepartments();
@@ -1837,12 +1862,14 @@
     }
   }
 
+  function updateCheckAllButton() {
+    $("#checkAllButton").disabled = Boolean(state.activeRunId);
+  }
+
   async function startStatus(codes = []) {
     if (!state.nonce || state.activeRunId) return;
-    const localCodes = new Set(
-      state.departments.filter((item) => !item.cloudOnly).map((item) => item.code),
-    );
-    const scope = (codes.length ? codes : [...localCodes]).filter((code) => localCodes.has(code));
+    const availableCodes = new Set(state.departments.map((item) => item.code));
+    const scope = (codes.length ? codes : [...availableCodes]).filter((code) => availableCodes.has(code));
     if (!scope.length) {
       toast("확인할 학과가 없습니다", "먼저 학과 설정을 추가해 주세요.");
       return;
@@ -1855,9 +1882,10 @@
     try {
       const run = await api("/api/v1/status-runs", {
         method: "POST",
-        body: { departments: codes, offline: false, strict: false },
+        body: { departments: scope, offline: false, strict: false },
       });
       state.activeRunId = run.runId;
+      updateCheckAllButton();
       pollRun(run.runId);
     } catch (error) {
       state.checkingCodes.clear();
@@ -1901,7 +1929,7 @@
       $("#drawerContent").innerHTML = metadataHtml + `<div class="empty-state"><h3>아직 검사 결과가 없습니다</h3><p>이 학과의 상태를 확인하면 단계별 결과가 표시됩니다.</p></div>`;
     } else {
       $("#drawerContent").innerHTML = metadataHtml + Object.entries(layerLabels).map(([layer, label]) => {
-        const checks = result.checks.filter((item) => item.layer === layer);
+        const checks = result.checks.filter((item) => item.layer === layer && !item.hidden);
         if (!checks.length) return "";
         return `<section class="check-layer"><h3>${label.toUpperCase()}</h3><div class="check-list">${checks.map((item) => `
           <article class="check-row" data-status="${escapeHtml(item.status)}">
@@ -1912,10 +1940,12 @@
     }
     $("#drawerCheck").dataset.code = code;
     $("#drawerEdit").dataset.code = code;
-    $("#drawerCheck").disabled = Boolean(dept.cloudOnly);
-    $("#drawerEdit").disabled = Boolean(dept.cloudOnly);
-    $("#drawerCheck").title = dept.cloudOnly ? "로컬 YAML이 없어 일반 검사를 실행할 수 없습니다." : "다시 확인";
-    $("#drawerEdit").title = dept.cloudOnly ? "Cloud 메타데이터 항목은 읽기 전용입니다." : "설정 수정";
+    $("#drawerCheck").disabled = false;
+    $("#drawerEdit").disabled = Boolean(dept.cloudOnly && !dept.cloudEditable);
+    $("#drawerCheck").title = "다시 확인";
+    $("#drawerEdit").title = dept.cloudOnly && !dept.cloudEditable
+      ? "기존 v1 배포는 원래 환경에서 한 번 재배포해야 수정할 수 있습니다."
+      : dept.cloudOnly ? "Cloud 설정 수정" : "설정 수정";
     $("#drawerDelete").dataset.code = code;
     $("#drawerMore").removeAttribute("open");
     $("#drawerMore").classList.toggle("hidden", Boolean(dept.cloudOnly));
@@ -2322,6 +2352,7 @@
         { key: "deploy", label: "Cloud Run 배포", status: "PENDING", detail: "서비스 생성 또는 업데이트" },
         { key: "ready", label: "Ready 확인", status: "PENDING", detail: "최신 revision 확인" },
         { key: "health", label: "Health 확인", status: "PENDING", detail: "실제 서비스 응답 확인" },
+        { key: "syncMap", label: "학과 라우팅 반영", status: "PENDING", detail: "rag-sync 동기화 대상에 추가" },
       ],
       logs: [],
     });
@@ -3259,6 +3290,7 @@
     $$('[data-corpus-mode]').forEach((button) => { button.disabled = false; });
     window.clearTimeout(state.codeAvailabilityTimer);
     state.editingCode = null;
+    state.editingSource = null;
     state.editingRevision = null;
     state.drivePreflightSignature = "";
     state.driveConflicts = [];
@@ -3289,15 +3321,20 @@
     showStep(1);
   }
 
-  function setEditorMode(editing) {
+  function setEditorMode(editing, source = "local") {
+    const cloud = editing && source === "cloud";
     $("#createEyebrow").textContent = editing ? "EDIT DEPARTMENT" : "NEW DEPARTMENT";
     $("#createTitle").textContent = editing ? "학과 서비스 수정" : "서비스 등록";
     $("#createDescription").textContent = editing
-      ? "기존 MCP 키를 유지하면서 연결 설정을 안전하게 수정합니다."
+      ? cloud
+        ? "Cloud Run의 전체 설정을 수정하고 새 revision으로 바로 배포합니다."
+        : "기존 MCP 키를 유지하면서 연결 설정을 안전하게 수정합니다."
       : "필요한 정보를 단계별로 입력하면 안전한 YAML을 생성합니다.";
     $("[data-step-marker='3'] b").textContent = editing ? "검토·저장" : "검토·생성";
     $("#confirmText").textContent = editing
-      ? "변경 내용을 확인했으며 기존 YAML 설정을 업데이트합니다."
+      ? cloud
+        ? "변경 내용을 확인했으며 Cloud Run 설정을 업데이트하고 재배포합니다."
+        : "변경 내용을 확인했으며 기존 YAML 설정을 업데이트합니다."
       : "이 파일은 git으로 복구되지 않으며 기존 파일을 덮어쓰지 않는다는 것을 확인했습니다.";
     $("#createDepartment").textContent = editing ? "변경사항 저장" : "YAML 생성";
   }
@@ -3307,8 +3344,9 @@
       const config = await api(`/api/v1/departments/${code}/config`);
       resetWizard();
       state.editingCode = code;
+      state.editingSource = config.source || "local";
       state.editingRevision = config.configRevision;
-      setEditorMode(true);
+      setEditorMode(true, state.editingSource);
       const form = $("#departmentForm");
       form.elements.code.value = config.code;
       form.elements.code.readOnly = true;
@@ -3381,6 +3419,7 @@
     button.textContent = state.editingCode ? "저장 중…" : "생성 중…";
     try {
       const wasEditing = Boolean(state.editingCode);
+      const wasCloud = state.editingSource === "cloud";
       const payload = formPayload();
       if (state.editingCode) payload.configRevision = state.editingRevision;
       if (state.allowDuplicateDriveIds) payload.allowDuplicateDriveIds = true;
@@ -3388,12 +3427,23 @@
         state.editingCode ? `/api/v1/departments/${state.editingCode}` : "/api/v1/departments",
         { method: state.editingCode ? "PUT" : "POST", body: payload },
       );
-      toast(state.editingCode ? "설정을 저장했습니다" : "YAML을 생성했습니다", result.path, "ok");
+      toast(
+        wasCloud ? "Cloud 설정 배포를 시작했습니다" : state.editingCode ? "설정을 저장했습니다" : "YAML을 생성했습니다",
+        result.path,
+        "ok",
+      );
       resetWizard();
-      await loadDepartments();
       switchView("dashboard");
-      if (!wasEditing) await openOrStartCommonRuntimeDeployment(result.code);
-      startStatus([result.code]);
+      if (result.deployment) {
+        state.mcpDeploymentCode = result.code;
+        renderMcpDeployment(result.deployment);
+        showMcpDeploymentModal();
+        pollMcpDeployment(result.deployment.runId);
+      } else {
+        await loadDepartments();
+        if (!wasEditing) await openOrStartCommonRuntimeDeployment(result.code);
+        startStatus([result.code]);
+      }
     } catch (error) {
       if (error.data?.error?.code === "DRIVE_ID_CONFLICT") {
         openDriveConflictModal(error.data.error.driveConflicts || []);
@@ -3673,6 +3723,7 @@
       const run = data.runs?.[0];
       if (!run) return;
       state.activeRunId = run.runId;
+      updateCheckAllButton();
       run.scope.forEach((code) => state.checkingCodes.add(code));
       $("#runStrip").classList.remove("hidden");
       renderDepartments();

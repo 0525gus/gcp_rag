@@ -1,4 +1,4 @@
-# 공유드라이브에 Cloud Run SA 를 멤버로 초대한다. 이미 멤버면 건너뛴다(멱등).
+﻿# 공유드라이브에 Cloud Run SA 를 멤버로 초대한다. 이미 멤버면 건너뛴다(멱등).
 # 사용: .\scripts\share_drive.ps1
 #       .\scripts\share_drive.ps1 -DryRun          누구를 어디에 넣을지만 출력
 #       .\scripts\share_drive.ps1 -Role writer     기본은 reader
@@ -39,7 +39,7 @@ Add-RequiredEnv $errs DRIVE_IDS "shared drive id"
 Assert-EnvErrors $errs
 
 if (-not (Get-Command gcloud -ErrorAction SilentlyContinue)) {
-  throw "gcloud not on PATH — https://cloud.google.com/sdk/docs/install"
+  throw "gcloud not on PATH - https://cloud.google.com/sdk/docs/install"
 }
 
 $PROJECT_ID = Get-EnvOr GCP_PROJECT_ID ""
@@ -48,7 +48,7 @@ $driveIds = @((Get-EnvOr DRIVE_IDS "") -split "," | ForEach-Object { $_.Trim() }
 # Cloud Run 기본 컴퓨팅 SA. preflight 와 같은 방식으로 프로젝트 번호에서 만든다.
 $numR = Get-GcloudText -GcloudArgs @("projects", "describe", $PROJECT_ID, "--format=value(projectNumber)")
 if (-not $numR.Ok -or -not $numR.Text) {
-  throw "프로젝트 번호 조회 실패 — Cloud Run SA 를 특정할 수 없다: $($numR.Text)"
+  throw "프로젝트 번호 조회 실패 - Cloud Run SA 를 특정할 수 없다: $($numR.Text)"
 }
 $SA = "$($numR.Text.Trim())-compute@developer.gserviceaccount.com"
 
@@ -60,7 +60,7 @@ if ($adc.Ok -and $adc.Text) {
   $tokenSource = "application-default"
 } else {
   $plain = Get-GcloudText -GcloudArgs @("auth", "print-access-token")
-  if (-not $plain.Ok) { throw "액세스 토큰을 못 얻었다 — gcloud auth login" }
+  if (-not $plain.Ok) { throw "액세스 토큰을 못 얻었다 - gcloud auth login" }
   $TOKEN = $plain.Text.Trim()
   $tokenSource = "user (Drive 스코프 없을 수 있음)"
 }
@@ -93,7 +93,7 @@ foreach ($did in $driveIds) {
     }
   } else {
     # 멤버 목록을 못 읽어도 초대는 될 수 있다(권한 범위가 다름). 시도는 해 본다.
-    Write-Host "warn $did  멤버 목록을 못 읽었다 (HTTP $($perm.Code)) — 초대는 시도한다"
+    Write-Host "warn $did  멤버 목록을 못 읽었다 (HTTP $($perm.Code)) - 초대는 시도한다"
   }
 
   if ($DryRun) {

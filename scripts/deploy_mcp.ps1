@@ -1,4 +1,4 @@
-# MCP 서버 Cloud Run 배포 (FactChat MCP 커넥터용)
+﻿# MCP 서버 Cloud Run 배포 (FactChat MCP 커넥터용)
 #
 # deploy.ps1 도 MCP 를 올리지만 --no-allow-unauthenticated (IAM 전용)라 FactChat 이
 # 못 붙는다. 공개 URL 은 여기서만 나온다(ALLOW_UNAUTH, 기본 true).
@@ -157,13 +157,14 @@ foreach ($t in $targets) {
   if ($ALLOW_UNAUTH -ne "true") { $authArgs = @("--no-allow-unauthenticated") }
 
   # 다른 운영 PC가 로컬 YAML 없이도 Cloud Run에서 학과 설정을 복원한다.
-  # annotation 값은 비밀을 뺀 JSON의 base64url이고 쉼표가 없어 gcloud 인자에 안전하다.
+  # annotation 값은 학과 YAML 전체를 담은 JSON의 base64url이고 쉼표가 없어
+  # gcloud 인자에 안전하다. keys도 포함되므로 Cloud Run 조회 권한을 제한해야 한다.
   if ([string]::IsNullOrWhiteSpace($env:DEPT_CODE) -or
       [string]::IsNullOrWhiteSpace($env:MCP_AUDIENCE) -or
       [string]::IsNullOrWhiteSpace($env:DEPLOYMENT_METADATA_B64)) {
     throw "$SERVICE : Cloud Run 관리 메타데이터를 만들지 못했다"
   }
-  $managementLabels = "gcp-rag-managed=true,gcp-rag-dept=$($env:DEPT_CODE),gcp-rag-audience=$($env:MCP_AUDIENCE),gcp-rag-schema=v1"
+  $managementLabels = "gcp-rag-managed=true,gcp-rag-dept=$($env:DEPT_CODE),gcp-rag-audience=$($env:MCP_AUDIENCE),gcp-rag-schema=v2"
   $managementAnnotation = "gcp-rag.dev/department-metadata=$($env:DEPLOYMENT_METADATA_B64)"
 
   $envVars = "^|^GCP_PROJECT_ID=$PROJECT_ID|GCP_REGION=$REGION|RAG_CORPUS_NAME=$($env:RAG_CORPUS_NAME)|GCS_HWP_ORIGINAL_BUCKET=$GCS_HWP_ORIG|GCS_SOURCE_BUCKET=$GCS_SOURCE|FIRESTORE_DATABASE=$FS_DB|DOC_STATE_COLLECTION=$FS_COL|MCP_API_KEY=$MCP_API_KEY|TOP_K_DEFAULT=$TOP_K|SEARCH_FETCH_MULTIPLIER=$FETCH_MULT|SEARCH_FETCH_MAX=$FETCH_MAX"
