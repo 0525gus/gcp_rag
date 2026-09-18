@@ -3,6 +3,7 @@
 import json
 import os
 from dataclasses import replace
+from datetime import datetime, timezone
 
 import pytest
 from starlette.testclient import TestClient
@@ -11,6 +12,7 @@ from shared.html_text import clean_html_evidence, html_to_text
 from shared.models import DocState, DocStatus, SearchHit, SearchSource
 from shared.search_postprocess import CHUNK_JOINER, postprocess_hits
 from shared.search_response import response_documents
+import shared.search_response as search_response
 
 for key, value in {
     "GCP_PROJECT_ID": "test-project",
@@ -22,7 +24,20 @@ for key, value in {
 
 
 @pytest.fixture
-def server(monkeypatch):
+def clock(monkeypatch):
+    state = {"now": datetime(2026, 9, 18, 14, 59, 59, tzinfo=timezone.utc)}
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return state["now"].astimezone(tz)
+
+    monkeypatch.setattr(search_response, "datetime", FrozenDateTime)
+    return state
+
+
+@pytest.fixture
+def server(monkeypatch, clock):
     import services.mcp_server.main as app
 
     calls = []
@@ -56,7 +71,7 @@ def server(monkeypatch):
     app._cache.clear()
 
 
-def test_protocol_exposes_only_search_and_returns_evidence_once(server):
+def test_protocol_exposes_only_search_and_returns_evidence_once(server, clock):
     app, _, calls = server
     headers = {"Authorization": "Bearer test-key", "Accept": "application/json, text/event-stream"}
     with TestClient(app.build_app()) as client:
@@ -83,6 +98,10 @@ def test_protocol_exposes_only_search_and_returns_evidence_once(server):
         listed = rpc("tools/list")["result"]["tools"]
         assert [tool["name"] for tool in listed] == ["search"]
         assert "documents" in listed[0]["outputSchema"]["properties"]
+        for field in ("currentDate", "timeZone"):
+            assert listed[0]["outputSchema"]["properties"][field]["type"] == "string"
+            assert field in listed[0]["outputSchema"]["required"]
+        assert "currentDate" in listed[0]["description"]
         assert "TOP_K_DEFAULT" in listed[0]["description"]
         assert "7" in listed[0]["description"]
         assert "5" not in listed[0]["description"]
@@ -92,6 +111,8 @@ def test_protocol_exposes_only_search_and_returns_evidence_once(server):
         payload = result["structuredContent"]
         assert (payload["documentCount"], payload["chunkCount"]) == (2, 3)
         assert payload["schemaVersion"] == 2
+        assert payload["currentDate"] == "2026-09-18"
+        assert payload["timeZone"] == "Asia/Seoul"
         assert len(calls) == 1
         assert [d["citationId"] for d in payload["documents"]] == [1, 2]
         assert len(payload["documents"][0]["chunks"]) == 2
@@ -102,6 +123,12 @@ def test_protocol_exposes_only_search_and_returns_evidence_once(server):
         assert response_documents(result) == payload["documents"]
         # SDK emits a text representation for MCP clients without structured-output support.
         assert json.loads(result["content"][0]["text"]) == payload
+        clock["now"] = datetime(2026, 9, 18, 15, 0, 0, tzinfo=timezone.utc)
+        cached_result = rpc(
+            "tools/call", {"name": "search", "arguments": {"query": "규정", "top_k": 5}}
+        )["result"]
+        assert cached_result["structuredContent"] == {**payload, "currentDate": "2026-09-19"}
+        assert json.loads(cached_result["content"][0]["text"]) == cached_result["structuredContent"]
         removed = rpc("tools/call", {"name": "answer", "arguments": {"query": "규정"}})
         assert removed.get("error") or removed["result"].get("isError")
         assert len(calls) == 1
@@ -113,6 +140,8 @@ def test_empty_search_and_cached_response_do_not_claim_answerability(server):
     response = app.search("없는 문서")
     assert response == {
         "schemaVersion": 2,
+        "currentDate": "2026-09-18",
+        "timeZone": "Asia/Seoul",
         "documents": [],
         "documentCount": 0,
         "chunkCount": 0,
@@ -128,6 +157,38 @@ def test_new_query_runs_again_but_same_query_uses_cache(server):
     first = app.search("첫 검색")
     assert app.search("첫 검색") == first
     app.search("새 정보")
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize(
+    ("before", "after", "expected_before", "expected_after"),
+    [
+        ("2026-09-18T14:59:59+00:00", "2026-09-18T15:00:00+00:00", "2026-09-18", "2026-09-19"),
+        ("2026-09-30T14:59:59+00:00", "2026-09-30T15:00:00+00:00", "2026-09-30", "2026-10-01"),
+        ("2026-12-31T14:59:59+00:00", "2026-12-31T15:00:00+00:00", "2026-12-31", "2027-01-01"),
+    ],
+)
+def test_cached_date_rolls_over_in_korea_without_retrieval(
+    server, clock, monkeypatch, empty, before, after, expected_before, expected_after
+):
+    app, hits, calls = server
+    monkeypatch.setattr(app, "_CACHE_TTL", 60)
+    monkeypatch.setattr(app.time, "monotonic", lambda: 100.0)
+    if empty:
+        hits.clear()
+    clock["now"] = datetime.fromisoformat(before)
+    first = app.search("날짜 경계")
+    assert first["currentDate"] == expected_before
+    clock["now"] = datetime.fromisoformat(after)
+    second = app.search("날짜 경계")
+    assert second == {**first, "currentDate": expected_after}
+    assert second["timeZone"] == "Asia/Seoul"
+    assert len(calls) == 1
+    # Updating the date on the returned copy must not mutate the stored payload.
+    assert next(iter(app._cache.values()))[1]["currentDate"] == expected_before
+    fresh = app.search("새로운 날짜 질의")
+    assert fresh["currentDate"] == expected_after
     assert len(calls) == 2
 
 

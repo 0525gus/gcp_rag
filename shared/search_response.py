@@ -1,8 +1,19 @@
 """Public MCP search contract. Counts describe returned evidence, not answerability."""
 
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from typing_extensions import TypedDict
+
+
+# Current Korean civil time is UTC+09:00. A fixed offset keeps this independent
+# of the host timezone and of an optional IANA timezone database on Windows.
+_KST = timezone(timedelta(hours=9))
+
+
+def current_date_kst() -> str:
+    """Return the server's current Korean date, not a document/retrieval date."""
+    return datetime.now(_KST).date().isoformat()
 
 
 class EvidenceChunk(TypedDict):
@@ -30,6 +41,8 @@ class EvidenceDocument(TypedDict):
 
 class SearchResponse(TypedDict):
     schemaVersion: int
+    currentDate: str
+    timeZone: str
     documents: list[EvidenceDocument]
     documentCount: int
     chunkCount: int
@@ -43,6 +56,8 @@ def build_search_response(
 ) -> SearchResponse:
     response: SearchResponse = {
         "schemaVersion": 2,
+        "currentDate": current_date_kst(),
+        "timeZone": "Asia/Seoul",
         "documents": documents,
         "documentCount": len(documents),
         "chunkCount": sum(len(doc["chunks"]) for doc in documents),

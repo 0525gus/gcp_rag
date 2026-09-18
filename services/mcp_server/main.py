@@ -56,6 +56,7 @@ from shared.search_response import (  # noqa: E402
     EvidenceDocument,
     SearchResponse,
     build_search_response,
+    current_date_kst,
 )
 
 setup_logging()
@@ -127,8 +128,8 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
 # 지켜지지 않았다. 그 커밋도 "지시문은 무시당해도 데이터는 남으므로"라고 적어
 # 한계를 예상했다 — 남은 레버는 서버 쪽이다.
 #
-# 반환값이 완전히 같으므로 호출측 동작은 달라지지 않는다. 코퍼스는 하루 한 번
-# 바뀌므로 짧은 TTL 로 stale 위험이 사실상 없다. 0 이면 캐시를 끈다.
+# 문서 결과를 재사용하되 currentDate는 반환할 때 갱신한다.
+# 0 이면 캐시를 끈다.
 _CACHE_TTL = float(os.environ.get("SEARCH_CACHE_TTL_SECONDS", "60"))
 _CACHE_MAX = int(os.environ.get("SEARCH_CACHE_MAX_ENTRIES", "128"))
 _EXPERIMENT_DIAGNOSTICS = os.environ.get("SEARCH_EXPERIMENT_DIAGNOSTICS", "").strip().lower() in (
@@ -183,6 +184,9 @@ def search(
     마세요. sourceUri는 일반 문서의 미리보기 링크이며 HWP/HWPX 문서에서는 다운로드
     링크입니다. 검색 결과만으로 답할 수 없으면 확인되지 않은 부분을 밝혀 주세요.
     같은 정보를 얻기 위해 표현만 바꿔 반복 호출할 필요는 없습니다.
+    최상위 currentDate는 서버가 응답 시 계산한 오늘 날짜이며 timeZone은
+    Asia/Seoul입니다. 기간·마감 비교의 기준으로 사용하되 문서의 작성·개정일이나
+    검색 근거로 취급하지 마세요. 빈 결과와 캐시 적중 시에도 현재 날짜를 제공합니다.
 
     Args:
         query: 검색 질문 또는 검색어.
@@ -232,6 +236,9 @@ def search(
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.info("search cache hit query=%r top_k=%s", query, k)
+        # _cache_get returns a copy; refresh after lookup to cross KST midnight
+        # without re-retrieving documents or changing the cached evidence.
+        cached["currentDate"] = current_date_kst()
         return cached
 
     # 여유분 retrieve 후 후처리(파일당 청크 병합)로 k개.
