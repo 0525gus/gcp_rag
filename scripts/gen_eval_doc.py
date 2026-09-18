@@ -29,7 +29,7 @@ def cut(s, n):
 
 def score(rs, key="rank"):
     n = len(rs)
-    h = lambda k: sum(1 for r in rs if r[key] and r[key] <= k)  # noqa: E731
+    h = lambda k: sum(1 for r in rs if r[key] and r[key] <= k)
     mrr = sum((1.0 / r[key]) if r[key] else 0.0 for r in rs) / n
     return n, h(1), h(3), h(5), mrr
 
@@ -116,7 +116,7 @@ for r in rows:
     rank = r["rank"] or "-"
     ok = "O" if (r["rank"] and r["rank"] <= 5) else "**X**"
     same = "〃" if top == exp else exp
-    w(f"| {r['n']} | {cut(r['q'], 46)} | {top} | {same} | {rank} | {ok} |")
+    w(f"| {r['n']} | {cut(r.get('query', r.get('q')), 46)} | {top} | {same} | {rank} | {ok} |")
 w("")
 w("- □ `〃` 는 반환 1위가 곧 정답 문서인 경우")
 w("")
@@ -186,5 +186,6 @@ w("")
 w("- □ 세 번째 방안이 유리해 보이나, **측정 없이 변경하지 않음**")
 w("")
 
-open(OUT, "w", encoding="utf-8").write("\n".join(L) + "\n")
+with OUT.open("w", encoding="utf-8") as stream:
+    stream.write("\n".join(L) + "\n")
 print("작성 완료:", OUT, f"({len(L)} 줄)")

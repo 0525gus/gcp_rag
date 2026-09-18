@@ -1,414 +1,1255 @@
 [
   {
     "n": 1,
-    "q": "성과인센티브 시행세칙에서 학과나 행정부서 운영 성과 평가 부분이 어떻게 바뀌었나요?",
+    "query": "성과인센티브 시행세칙에서 학과나 행정부서 운영 성과 평가 부분이 어떻게 바뀌었나요?",
     "type": "대비표",
-    "file_id": "1D6I5DgYdzyQuyLf0da8uV_Jgt6L_Mrxk",
+    "expected_file": "1fkb-bGNAjINXJTFp42o8Xy3fSqO3f8hL",
     "name": "신구대비표(2026701).hwp",
-    "bundle": "규정 제·개정 및 폐지 안내 (1)"
+    "expected_bundle": "규정 제·개정 및 폐지 안내_20260626040654",
+    "expected_evidence": [
+      "제5조(성과인센티브 지급을 위한 평가) ① 제4조 제1호의 성과인센티브 지급을 위한 평가는 개인 실적평가와 학과(부) 및 행정부서 운영 성과에 대한 평가 결과를 합산하며, 평가 방법 등에 대해서는 총장이 따로 정하고, 성과평가에 대한 계획·결과 심의는 자체평가규정 제6~8조에 의거 자체평가기획위원회에서 심의한다. 단, 총장에 대한 인센티브 지급에 관하여는 이사장이 결정한다.,제5조(성과인센티브 지급을 위한 평가) ① －-－ －",
+      "-－－ －－－－－－ －－－ －－ －－－ －－ －－－－－ －－-－- － 행정부서 성과에 －－ －－ －－－ 활용하며, －－ －－ －－ －－－－ －－－ －－ 정한다. －- －－－ －－ －－－－ －－－ －－－－ －－－－ －－－－.,"
+    ],
+    "expected_answer": "성과인센티브 시행세칙에서 학과 및 행정부서 운영 성과 평가는 개인 실적 평가와 합산하여 활용하며, 평가 방법 등은 총장이 따로 정합니다.",
+    "must_include": [
+      "개인 실적 평가와 합산",
+      "학과 및 행정부서 운영 성과 평가",
+      "총장이 따로 정함"
+    ],
+    "must_not_include": [],
+    "expected_year_version": null,
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": true,
+      "reason": "The original answer used '학과나' which is less precise than '학과 및' given the source. Also, the source states '활용하며' instead of '활용하며, 평가 방법 등은 총장이 따로 정합니다.' which is a more direct quote. The original answer also missed the word '활용하며' and directly jumped to '평가 방법 등은 총장이 따로 정합니다.'"
+    }
   },
   {
     "n": 2,
-    "q": "선후배 멘토링을 팀으로 신청하려면 어떤 서식을 써야 하나요?",
+    "query": "선후배 멘토링을 팀으로 신청하려면 어떤 서식을 써야 하나요?",
     "type": "양식",
-    "file_id": "1nk3yx5uU7WOecjX7L5XUNqoPfFG25DBO",
+    "expected_file": "1H6JinW82xAPh_PIA8GVI1Er5KVqjYDEQ",
     "name": "2026-1 전공기초역량향상 프로그램 멘토링 신청양식(팀 신청).hwp",
-    "bundle": "148379_[비교과]전공기초역량향상 선후배멘토링 신청안내(~52)"
+    "expected_bundle": "148379_[비교과]전공기초역량향상 선후배멘토링 신청안내(~5_2)_20260403163451",
+    "expected_evidence": [
+      "2026-1 전공기초역량향상 프로그램 멘토링 신청양식(팀 신청).hwp"
+    ],
+    "expected_answer": "선후배 멘토링을 팀으로 신청하려면 '2026-1 전공기초역량향상 프로그램 멘토링 신청양식(팀 신청).hwp' 파일을 사용해야 합니다.",
+    "must_include": [
+      "2026-1 전공기초역량향상 프로그램 멘토링 신청양식(팀 신청).hwp"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026-1",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is correct and directly answers the question using the provided source."
+    }
   },
   {
     "n": 3,
-    "q": "연구윤리 규정 개정안에서 담당 부서가 교무처에서 연구처로 바뀐 조문이 어디인가요?",
+    "query": "연구윤리 규정 개정안에서 담당 부서가 교무처에서 연구처로 바뀐 조문이 어디인가요?",
     "type": "본문",
-    "file_id": "1lLfDFcy5yE6MDgbZBIgNZAARNWhnXArq",
+    "expected_file": "1uI49VdQ55zGFwJm8erAsLvDZz1Jmc0gc",
     "name": "14_연구윤리 및 진실성 확보를 위한 규정 개정(안).hwp",
-    "bundle": "규정 제·개정 및 폐지에 대한 의견 수렴 안내 (1)"
+    "expected_bundle": "규정 제·개정 및 폐지에 대한 의견 수렴 안내_20260617010621",
+    "expected_evidence": [
+      "ㅇ 제6조, 제15조, 제16조, 제25조 담당부서 현행화",
+      "- 교무처 → 연구처"
+    ],
+    "expected_answer": "연구윤리 및 진실성 확보를 위한 규정 개정안에서 담당 부서가 교무처에서 연구처로 변경된 조문은 제6조, 제15조, 제16조, 제25조입니다.",
+    "must_include": [
+      "제6조",
+      "제15조",
+      "제16조",
+      "제25조",
+      "교무처",
+      "연구처"
+    ],
+    "must_not_include": [],
+    "expected_year_version": null,
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current_label is accurate and directly supported by the provided source. The expected_year_version is not explicitly stated for the change in departments, so it should be null."
+    }
   },
   {
     "n": 4,
-    "q": "엔지니어링하우스를 새로 열고 싶은 교수는 언제까지 신청해야 하나요?",
+    "query": "엔지니어링하우스를 새로 열고 싶은 교수는 언제까지 신청해야 하나요?",
     "type": "본문",
-    "file_id": "19XQrHDe1p2_LEZYpGWDdpCoqAvknJpuX",
+    "expected_file": "1NQk9mE7uZwprgObdBsAn8Lfm1wi7ApF_",
     "name": "2026년 상반기 신규 EH(Engineering House) 모집 안내.hwp",
-    "bundle": "2026년 상반기 신규 EH(Engineering House) 모집 안내"
+    "expected_bundle": "2026년 상반기 신규 EH(Engineering House) 모집 안내_20260324110342",
+    "expected_evidence": [
+      "나. 신청 기간 : 2026. 4. 24.(금)까지"
+    ],
+    "expected_answer": "엔지니어링하우스를 새로 열고 싶은 교수는 2026년 4월 24일 금요일까지 신청해야 합니다.",
+    "must_include": [
+      "2026년 4월 24일",
+      "금요일"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is correct and directly supported by the provided evidence."
+    }
   },
   {
     "n": 5,
-    "q": "넷클래스 프로그램을 쓰려면 컴퓨터 사양이 어느 정도여야 하나요?",
+    "query": "넷클래스 프로그램을 쓰려면 컴퓨터 사양이 어느 정도여야 하나요?",
     "type": "본문",
-    "file_id": "1Esb7E2m7kBb3Fk-NRBLmxuLTXHMVXn-g",
+    "expected_file": "1CtJaBo4KUH53RZYERA4YNrVda2C5QGh_",
     "name": "Net-Calss 9.0 가이드문서.pdf",
-    "bundle": "교내 불법 소프트웨어 사용 금지 안내"
+    "expected_bundle": "특별감사 결과에 따른 넷클래스(NetClass) 활용 권고 안내_20260403030412",
+    "expected_evidence": [
+      "Net-Class 9.0을 설치하고 운영하기 위한 시스템 최소 사양은 다음과 같습니다.",
+      "구분 서버 및 관리 프로그램 Client 프로그램",
+      "OS Windows10 (32Bit, 64Bit) 이상",
+      "CPU Intel i3 2세대 이상",
+      "HDD 100MByte 이상의 여유공간 8GByte 이상의 여유공간"
+    ],
+    "expected_answer": "넷클래스 9.0을 설치하고 운영하기 위한 최소 사양은 다음과 같습니다. 서버 및 관리 프로그램의 경우 OS는 Windows 10 (32비트, 64비트) 이상, CPU는 Intel i3 2세대 이상, HDD는 100MB 이상의 여유 공간, 메모리는 4GB 이상이 필요합니다. 클라이언트 프로그램의 경우 OS는 Windows 10 (32비트, 64비트) 이상, CPU는 Intel i3 2세대 이상, HDD는 8GB 이상의 여유 공간, 메모리는 4GB 이상이 필요합니다.",
+    "must_include": [
+      "Windows 10 이상",
+      "Intel i3 2세대 이상",
+      "100MB 이상 (서버)",
+      "8GB 이상 (클라이언트)",
+      "4GB 이상 (메모리)"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "9.0",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label accurately reflects the information in the source. No changes are needed."
+    }
   },
   {
     "n": 6,
-    "q": "하반기 강사 채용 수요조사를 낼 때 담당 시수는 최대 몇 시간까지 신청할 수 있나요?",
+    "query": "하반기 강사 채용 수요조사를 낼 때 담당 시수는 최대 몇 시간까지 신청할 수 있나요?",
     "type": "본문",
-    "file_id": "1z8ICLZqqPb03Dfdngz4HjewOim3mSyD_",
+    "expected_file": "1gFLDSx2nMIZYNtLKcEdwQOHc25kdyR2B",
     "name": "[붙임1] 2026학년도 하반기 비전임교원 수요조사서(강사,겸임).hwp",
-    "bundle": "2026학년도 하반기 강사·겸임교원 신규채용 수요조사"
+    "expected_bundle": "2026학년도 하반기 강사·겸임교원 신규채용 수요조사_20260529100516",
+    "expected_evidence": [
+      "2) 담당 시수 : 최대 6시간(초과시수 신청으로 최대 9시간)"
+    ],
+    "expected_answer": "하반기 강사 채용 시 담당 시수는 최대 6시간까지 신청할 수 있으며, 초과 시수 신청을 통해 최대 9시간까지 가능합니다.",
+    "must_include": [
+      "최대 6시간",
+      "최대 9시간"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The original label is correct and directly supported by the provided evidence."
+    }
   },
   {
     "n": 7,
-    "q": "타 대학 전임교원을 우리 학교 JA교원으로 임용할 때 겸임교원 공개채용 절차를 거쳐야 하나요?",
+    "query": "타 대학 전임교원을 우리 학교 JA교원으로 임용할 때 겸임교원 공개채용 절차를 거쳐야 하나요?",
     "type": "본문",
-    "file_id": "1ml9sdVlCjR5hUSlv80BZKDuxl87wxUJv",
+    "expected_file": "1RTLNlu59RvQu37QOAtsTh3L26HLe4ee7",
     "name": "JA교원 운영에 관한 시행세칙(20260701)_일부개정.hwp",
-    "bundle": "규정 제·개정 및 폐지 안내"
+    "expected_bundle": "규정 제·개정 및 폐지 안내_20260626040654",
+    "expected_evidence": [
+      "제4조의2(타 대학 전임교원의 임용) 타 대학 전임교원이 본교 “대학 간 JA교원”으로 임용되는 경우 겸임교원으로 임용하되 본교 겸임교원 공개채용 절차는 적용하지 아니한다. 이 경우 “대학 간 JA교원”은 교육통계조사 시 겸임교원에 미포함한다."
+    ],
+    "expected_answer": "타 대학 전임교원을 본교 \"대학 간 JA교원\"으로 임용할 때 겸임교원 공개채용 절차는 적용하지 않습니다.",
+    "must_include": [
+      "타 대학 전임교원",
+      "JA교원",
+      "겸임교원 공개채용 절차",
+      "적용하지 아니한다"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "20260701",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source. No changes are needed."
+    }
   },
   {
     "n": 8,
-    "q": "국가연구시설장비 실태조사 조사대상과 조사내용 자료를 찾아줘",
-    "type": "스텁",
-    "file_id": "1x_afyvR8DU3TmXJJSikwV2jVmmHZ3auK",
-    "name": "붙임 2 2026년 국가연구시설장비 실태조사 조사대상 및 조사내용(0421).xlsx",
-    "bundle": "2026년도 국가연구시설장비 실태조사 및 성과조사 안내 _ 협조 요청"
+    "query": "2025년 귀속 연말정산에서 자녀세액공제 금액이 얼마로 올랐나요?",
+    "type": "본문",
+    "expected_file": "1gAZJ5zD6Kzq7HLEFGHUEvlVxbijWKHO-",
+    "name": "붙임3-2025 연말정산 개정세법 요약(국세청).hwp",
+    "expected_bundle": "2025년 귀속 근로소득 연말정산 시행 안내_20260111010126",
+    "expected_evidence": [
+      "▢  자녀세액공제  ○  (공제대상자녀) 기본공제대상자인 8세 이상의 자녀 또는 손자녀,▢  공제금액 확대  ○  (좌 동)",
+      "○  (공제금액)    - (첫째) 15만원    - (둘째) 20만원    - (셋째 이후) 30만원/인,○  (좌 동)    - 25만원    - 30만원    - 40만원/인",
+      "<적용시기>  2025.1.1.이후 발생하는 소득분부터 적용"
+    ],
+    "expected_answer": "2025년 귀속 연말정산부터 자녀세액공제 금액이 첫째 25만원, 둘째 30만원, 셋째 이상 40만원으로 인상되었습니다.",
+    "must_include": [
+      "자녀세액공제 금액 확대",
+      "첫째 25만원",
+      "둘째 30만원",
+      "셋째 이후 40만원"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2025",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": ""
+    }
   },
   {
     "n": 9,
-    "q": "2025년 귀속 연말정산에서 자녀세액공제 금액이 얼마로 올랐나요?",
+    "query": "2학기 TU인턴십에 참여하면 실습지원비를 얼마나 받나요?",
     "type": "본문",
-    "file_id": "1o94ctDIgOD9FBZoqkqzjDb-DfPr5up2f",
-    "name": "붙임3-2025 연말정산 개정세법 요약(국세청).hwp",
-    "bundle": "2025년 귀속 근로소득 연말정산 시행 안내"
+    "expected_file": "1qzkEuTPD1ls2JCLKvGMnzOtKAqWIMOEJ",
+    "name": "본문_[현장실습지원센터] 2026학년도 2학기 TU인턴십 운영 안내_20260618162606.txt",
+    "expected_bundle": "150933_[현장실습지원센터] 2026학년도 2학기 TU인턴십 운영 안내_20260618162606",
+    "expected_evidence": [
+      "2026학년도2학기 TU인턴십 26-2학기 TU인턴십 운영 안내 ※ 상세내용은첨부파일 참고 1. 대상 3학년 이상의 재학생 (2학기 기준) 2. 교육과정 및 실습기간 3. 운영 일정 4. 참여(이수) 혜택 실습지원비 : 월 700,000원~3,000,000원 (실습기관별 상이) 현장교육장려장학금 : 1,500,000원 (12주 이상, 성적 Pass 조건) 재맞고사업 연계수당 : 200,000원 (최소 온라인교육 2개만 수강하면"
+    ],
+    "expected_answer": "2학기 TU인턴십에 참여하면 실습지원비로 월 700,000원에서 3,000,000원까지 받을 수 있으며, 이는 실습 기관별로 다릅니다.",
+    "must_include": [
+      "월 700,000원~3,000,000원",
+      "실습기관별 상이"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source. No changes are needed."
+    }
   },
   {
     "n": 10,
-    "q": "2학기 TU인턴십에 참여하면 실습지원비를 얼마나 받나요?",
+    "query": "학과 실험실습실에 있는 교육용 기자재 불용 처리는 어디서 하나요?",
     "type": "본문",
-    "file_id": "1zuGNv0TK8ACQL2J-yqglmNMz3jJ7OXod",
-    "name": "content.txt",
-    "bundle": "150933_[현장실습지원센터] 2026학년도 2학기 TU인턴십 운영 안내"
+    "expected_file": "1RTbgeXEsMTGUpkTKJJXB8mKDWJ9fxgV7",
+    "name": "학과(부) 실험실습실 보유 자산(기자재 등) 현행화 요청.hwp",
+    "expected_bundle": "학과(부) 실험실습실 보유 자산(기자재 등) 현행화 요청_20260121050129",
+    "expected_evidence": [
+      "2026-1학기 개강에 앞서 교육기자재 점검 및 쾌적한 교육공간 확보를 위해 학과(부) 실험실습실 보유 자산을 아래와 같이 현행화를 요청드리오니 각 학과(부)에서는 26.02.13.(금)까지 통합정보시스템을 통해 불용/자산이전을 진행하여 현행화 해주시기 바랍니다.",
+      "나. 방 법 : ① (통합정보시스템) 미불용/미이전 처리된 자산에 대한 불용/이전처리"
+    ],
+    "expected_answer": "학과 실험실습실에 있는 교육용 기자재의 불용 처리는 통합정보시스템을 통해 진행합니다.",
+    "must_include": [
+      "통합정보시스템",
+      "불용 처리"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and well-supported by the provided evidence. No changes are needed."
+    }
   },
   {
     "n": 11,
-    "q": "학과 실험실습실에 있는 교육용 기자재 불용 처리는 어디서 하나요?",
+    "query": "3천만원 넘는 실험 실습 장비를 사려면 구입 계획을 언제까지 제출해야 하나요?",
     "type": "본문",
-    "file_id": "1ZYW-XkS4mpL_QNWNxoW8z0xhsdAn1DoN",
-    "name": "학과(부) 실험실습실 보유 자산(기자재 등) 현행화 요청.hwp",
-    "bundle": "학과(부) 실험실습실 보유 자산(기자재 등) 현행화 요청"
+    "expected_file": "1YJXqrZE21PckXXEayDWvGhNhGJ_EIcj9",
+    "name": "2-1. 2026년도 대학혁신지원사업 실험·실습 장비 및 기자재 구입 계획 제출 안내.hwp",
+    "expected_bundle": "2026학년도 대학혁신지원사업 교육용기자재 예산 배정 안내_20260514010521",
+    "expected_evidence": [
+      "2. 위와 관련하여, 2026년 대학혁신지원사업 자율혁신계획 요약문 제출 시 반영을 위해 3천만원 이상의 실험·실습 장비 및 기자재 구입 계획이 있는 경우 [붙임]파일을 작성하여 2026.05.22.(금) 17:00까지 공문 제출하여 주시기 바랍니다."
+    ],
+    "also_accept": [
+      "19jEgra0PWDkKcCdnFGgncLWmsKHDQIvL"
+    ],
+    "expected_answer": "3천만원 이상의 실험·실습 장비 및 기자재 구입 계획은 2026년 5월 22일 금요일 오후 5시까지 제출해야 합니다.",
+    "must_include": [
+      "3천만원 이상",
+      "실험·실습 장비 및 기자재 구입 계획",
+      "2026년 5월 22일",
+      "17:00"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": ""
+    }
   },
   {
     "n": 12,
-    "q": "중국 학생 대상 9월 편입학 외국인전형 모집요강을 보여줘",
-    "type": "무텍스트",
-    "file_id": "1A_00XWjGsFWbpHsWsoIkzxX-bfrhZDqu",
-    "name": "(심의2호_붙임자료1) 2026학년도 하반기(9월) 편입학 외국인전형 모집요강_중국.pdf",
-    "bundle": "2026년도 제6회 입학관리위원회 개최안내"
+    "query": "3월 컴퓨터공학부 진로상담은 몇 건 진행됐나요?",
+    "type": "본문",
+    "expected_file": "1qFVyT5VnuL7d8uauy-iK616MR34XD4bH",
+    "name": "26.3월 컴퓨터공학부 취업지원 리포트.hwp",
+    "expected_bundle": "2026년 3월 컴퓨터공학부 취업지원 리포트 송부_20260401010434",
+    "expected_evidence": [
+      "3월 상담 실적,진로상담,-,80,-,-,-,80,3.1~ 3.31 실적"
+    ],
+    "expected_answer": "3월 컴퓨터공학부 진로상담은 총 80건 진행되었습니다.",
+    "must_include": [
+      "진로상담",
+      "80"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided evidence."
+    }
   },
   {
     "n": 13,
-    "q": "3천만원 넘는 실험 실습 장비를 사려면 구입 계획을 언제까지 제출해야 하나요?",
+    "query": "학사규정이 아닌 일반 대학규정을 제개정하려면 어느 팀으로 공문을 보내나요?",
     "type": "본문",
-    "file_id": "1eUbQ2EMC_KzsC_tPNLJ9hKsCKX8CjIcE",
-    "name": "2-1. 2026년도 대학혁신지원사업 실험·실습 장비 및 기자재 구입 계획 제출 안내.hwp",
-    "bundle": "2026학년도 대학혁신지원사업 교육용기자재 예산 배정 안내",
+    "expected_file": "1buIp8qjtxIDQJidbeSp3IEe8HgVrZt0c",
+    "name": "2. 규정 입안 절차 매뉴얼(20260309).pdf",
+    "expected_bundle": "2026년 제1회 산학협력단 규정 제·개정 안건 접수 안내(4_8(월) 12시까지)_20260327030317",
+    "expected_evidence": [
+      "대학 규정 (학사규정 제외) 기획예산팀 규정심의위원회",
+      "기획예산팀으로 공문 전달"
+    ],
     "also_accept": [
-      "19jEgra0PWDkKcCdnFGgncLWmsKHDQIvL"
-    ]
+      "1OGbkFLrOMRc9W5i7bun4y2wq5vFu6tmG"
+    ],
+    "expected_answer": "학사규정이 아닌 일반 대학 규정을 제개정하려면 기획예산팀으로 공문을 보내야 합니다.",
+    "must_include": [
+      "대학 규정 (학사규정 제외)",
+      "기획예산팀",
+      "공문 전달"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The original label is correct and directly supported by the source."
+    }
   },
   {
     "n": 14,
-    "q": "3월 컴퓨터공학부 진로상담은 몇 건 진행됐나요?",
+    "query": "교육과정 개선 수요조사에 낼 신규 문항은 몇 개까지 쓰는 게 좋나요?",
     "type": "본문",
-    "file_id": "13jErI_IOrH70yzoYGHfr62Ye2JZsdnqT",
-    "name": "26.3월 컴퓨터공학부 취업지원 리포트.hwp",
-    "bundle": "2026년 3월 컴퓨터공학부 취업지원 리포트 송부"
+    "expected_file": "1tUCGLi-M3jR_RA6Os09vqdnbESsLDteU",
+    "name": "2027학년도 교육과정 개선 수요조사 실시를 위한 신규 문항 제출 및 전년도 조사 문항 검토 요청.hwp",
+    "expected_bundle": "2027학년도 교육과정 개선 수요조사 실시를 위한 신규 문항 제출 및 전년도 조사 문항 검토 요청_20260316010332",
+    "expected_evidence": [
+      "-제출 내용 및 방법: (붙임 3)에 수요 조사 문항 초안*(3문항 이하 권장)을 작성·회신",
+      "-제출 내용 및 방법: (붙임 3)에 수요 조사 문항 초안*(3문항 이하 권장)을 작성·회신"
+    ],
+    "expected_answer": "교육과정 개선 수요조사에 신규 문항을 제출할 때, 3문항 이하로 작성하는 것을 권장합니다.",
+    "must_include": [
+      "3문항 이하 권장"
+    ],
+    "must_not_include": [],
+    "expected_year_version": null,
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source units."
+    }
   },
   {
     "n": 15,
-    "q": "학사규정이 아닌 일반 대학규정을 제개정하려면 어느 팀으로 공문을 보내나요?",
+    "query": "신소재공학과 반도체소재전공 책임교수가 누구로 바뀌었나요?",
     "type": "본문",
-    "file_id": "1DlMwgOY9rJaZSdhUQzxpQIWfuK1e7b_8",
-    "name": "1_규정 입안 절차 매뉴얼(20260309).pdf",
-    "bundle": "새로운 규정관리시스템 오픈 안내",
-    "also_accept": [
-      "1OGbkFLrOMRc9W5i7bun4y2wq5vFu6tmG"
-    ]
+    "expected_file": "1jl76kzozkRdzu5lEbUOcanu1SNDC-tgB",
+    "name": "인사발령(교원 보직임면).hwp",
+    "expected_bundle": "인사발령(교원 보직임면)_20260127110145",
+    "expected_evidence": [
+      "2,첨단융합대학 신소재공학과,조교수,조인철,반도체소재전공 책임교수에 보함"
+    ],
+    "expected_answer": "신소재공학과 반도체소재전공 책임교수는 조인철 교수로 바뀌었습니다.",
+    "must_include": [
+      "조인철",
+      "반도체소재전공 책임교수"
+    ],
+    "must_not_include": [],
+    "expected_year_version": null,
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": true,
+      "reason": "The original answer was slightly rephrased for better flow and directness, but the core information remains the same. The evidence ID was also updated to be more precise."
+    }
   },
   {
     "n": 16,
-    "q": "1학기 강사와 비전임교원 고용보험 현황 조사 명단 자료 있나요?",
-    "type": "스텁",
-    "file_id": "1Rgsa3hD7JNRAHNRBYM-czH5i-yZowH0a",
-    "name": "1.2026년 1학기 강사 및 비전임교원 고용보험 현황 조사명단.xlsx",
-    "bundle": "2026-1학기 강사 및 비전임교원 고용보험 가입 및 이중가입 취소 신청 안내"
+    "query": "2026학년도 신입생의 일괄수강신청 등록은 언제까지 진행되나요?",
+    "type": "본문",
+    "expected_file": "1QLoJfsh0SzUhY2kJlpFCeXT07V_3TzEe",
+    "name": "2026학년도 신입생 일괄수강신청 안내.hwp",
+    "expected_bundle": "2026학년도 신입생 일괄수강신청 안내_20260213100242",
+    "expected_evidence": [
+      "일괄수강신청 등록,2026.2.23.(월) ~2.26.(목),-교양기초교과 : 교양·전공설계센터 -글로벌 잉글리시 : 커뮤니케이션교육센터 -파이썬프로그래밍 : AI교육협력센터 -밀알교과 : 교양·전공설계센터 -전공 및 전용교양교과 : 각 학과(부)사무실  ※1학기 전공 및 전용교양교과 개설학과(부)해당"
+    ],
+    "expected_answer": "2026학년도 신입생의 일괄수강신청 등록은 2026년 2월 23일 월요일부터 2월 26일 목요일까지 진행됩니다.",
+    "must_include": [
+      "2026학년도 신입생",
+      "일괄수강신청 등록",
+      "2026.2.23.(월) ~2.26.(목)"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "replaces_query": "1학년으로 재입학한 학생도 전공필수 수강신청 대상에 넣어야 하나요?",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly answers the question using the provided source. No changes are needed."
+    }
   },
   {
     "n": 17,
-    "q": "교육과정 개선 수요조사에 낼 신규 문항은 몇 개까지 쓰는 게 좋나요?",
+    "query": "신입생 학습 활동 분석 보고서는 어느 부서가 만들었나요?",
     "type": "본문",
-    "file_id": "1O3kr4sA05lCVwbAvRL4MFFC6Y3Vd5qZF",
-    "name": "2027학년도 교육과정 개선 수요조사 실시를 위한 신규 문항 제출 및 전년도 조사 문항 검토 요청.hwp",
-    "bundle": "2027학년도 교육과정 개선 수요조사 실시를 위한 신규 문항 제출 및 전년도 조사 문항 검토 요청"
+    "expected_file": "1nUTCnZcFh0Zzq6WijP-PmWLvt6b2ojuO",
+    "name": "2025 신입생 학습 활동에 관한 현황 및 영향요인 분석보고서 송부.hwp",
+    "expected_bundle": "2025 신입생 학습 활동에 관한 현황 및 영향요인 분석보고서 송부_20260209100233",
+    "expected_evidence": [
+      "2. 위 호와 관련, IR센터에서는 2025 신입생 학습 활동에 관한 현황 및 영향요인을 분석하여 그 결과를 붙임과 같이 송부하오니 학과(부) 및 관련 부서에서는 교육과정 운영·개선 시 업무에 참고하시기 바랍니다."
+    ],
+    "expected_answer": "IR센터에서 만들었습니다.",
+    "must_include": [
+      "IR센터"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2025",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is correct and directly supported by the evidence."
+    }
   },
   {
     "n": 18,
-    "q": "신소재공학과 반도체소재전공 책임교수가 누구로 바뀌었나요?",
+    "query": "2천만원 넘는 예산을 집행할 때 시행계획 품의는 누구 협조 결재를 받아야 하나요?",
     "type": "본문",
-    "file_id": "1TRuFFjeL62JC2IyMBFjukMTCjzmjPxpI",
-    "name": "인사발령(교원 보직임면).hwp",
-    "bundle": "인사발령(교원 보직임면)"
+    "expected_file": "1pIMUmawuFpbZDGgWcZnj9KNHzcfNkgar",
+    "name": "2026회계연도 교비회계 실행예산 배정 및 집행 안내.hwp",
+    "expected_bundle": "2026회계연도 교비회계 실행예산 배정 및 집행 안내_20260306040351",
+    "expected_evidence": [
+      "| 【참고사항】*세부내용 직무권한위임전결규정 참조 • 150만원 이상 예산집행 시 시행계획 품의 필요 • 500만원 초과, 2천만원 이하 예산집행 시행계획 품의 시 기획예산팀장 협조 결재 • 2천만원 초과 예산집행 시행계획 품의 시 기획처장, 기획예산팀장 협조 결재 |"
+    ],
+    "expected_answer": "2천만원을 초과하는 예산을 집행할 때 시행계획 품의는 기획처장과 기획예산팀장의 협조 결재를 받아야 합니다.",
+    "must_include": [
+      "2천만원 초과 예산 집행",
+      "시행계획 품의",
+      "기획처장",
+      "기획예산팀장",
+      "협조 결재"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source. No changes are needed."
+    }
   },
   {
     "n": 19,
-    "q": "1학년으로 재입학한 학생도 전공필수 수강신청 대상에 넣어야 하나요?",
+    "query": "순수외국인전형 입학전형료는 건당 얼마로 책정됐나요?",
     "type": "본문",
-    "file_id": "1AZ7xxQkBii69KOVIzsJ8NYtOEyLF0iAH",
-    "name": "2026학년도 1학기 재입학생 명단 안내 및 수강신청 협조 요청.hwp",
-    "bundle": "2026학년도 1학기 재입학생 명단 안내 및 수강신청 협조 요청"
+    "expected_file": "1JooL8wCUmTMTzU6zSgEZivPC4MQMZKoI",
+    "name": "심의4호(2026회계연도 순수외국인 수입 및 지출 예산 심의(안)).hwp",
+    "expected_bundle": "2026년도 제8회 입학관리위원회 개최안내_20260528110510",
+    "expected_evidence": [
+      "| 9월 입학 | 2026 하반기 순수외국인전형 | 100,000원/건당 | 지난해와 동일 |",
+      "| 3월 입학 | 2027 상반기 순수외국인전형 | 100,000원/건당 | 지난해와 동일 |"
+    ],
+    "expected_answer": "순수외국인전형 입학전형료는 건당 100,000원으로 책정되었습니다.",
+    "must_include": [
+      "순수외국인전형",
+      "입학전형료",
+      "100,000원/건당"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source units. The evidence IDs correctly point to the relevant information."
+    }
   },
   {
     "n": 20,
-    "q": "학사경고자 제적예정자 명단 파일 비밀번호가 뭔가요?",
-    "type": "스텁",
-    "file_id": "1IzqDBAQBfPPoSm1l65xFwVqggrwZpVRf",
-    "name": "[붙임 3] 2025학년도 2학기 학사경고자(제적예정자) 명단(PW 0024).xlsx",
-    "bundle": "2025학년도 2학기 학사경고자 및 제적대상자 명단 송부"
+    "query": "2026년 발전계획에서 교육 영역의 개선 방향이 뭔가요?",
+    "type": "본문",
+    "expected_file": "1ts5JexMYWuSNx_G5wEqJwwNCwya15z_4",
+    "name": "2. 2026년 TU Korea 1.0 운영계획 보고서.pdf",
+    "expected_bundle": "대학발전계획(TU Korea 1.0) 2025년 성과평가 보고서 및 2026년 운영계획 보고서 공유_20260518110555",
+    "expected_evidence": [
+      "ü 교육과정–학사제도–교수학습 전반의 통합적 교육체계 고도화",
+      "ü AI 기반 교수학습 환경 전환 및 미래형 교육체계 구축",
+      "Ÿ 핵심역량 기반 교육과정 개선을 통한 교육품질 관리 고도화",
+      "통한 맞춤형 교육과정 운영 기반 구축",
+      "Ÿ AI·에듀테크 기반 교수학습 지원체계 구축 및 교수역량 강화, AI 활용 학습성과에"
+    ],
+    "expected_answer": "2026년 발전계획에서 교육 영역의 개선 방향은 통합적 교육체계 고도화, AI 기반 교수학습 환경 전환 및 미래형 교육체계 구축, 핵심역량 기반 교육과정 개선을 통한 교육품질 관리 고도화, 자기설계전공 및 융합전공 확대, 학사제도 유연화를 통한 맞춤형 교육과정 운영 기반 구축, AI·에듀테크 기반 교수학습 지원체계 구축 및 교수역량 강화, AI 활용 학습성과에 대응한 평가방식 전환 및 운영 기준 정립입니다.",
+    "must_include": [
+      "통합적 교육체계 고도화",
+      "AI 기반 교수학습 환경 전환 및 미래형 교육체계 구축",
+      "핵심역량 기반 교육과정 개선을 통한 교육품질 관리 고도화",
+      "자기설계전공 및 융합전공 확대",
+      "학사제도 유연화를 통한 맞춤형 교육과정 운영 기반 구축",
+      "AI·에듀테크 기반 교수학습 지원체계 구축 및 교수역량 강화",
+      "AI 활용 학습성과에 대응한 평가방식 전환 및 운영 기준 정립"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source units. All must_include facts are present in the expected answer and supported by the selected evidence IDs. No changes are needed."
+    }
   },
   {
     "n": 21,
-    "q": "신입생 학습 활동 분석 보고서는 어느 부서가 만들었나요?",
+    "query": "입학홍보처 홍보소통팀에 새로 온 수습직원의 수습 기간이 언제까지인가요?",
     "type": "본문",
-    "file_id": "1Nt-f1FfvbOWhJ-Pxcp7SZpoHe40lYA8q",
-    "name": "2025 신입생 학습 활동에 관한 현황 및 영향요인 분석보고서 송부.hwp",
-    "bundle": "2025 신입생 학습 활동에 관한 현황 및 영향요인 분석보고서 송부"
+    "expected_file": "1wq9eUeTdN81i7NdgAIDnjawsIA4xNgsa",
+    "name": "인사발령(수습직원 신규임용).hwp",
+    "expected_bundle": "인사발령(수습직원 신규임용)_20260528040544",
+    "expected_evidence": [
+      "김찬우,일반직 9급 5호봉,한국공학대학교 근무를 명함 입학홍보처 홍보소통팀 근무를 명함,2026. 6. 1.,2026. 6. 1. ~ 2026. 8. 31."
+    ],
+    "also_accept": [
+      "1j59eqhzsd0J_tjrJtDuQ6QfPno7Vthc4"
+    ],
+    "expected_answer": "입학홍보처 홍보소통팀 김찬우 수습직원의 수습 기간은 2026년 6월 1일부터 2026년 8월 31일까지입니다.",
+    "must_include": [
+      "김찬우",
+      "입학홍보처 홍보소통팀",
+      "2026. 6. 1. ~ 2026. 8. 31."
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": true,
+      "reason": "The original answer was slightly rephrased to be more direct and complete, and the evidence_ids were updated to reflect the most precise source unit."
+    }
   },
   {
     "n": 22,
-    "q": "2천만원 넘는 예산을 집행할 때 시행계획 품의는 누구 협조 결재를 받아야 하나요?",
-    "type": "본문",
-    "file_id": "1-K_DEJ81n_HUHoSbrQQTqq86W6aI3jP7",
-    "name": "2026회계연도 교비회계 실행예산 배정 및 집행 안내.hwp",
-    "bundle": "2026회계연도 교비회계 실행예산 배정 및 집행 안내"
+    "query": "2026학년도 한국공학대전 졸업작품 심사 계획(안) 안내 자료묶음의 제목은 무엇인가요?",
+    "type": "양식",
+    "expected_file": "1cLshnU0ppavt7PjVZG4wv7XisutX1rLV",
+    "name": "3_2차 공동심사 추천현황.hwp",
+    "expected_bundle": "2026학년도 한국공학대전 졸업작품 심사 계획(안) 안내_20260624100606",
+    "expected_evidence": [
+      "# 3_2차 공동심사 추천현황.hwp",
+      "자료묶음: 2026학년도 한국공학대전 졸업작품 심사 계획(안) 안내_20260624100606"
+    ],
+    "expected_answer": "2026학년도 한국공학대전 졸업작품 심사 계획(안) 안내 자료묶음의 제목은 '3_2차 공동심사 추천현황.hwp'입니다.",
+    "must_include": [
+      "2026학년도 한국공학대전 졸업작품 심사 계획(안) 안내",
+      "3_2차 공동심사 추천현황.hwp"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "replaces_query": "한국공학대전 졸업작품 2차 공동심사 추천 서식이 어디 있나요?",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": ""
+    }
   },
   {
     "n": 23,
-    "q": "순수외국인전형 입학전형료는 건당 얼마로 책정됐나요?",
-    "type": "본문",
-    "file_id": "1vPe4C95cKzsCJ_JbfDhSpuX_AWJSyK5H",
-    "name": "심의4호(2026회계연도 순수외국인 수입 및 지출 예산 심의(안)).hwp",
-    "bundle": "2026년도 제8회 입학관리위원회 개최안내"
+    "query": "책임시수를 줄이려면 어떤 신청서를 내고 누구 결재를 받아야 하나요?",
+    "type": "양식",
+    "expected_file": "1CSPH8JBQIpLBHZ9At0P9FOMNbuL9eWEQ",
+    "name": "책임시수 감면 신청서.hwp",
+    "expected_bundle": "2026학년도 1학기 책임시수 감면 서류제출 안내_20260115010120",
+    "expected_evidence": [
+      "책임시수 감면 신청서",
+      "상기 본인은 위와 같은 사유로 기준시수를 감면받고자 신청서를 제출하오니 처리될 수 있도록 승인하여 주시기 바랍니다.",
+      "학과장 :               (인)"
+    ],
+    "expected_answer": "책임시수를 줄이려면 '책임시수 감면 신청서'를 작성하여 학과장의 결재를 받아야 합니다.",
+    "must_include": [
+      "책임시수 감면 신청서",
+      "학과장"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source units. No changes are needed."
+    }
   },
   {
     "n": 24,
-    "q": "2026년 발전계획에서 교육 영역의 개선 방향이 뭔가요?",
+    "query": "학과 자율 성과지표는 언제까지 제출해야 하나요?",
     "type": "본문",
-    "file_id": "19TM8qepHyXIMtuRWsjApLmK7vvaIuZqw",
-    "name": "2. 2026년 TU Korea 1.0 운영계획 보고서.pdf",
-    "bundle": "대학발전계획(TU Korea 1.0) 2025년 성과평가 보고서 및 2026년 운영계획 보고서 공유"
+    "expected_file": "1P5BwsHJAjZbqeBp7nM5Ng2VNaFhc9BED",
+    "name": "2026년 학과(부) 성과평가 시행 계획(안) 의견수렴 및 성과지표 제출 안내.hwp",
+    "expected_bundle": "2026년 학과(부) 성과평가 시행 계획(안) 의견수렴 및 성과지표 제출 안내_20260430050425",
+    "expected_evidence": [
+      "나. 제출서류 : [붙임2] 자율 성과지표 제출 양식(필수), [붙임3] 성과평가 의견서(해당 시)",
+      "다. 제출기한 : 2026.05.22.(금)까지"
+    ],
+    "expected_answer": "학과 자율 성과지표는 2026년 5월 22일 금요일까지 제출해야 합니다.",
+    "must_include": [
+      "학과 자율 성과지표",
+      "2026년 5월 22일"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source units."
+    }
   },
   {
     "n": 25,
-    "q": "입학홍보처 홍보소통팀에 새로 온 수습직원의 수습 기간이 언제까지인가요?",
+    "query": "산학협력단 연구과제팀에 프로젝트 연구교수로 신규 임용된 사람이 누구인가요?",
     "type": "본문",
-    "file_id": "1QP9GiRiLhZqUwE8Ue7EBtRnU9K4zWb1U",
-    "name": "인사발령(수습직원 신규임용) (1).hwp",
-    "bundle": "인사발령(수습직원 신규임용) (1)",
-    "also_accept": [
-      "1j59eqhzsd0J_tjrJtDuQ6QfPno7Vthc4"
-    ]
+    "expected_file": "1GOAv5MmA5VvPPTkrF50dusA9EXThH34T",
+    "name": "26. 2. 1. 인사발령(강사, 비전임교원 임면).hwp",
+    "expected_bundle": "인사발령(강사, 비전임교원 임면)_20260129040133",
+    "expected_evidence": [
+      "| 1 | 산학협력단 연구사업단 연구과제팀 | 이성철 | (프로젝트) 연구교수 | (프로젝트)연구교수에 신규임용함 산학협력단 연구사업단 연구과제팀 근무를 명함 | 2026. 2. 1. ∼ 2026. 12. 31. |"
+    ],
+    "expected_answer": "산학협력단 연구사업단 연구과제팀에 프로젝트 연구교수로 신규 임용된 사람은 이성철입니다.",
+    "must_include": [
+      "이성철",
+      "산학협력단 연구사업단 연구과제팀",
+      "프로젝트 연구교수",
+      "신규임용"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is correct and directly answers the question with the provided evidence."
+    }
   },
   {
     "n": 26,
-    "q": "한국공학대전 졸업작품 2차 공동심사 추천 서식이 어디 있나요?",
-    "type": "양식",
-    "file_id": "1TTXIkDQWc18lQb7Q21rCad4-bG0elTf2",
-    "name": "3_2차 공동심사 추천현황.hwp",
-    "bundle": "2026학년도 한국공학대전 졸업작품 심사 계획(안) 안내"
+    "query": "교양교육운영위원회 위원장을 누가 맡게 바뀌나요?",
+    "type": "본문",
+    "expected_file": "109KpLuxQZOoIiQL95Fh_m8R2wohbg29F",
+    "name": "06_교육과정위원회규정 개정(안).hwp",
+    "expected_bundle": "규정 제·개정 및 폐지에 대한 의견 수렴 안내_20260416030425",
+    "expected_evidence": [
+      "②위원장은 교양자율전공대학장으로 하고, 교무처장, 교양·전공설계센터장, 커뮤니케이션교육센터장, 교육기획팀장, 전공교육혁신센터장을 포함한 총장이 지정한 15인 이내의 위원으로 구성한다. <개정 2026. 3. 1., 2026. 5. 1.>"
+    ],
+    "expected_answer": "교양교육운영위원회 위원장은 교양자율전공대학장이 맡게 됩니다.",
+    "must_include": [
+      "교양교육운영위원회",
+      "교양자율전공대학장"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026.05.01",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": ""
+    }
   },
   {
     "n": 27,
-    "q": "현장실무교과를 아직 안 들은 학생 명단 있나요?",
-    "type": "스텁",
-    "file_id": "1Y6HSq4bTw-TEWazZxaA1WtsQOncjtOHG",
-    "name": "현장실무교과 미이수 학생 명단(2026. 6. 26.기준).xlsx",
-    "bundle": "현장실무교과 미이수 학생 명단(2026. 6. 26. 기준) 송부"
+    "query": "계절학기 수강신청 시기가 7월에서 언제로 앞당겨졌나요?",
+    "type": "본문",
+    "expected_file": "1Gy-8MMePP8_7V9Ni5WEi5gfCKASpwb2G",
+    "name": "계절학기 학사일정 변경 안내.hwp",
+    "expected_bundle": "계절학기 학사일정 변경 안내_20260416050426",
+    "expected_evidence": [
+      "| 수강신청 | 7월 초 | 5월 말 | 5/26(화)~5/27(수) | - 기말고사 전까지  계절학기 신청 및 등록금 납부 완료 - 수강정정 신설 |"
+    ],
+    "expected_answer": "계절학기 수강신청 시기가 7월 초에서 5월 말로 앞당겨졌습니다.",
+    "must_include": [
+      "수강신청",
+      "7월 초",
+      "5월 말"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": ""
+    }
   },
   {
     "n": 28,
-    "q": "노동절이라 휴강되는 5월 1일 수업 목록 자료 있나요?",
-    "type": "스텁",
-    "file_id": "1EKHeEhUEWsyYA544uSTNJwiQqjlz0bLU",
-    "name": "5월 1일(금) 수업 목록.xlsx",
-    "bundle": "5월 1일(금) 노동절 공휴일 지정에 따른 휴보강 운영 안내"
+    "query": "부서 위원회 위원 명단은 어디에 등록하고 기한이 언제까지인가요?",
+    "type": "본문",
+    "expected_file": "1dDtSC5ucWDdrjE3gE2s0oqnU2XNL4ykj",
+    "name": "2026년 부서별 위원회 위원 등록 요청.hwp",
+    "expected_bundle": "2026년 부서별 위원회 위원 등록 요청_20260310100307",
+    "expected_evidence": [
+      "1. 2026년 부서별 위원회 임명을 위한 위원 추천을 요청드리오니 해당부서는 통합정보시스템을 통해 2026. 3. 20.(금)까지 위원회별 위원 명단을 등록(현행화 반드시 필요)하여 주시기 바랍니다."
+    ],
+    "expected_answer": "부서 위원회 위원 명단은 통합정보시스템을 통해 등록하며, 기한은 2026년 3월 20일 금요일까지입니다.",
+    "must_include": [
+      "통합정보시스템",
+      "2026년 3월 20일 (금)"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source. No changes are needed."
+    }
   },
   {
     "n": 29,
-    "q": "책임시수를 줄이려면 어떤 신청서를 내고 누구 결재를 받아야 하나요?",
-    "type": "양식",
-    "file_id": "108jRZ6-DV1fcnF8S8OiqTMKXqYlY-2Bq",
-    "name": "책임시수 감면 신청서.hwp",
-    "bundle": "2026학년도 1학기 책임시수 감면 서류제출 안내"
+    "query": "6PAC인증제 장학금 선발 부서가 어디로 바뀌었나요?",
+    "type": "본문",
+    "expected_file": "1rS5pEfqIJ8pPGTrsLwB5w1hUmr8NLPA5",
+    "name": "심의1호_교내장학금 변경 심의(안)_20260119.hwp",
+    "expected_bundle": "2026년도 제1회 장학위원회 개최 안내_20260120030107",
+    "expected_evidence": [
+      "| 학업보조 (생활비성) | 6PAC인증제 장학금 | ・선발부서 : IR센터에서 교육기획팀으로 변경 |",
+      "| 학업보조 (생활비성) | 6PAC 인증제 장학금 | ○ IR센터에서 별도의 기준을 정하여 선발 | ○ 교육기획팀에서 별도의 기준을 정하여 선발 |"
+    ],
+    "expected_answer": "6PAC인증제 장학금의 선발 부서는 IR센터에서 교육기획팀으로 변경되었습니다.",
+    "must_include": [
+      "6PAC인증제 장학금",
+      "IR센터",
+      "교육기획팀"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": true,
+      "reason": "The current_label's expected_answer is correct and directly supported by the evidence. The evidence_ids are also correct. No changes are needed."
+    }
   },
   {
     "n": 30,
-    "q": "학과 자율 성과지표는 언제까지 제출해야 하나요?",
+    "query": "커뮤니케이션교육센터가 맡는 업무가 뭔가요?",
     "type": "본문",
-    "file_id": "18PJMRlu9IpL1JHUl8Bfx3pM4sx6g4QbZ",
-    "name": "2026년 학과(부) 성과평가 시행 계획(안) 의견수렴 및 성과지표 제출 안내.hwp",
-    "bundle": "2026년 학과(부) 성과평가 시행 계획(안) 의견수렴 및 성과지표 제출 안내"
+    "expected_file": "1ioJdGEoZc0gxmBZm1Xtw_MYoMW3YTZmM",
+    "name": "03_교양자율전공대학 운영규정 제정(안).hwp",
+    "expected_bundle": "규정 제·개정 및 폐지에 대한 의견 수렴 안내_20260416030425",
+    "expected_evidence": [
+      "제8조(기능) 커뮤니케이션교육센터는 다음 각 호의 사항을 수행한다.",
+      "1. 어학교육 기획 및 운영",
+      "2. 어학시험 실시·평가 및 어학자격 관리 업무",
+      "3. 어학관련 비교과 프로그램 운영",
+      "4. 어학교육 교원 관리"
+    ],
+    "expected_answer": "커뮤니케이션교육센터는 어학교육 기획 및 운영, 어학시험 실시·평가 및 어학자격 관리 업무, 어학관련 비교과 프로그램 운영, 어학교육 교원 관리, 글쓰기 교육 기획 및 운영, 영어 인증제 기획 및 운영, 커뮤니케이션교육센터 운영위원회 운영, 기타 위 각 호에 부수되는 사항을 수행합니다.",
+    "must_include": [
+      "어학교육 기획 및 운영",
+      "어학시험 실시·평가 및 어학자격 관리 업무",
+      "어학관련 비교과 프로그램 운영",
+      "어학교육 교원 관리",
+      "글쓰기 교육 기획 및 운영",
+      "영어 인증제 기획 및 운영",
+      "커뮤니케이션교육센터 운영위원회 운영",
+      "기타 위 각 호에 부수되는 사항"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": true,
+      "reason": "The original answer was incomplete. The source provides a more detailed list of duties for the Communication Education Center, including '어학교육 교원 관리', '커뮤니케이션교육센터 운영위원회 운영', and '기타 위 각 호에 부수되는 사항'. The original answer also simplified '어학시험 실시·평가 및 어학자격 관리 업무' to '어학시험 관리', which is less precise than the source. The updated answer includes all the specific duties listed in the source."
+    }
   },
   {
     "n": 31,
-    "q": "체육대회에 참여해서 출석 인정받는 학생 현황 자료 있나요?",
-    "type": "스텁",
-    "file_id": "13L8pQPV0g9EqNSC291WX7VISs8h2mp4R",
-    "name": "202611_TUK체육대회_출석 인정 학생 현황_최종변경.xlsx",
-    "bundle": "2026학년도 체육대회 참여자 출석 인정 승인 요청"
+    "query": "학생 상벌에 관한 사항은 어느 위원회에서 심의하나요?",
+    "type": "본문",
+    "expected_file": "1g0vGYkDYoNlOUwCCh-jvXUv3tHCdICWI",
+    "name": "학생지도위원회규정(20260501)_일부개정.hwp",
+    "expected_bundle": "규정 제·개정 및 폐지 안내_20260428010419",
+    "expected_evidence": [
+      "제 1 조(목적) 이 규정은 한국공학대학교(이하 “본대학”이라 한다) 일반대 학칙 제38조에 근거한 학생지도위원회(이하 “위원회”라 한다)의 구성 및 운영에 관하여 필요한 사항을 규정함을 목적으로 한다.<개정 2013.10.29., 2019.05.13.>",
+      "제 4 조(심의사항) 위원회는 다음 각 호의 사항을 심의한다.",
+      "3. 학생 상벌에 관한 사항"
+    ],
+    "expected_answer": "학생 상벌에 관한 사항은 학생지도위원회에서 심의합니다.",
+    "must_include": [
+      "학생 상벌에 관한 사항",
+      "학생지도위원회"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is correct and directly supported by the provided source units."
+    }
   },
   {
     "n": 32,
-    "q": "산학협력단 연구과제팀에 프로젝트 연구교수로 신규 임용된 사람이 누구인가요?",
+    "query": "비교과 프로그램 계획서를 쓸 때 우리 대학 6대 핵심역량이 뭔가요?",
     "type": "본문",
-    "file_id": "1U85OxYxS98Vjw4PA3lPjjSuSKnGUwl2w",
-    "name": "26. 2. 1. 인사발령(강사, 비전임교원 임면).hwp",
-    "bundle": "인사발령(강사, 비전임교원 임면)"
+    "expected_file": "1KFYvc0w8Bb-EoyJ0PyndXQDKcTlPIikq",
+    "name": "2026[최종]비교과 계획서 작성 기준.pdf",
+    "expected_bundle": "2026학년도 신규 비교과 프로그램 안내_20260202110255",
+    "expected_evidence": [
+      "융합사고 여러 분야의 지식을 연결·통합하여 새로운 아이디어를",
+      "문제해결 새로운 관점에서 문제를 인식하고 창의적으로 해결안을",
+      "전공직무 다양한 도구적 수단을 통해 전공관련 지식과 기술을",
+      "대인관계 타인과 더불어 소통하고 협력하면서 책임을 다해",
+      "자기관리 자신의 내외부 자원을 조절·관리하면서 새롭고 다양한"
+    ],
+    "expected_answer": "우리 대학의 6대 핵심 역량은 융합사고, 문제해결, 전공직무, 대인관계, 자기관리, 글로벌입니다.",
+    "must_include": [
+      "융합사고",
+      "문제해결",
+      "전공직무",
+      "대인관계",
+      "자기관리",
+      "글로벌"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source units. All must_include facts are present in the answer and supported by the evidence."
+    }
   },
   {
     "n": 33,
-    "q": "교양교육운영위원회 위원장을 누가 맡게 바뀌나요?",
+    "query": "대학원 강좌가 두 학기 연속 폐강 대상이 되면 어떻게 되나요?",
     "type": "본문",
-    "file_id": "1u5GRN3MDicPR3VzRO1eAuuWdwyiDSWvj",
-    "name": "06_교육과정위원회규정 개정(안).hwp",
-    "bundle": "규정 제·개정 및 폐지에 대한 의견 수렴 안내"
+    "expected_file": "1AAm7idVjqnbQCmDCWzPC_ROmUIp4PvI3",
+    "name": "2026학년도 1학기 대학원 폐강 대상 강좌 개설 여부 안내.hwp",
+    "expected_bundle": "2026학년도 1학기 대학원 폐강 대상 강좌 개설 여부 안내_20260313090344",
+    "expected_evidence": [
+      "3. 또한, 폐강 대상 강좌로 지정된 강의 중 누적 폐강 대상 강좌 지정 이력(2개 학기 연속, 유사 교과목 포함)이 있는 경우에 교과목 개설이 불가능 할 수 있으니 각 학과에서는 수강생 부족으로 교과목이 폐강되지 않도록 협조하여 주시기 바랍니다."
+    ],
+    "expected_answer": "두 학기 연속 폐강 대상 강좌로 지정된 경우, 해당 교과목은 개설이 불가능할 수 있습니다.",
+    "must_include": [
+      "누적 폐강 대상 강좌 지정 이력(2개 학기 연속, 유사 교과목 포함)",
+      "교과목 개설이 불가능 할 수 있음"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source. No changes are needed."
+    }
   },
   {
     "n": 34,
-    "q": "계절학기 수강신청 시기가 7월에서 언제로 앞당겨졌나요?",
+    "query": "강사 직무평가에서 협조성 항목 배점이 몇 점인가요?",
     "type": "본문",
-    "file_id": "1CzJauOL6v-Nk9sbOtYzR2JID1ofB7vet",
-    "name": "계절학기 학사일정 변경 안내.hwp",
-    "bundle": "계절학기 학사일정 변경 안내"
+    "expected_file": "1uouabmr4DoWKud1cJfhdrtoY-NtO91v8",
+    "name": "02. 직무평가_기준표.hwp",
+    "expected_bundle": "강사 재임용 학과 직무평가 안내_20260109030159",
+    "expected_evidence": [
+      "| 협조성 | 40 | 수(40) | -평정기간 동안 부서 대ㆍ내외 교직원상호간의 일에 무리 없이 협조하는 경우 ‘미’ 이상 평정을 원칙으로 하고, 매우 적극적으로 협조하는 경우는 ‘수’를 평정 -평정기간 동안 부서 대ㆍ내외 교직원상호간 업무협조 요청이 있을 때에 소극적인 태도로 일관하거나, 요청에 대해 무관심하고 정당한 사유 없이 3회 이상 협조하지 않은 경우 ‘양’ 이하를 평정 |  |"
+    ],
+    "also_accept": [
+      "1-ncMv1jGXLABM9G-aSNw0kmVfbanWPv2"
+    ],
+    "expected_answer": "강사 직무평가에서 협조성 항목의 배점은 40점입니다.",
+    "must_include": [
+      "협조성",
+      "40점"
+    ],
+    "must_not_include": [],
+    "expected_year_version": null,
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is correct and directly answers the question with appropriate evidence."
+    }
   },
   {
     "n": 35,
-    "q": "부서 위원회 위원 명단은 어디에 등록하고 기한이 언제까지인가요?",
+    "query": "이중국적자도 외국인 편입학 전형에 지원할 수 있나요?",
     "type": "본문",
-    "file_id": "1rX5VDX1Bd8oKBs0pS9v5WJXH2sz8sQ3C",
-    "name": "2026년 부서별 위원회 위원 등록 요청.hwp",
-    "bundle": "2026년 부서별 위원회 위원 등록 요청"
+    "expected_file": "17z_RsprsaCdgFB1wBdpLZ3939RjhjeTr",
+    "name": "(심의2호_붙임자료4) 2026학년도 하반기(9월) 편입학 외국인전형 사정원칙(안).hwp",
+    "expected_bundle": "2026년도 제6회 입학관리위원회 개최안내_20260331100335",
+    "expected_evidence": [
+      "인하여 외국인으로 인정  ④ 이중국적자 및 무국적자는 외국인으로 인정하지 않음(지원 당시 이중국적자라도 입학자격 인정 기준시점까지 한국 국적 포기 예정자는 조건부로 인정. 재학기간은 외국 국적 취득 후부터 기산) |"
+    ],
+    "expected_answer": "이중국적자는 외국인 편입학 전형에 지원할 수 없습니다. 다만, 지원 당시 이중국적자라도 입학자격 인정 기준시점까지 한국 국적을 포기할 예정이라면 조건부로 인정될 수 있습니다.",
+    "must_include": [
+      "이중국적자는 외국인으로 인정하지 않음",
+      "입학자격 인정 기준시점까지 한국 국적 포기 예정자는 조건부로 인정"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source unit."
+    }
   },
   {
     "n": 36,
-    "q": "6PAC인증제 장학금 선발 부서가 어디로 바뀌었나요?",
+    "query": "수업만족도 평가 점수가 3.5 미만이면 교원에게 어떤 조치가 있나요?",
     "type": "본문",
-    "file_id": "1gGbHOC0v9V0yreInZTk0gdWIJDPoh8kw",
-    "name": "심의1호_교내장학금 변경 심의(안)_20260119.hwp",
-    "bundle": "2026년도 제1회 장학위원회 개최 안내"
+    "expected_file": "1-fK-y0yTEEcgMV7DrFRzF8YFXgEhYRb9",
+    "name": "[붙임 2] 관련 규정(수업만족도 평가에 관한 규정).hwp",
+    "expected_bundle": "2026학년도 1학기 중간 수업만족도 평가 시행 안내_20260420010429",
+    "expected_evidence": [
+      "제7조(제한조치) ① 수업만족도 평가결과 3.5 미만인 전임교원은 강의컨설팅을 의무화 하고, 2회 연속인 경우는 강의개선 경고장을 교무처장 명의로 발송한다. <개정 2017.11.23.>",
+      "③ 수업만족도 평가결과 2회 연속 3.5 미만인 겸임교원은 재임용에서 제외한다. <개정 2021.6.23.>",
+      "④ 수업만족도 평가결과 3.5 미만인 겸임교원을 제외한 비전임교원은 강의컨설팅을 의무화 하고, 2회 연속인 경우는 향후 1년(2개 학기) 간 강의에서 제외한다. 단, 강의컨설팅 참여 완료 및 개설학과를 통한 총장의 승인을 받아 강의를 담당할 수 있다. <신설 2021.6.23.>"
+    ],
+    "expected_answer": "수업만족도 평가 점수가 3.5 미만인 전임교원은 강의컨설팅을 의무화해야 하며, 2회 연속으로 3.5 미만인 경우 강의개선 경고장을 받게 됩니다. 겸임교원은 2회 연속 3.5 미만 시 재임용에서 제외되며, 겸임교원을 제외한 비전임교원은 강의컨설팅을 의무화하고 2회 연속 3.5 미만 시 향후 1년간 강의에서 제외될 수 있습니다.",
+    "must_include": [
+      "강의컨설팅 의무화",
+      "강의개선 경고장",
+      "재임용 제외",
+      "강의 제외"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2021.6.23",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label accurately reflects the information in the source for the specified year version."
+    }
   },
   {
     "n": 37,
-    "q": "커뮤니케이션교육센터가 맡는 업무가 뭔가요?",
+    "query": "캡스톤디자인 예산으로 공구나 사무용품을 살 수 있나요?",
     "type": "본문",
-    "file_id": "1MMa_tMiZBJZuJFP9VbgBz9LZ4lH1kIdw",
-    "name": "03_교양자율전공대학 운영규정 제정(안).hwp",
-    "bundle": "규정 제·개정 및 폐지에 대한 의견 수렴 안내"
+    "expected_file": "10DIKwSJC9_1tFgbZ2C93PqK7toxLqRwJ",
+    "name": "2026학년도 융합·연계형 캡스톤디자인 예산 집행 안내문.hwp",
+    "expected_bundle": "2026학년도 융합·연계형 캡스톤디자인 선발팀 안내_20260420050423",
+    "expected_evidence": [
+      "6) 직접적으로 소모되지 않는 범용성 장비 및 간접성 재료 (예시: 공구, 사무장비, 사무용소모품비, 물품이동카트, 차량렌트비, 가전제품 등) 지원 불가",
+      "o 직접적으로 필요한 재료가 아닌 범용성 장비 및 간접성 재료(예: 테스트 목적, 공구, 공구함 등) 지원 불가, ★구입 원할 시 반드시 문의 후 구입할 것!★",
+      "| 사무 장비 | 책장, 책상, 의자, 작업대, 복사기, 팩스, 전화기, 소화기, 운반 장비 등 |",
+      "| 공구 및 도구 | 드라이버, 인두기, 드릴, 펜치, 니퍼, 망치, 줄, 절단기, 커터칼 등 |"
+    ],
+    "expected_answer": "캡스톤디자인 예산으로는 공구나 사무용품을 구매할 수 없습니다. 공구, 사무장비, 사무용소모품비 등은 직접적으로 소모되지 않는 범용성 장비 및 간접성 재료로 분류되어 지원 대상에서 제외됩니다.",
+    "must_include": [
+      "공구 지원 불가",
+      "사무용품 지원 불가"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": true,
+      "reason": "The original answer was correct, but the evidence was not specific enough for '사무용품'. I added more precise evidence for both '공구' and '사무용품' and updated the expected_year_version."
+    }
   },
   {
     "n": 38,
-    "q": "상반기 외국인 편입생 2차 모집 1단계 합격자 사정 자료 보여줘",
-    "type": "무텍스트",
-    "file_id": "1qTLEIRQR1mC6sBNte4iogPfjdB3o3nyP",
-    "name": "(심의2호_붙임자료) 2026학년도 상반기 부모 모두 외국인인 외국인 편입생 2차 모집 1단계 합격자 사정 자료.pdf",
-    "bundle": "2026년도 제1회 입학관리위원회 개최안내"
+    "query": "TU-WBI 교과목 개발 프로그램 신청 시 필수적으로 수집되는 개인정보는 무엇인가요?",
+    "type": "본문",
+    "expected_file": "18q5Emr5AgUzeJKq_kW8CCEYcrh8kd5Yo",
+    "name": "2. 2026-2학기 TU-WBI 교과목 개발 신청서.hwp",
+    "expected_bundle": "2026-1학기 TU-WBI 교과목 개발 신청명단 제출 요청_20260610020607",
+    "expected_evidence": [
+      "개인정보 수집 항목  ○ 필수항목 : 성명, 연락처, 이메일 주소  ○ 선택항목 : 수업만족도 평가결과관리 조회 2. 개인정보 이용목적  ○ 프로그램 운영을 위한 기본정보 확보  ○ 프로그램 성과관리를 위한 기초자료,,,3. 개인정보 보유기간  ○ 개인정보 보호법에 의거 법률로 정한 목적 이외의 다른 어떠한 목적으로도 사용되지 않으며 내부 규정에 의해 일정기간 저장된 후 파기 4. 동의하지 않을 경우의 처리  ○ 참여자는 개인"
+    ],
+    "expected_answer": "TU-WBI 교과목 개발 프로그램 신청 시 필수적으로 수집되는 개인정보는 성명, 연락처, 이메일 주소입니다.",
+    "must_include": [
+      "TU-WBI 교과목 개발 프로그램",
+      "신청서 제출",
+      "개인정보 수집 동의",
+      "성명",
+      "연락처",
+      "이메일 주소"
+    ],
+    "must_not_include": [],
+    "expected_year_version": null,
+    "replaces_query": "개인정보 내부 관리계획이 2026년 2월에 어떤 근거로 개정됐나요?",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": true,
+      "reason": "The original answer included information about agreeing to personal information collection, which is implied by the question but not a direct answer to *what* information is collected. The revised answer focuses solely on the required personal information as listed in the source."
+    }
   },
   {
     "n": 39,
-    "q": "학생 상벌에 관한 사항은 어느 위원회에서 심의하나요?",
+    "query": "냉난방기를 안 트는 기간이 언제부터 언제까지인가요?",
     "type": "본문",
-    "file_id": "1BsZNoChCrQg-xouhpnpYQSwWNdr4Ovwh",
-    "name": "학생지도위원회규정(20260501)_일부개정.hwp",
-    "bundle": "규정 제·개정 및 폐지 안내"
+    "expected_file": "16qKU4L9hhILvGfeueVrjqifwa8JVC1ng",
+    "name": "에너지 위기 대응을 위한 에너지절약 실천 및 캠페인 시행 안내.hwp",
+    "expected_bundle": "에너지 위기 대응을 위한 에너지절약 실천 및 캠페인 시행 안내_20260402090410",
+    "expected_evidence": [
+      "가. 냉·난방기 휴지기간 확대(4.6(월) ~ 5.17(일), 약 6주)"
+    ],
+    "expected_answer": "냉난방기 휴지 기간은 4월 6일 월요일부터 5월 17일 일요일까지 약 6주간입니다.",
+    "must_include": [
+      "냉난방기 휴지기간 확대",
+      "4.6(월) ~ 5.17(일)",
+      "약 6주"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source. No changes are needed."
+    }
   },
   {
     "n": 40,
-    "q": "비교과 프로그램 계획서를 쓸 때 우리 대학 6대 핵심역량이 뭔가요?",
+    "query": "편입생이 포털에 처음 로그인할 때 비밀번호가 뭔가요?",
     "type": "본문",
-    "file_id": "1j9frXeZfBrlLlZZRbLMJwHe6QJBEB6vw",
-    "name": "2026[최종]비교과 계획서 작성 기준.pdf",
-    "bundle": "2026학년도 신규 비교과 프로그램 안내"
+    "expected_file": "1fjnqZe4c6N1GOnexw758BorlKOkzeHCi",
+    "name": "2026학년도 편입생 수강신청 및 학사제도 안내.pdf",
+    "expected_bundle": "2026학년도 편입생 수강신청 및 오리엔테이션 안내_20260212090223",
+    "expected_evidence": [
+      "→ 로그인(ID:학번,PW:주민번호 뒷자리 7자리로 최초 접속)",
+      "→ 로그인(ID:학번,PW:주민번호 뒷자리 7자리로 최초 접속)"
+    ],
+    "expected_answer": "편입생이 포털에 처음 로그인할 때 비밀번호는 주민등록번호 뒷자리 7자리입니다.",
+    "must_include": [
+      "ID:학번",
+      "PW:주민번호 뒷자리 7자리"
+    ],
+    "must_not_include": [],
+    "expected_year_version": null,
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source units. The evidence IDs correctly point to the relevant information, and the must_include facts are present in the answer."
+    }
   },
   {
     "n": 41,
-    "q": "대학원 강좌가 두 학기 연속 폐강 대상이 되면 어떻게 되나요?",
-    "type": "본문",
-    "file_id": "1yiDJSr5fnxB0ihl0i4FyP1HzJDVp_-Jo",
-    "name": "2026학년도 1학기 대학원 폐강 대상 강좌 개설 여부 안내.hwp",
-    "bundle": "2026학년도 1학기 대학원 폐강 대상 강좌 개설 여부 안내"
+    "query": "학·석사 연계과정에서 공동교과목은 몇 학점까지 중복 인정되나요?",
+    "type": "대비표",
+    "expected_file": "1ASbWT5Ab7irbMKAjRhWL9i-kH5WozkRr",
+    "name": "(붙임 1) 학칙 개정 신·구조문 대조표.hwpx",
+    "expected_bundle": "학칙 개정 안내_20260420110410",
+    "expected_evidence": [
+      "| 제28조의 3(학석사연계과정) 학부와 대학원의 교육과정을 상호 연계하는 학·석사 연계과정을 운영할 수 있으며, 이에 관한 세부사항은 따로 정한다. | 제28조의 3(학·석사연계과정)하는 학·석사 연계과정을 운영할 수 있다. ② 학·석사 공동교과목 이수 시 학부 졸업학점과 대학원 졸업이수학점으로 최대 6학점까지 중복하여 인정하며, 대학원 진학 시 대학원 이수 학점 및 성적으로 산입할 수 있다. ③ 학·석사연계과정 합격자가 일"
+    ],
+    "expected_answer": "학·석사 공동교과목은 학부 졸업학점과 대학원 졸업이수학점으로 최대 6학점까지 중복 인정됩니다.",
+    "must_include": [
+      "학·석사 공동교과목",
+      "최대 6학점",
+      "중복 인정"
+    ],
+    "must_not_include": [],
+    "expected_year_version": null,
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source. No changes are needed."
+    }
   },
   {
     "n": 42,
-    "q": "1학기에 강의시수를 최대치보다 초과한 교원 명단 있나요?",
-    "type": "스텁",
-    "file_id": "1gVnn3Usj8g2S37Rq_f_bVl1qkOU26lBJ",
-    "name": "붙임1_2026학년도 1학기 최대시수 초과 명단.xlsx",
-    "bundle": "2026학년도 1학기 강의시수 초과 신청서 제출 요청"
+    "query": "학과별 교육성과 분석보고서는 어느 부서가 만들었나요?",
+    "type": "본문",
+    "expected_file": "1Iw03e4FEdwWcPdheG9aaoHC8ULxBM_rF",
+    "name": "2025 학과(부)별 교육성과 분석 보고서 송부.hwp",
+    "expected_bundle": "2025 학과(부)별 교육성과 분석 보고서 송부_20260227030256",
+    "expected_evidence": [
+      "2. 위와 관련하여 IR센터에서는 교육성과의 환류 효과성 제고를 위해 2025년 주요 성과(만족도)를 집약한 \"학과(부)별 교육성과 분석보고서\"를 발간하였습니다. 이에 그 결과를 붙임과 같이 송부하오니, 학과(부) 교육과정 개선 시 참고하여 주시기 바랍니다."
+    ],
+    "expected_answer": "학과(부)별 교육성과 분석보고서는 IR센터에서 만들었습니다.",
+    "must_include": [
+      "IR센터",
+      "학과(부)별 교육성과 분석보고서"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2025",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": true,
+      "reason": "The original answer was correct, but the evidence was too broad. I narrowed it down to the most relevant sentence."
+    }
   },
   {
     "n": 43,
-    "q": "강사 직무평가에서 협조성 항목 배점이 몇 점인가요?",
+    "query": "교수가 명예퇴직을 신청하려면 근속 몇 년 이상이어야 하나요?",
     "type": "본문",
-    "file_id": "1Cy7kzNa8yIiDX4ejAzEhHhuc5vBJ2RKX",
-    "name": "02.직무평가_기준표.hwp",
-    "bundle": "강사 재임용 학과 직무평가 안내",
-    "also_accept": [
-      "1-ncMv1jGXLABM9G-aSNw0kmVfbanWPv2"
-    ]
+    "expected_file": "1VVmDLjyUrLEbQTFPgkeUw5_qrnbFOViC",
+    "name": "2026년 상반기 전임교원 명예퇴직 시행 안내.hwp",
+    "expected_bundle": "2026년 상반기 전임교원 명예퇴직 시행 안내_20251231031214",
+    "expected_evidence": [
+      "2. 위와 관련하여 본교에서 20년 이상 근속한 전임교원을 대상으로 아래와 같이 명예퇴직을 신청받고자 하오니, 명예퇴직을 희망하는 교원께서는 신청기간 내에 신청하여 주시기 바랍니다.",
+      "가. 대   상 : 20년 이상 근속한 전임교원으로서 정년퇴직일 전 1년 이상 10년 이내에 자진하여 퇴직을 희망하는 자(2026. 8. 31.기준)"
+    ],
+    "expected_answer": "교수가 명예퇴직을 신청하려면 20년 이상 근속해야 합니다.",
+    "must_include": [
+      "20년 이상 근속"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026년 상반기",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and well-supported by the provided source units."
+    }
   },
   {
     "n": 44,
-    "q": "전공기초역량향상 선후배 멘토링 신청 안내 게시글 찾아줘",
-    "type": "무텍스트",
-    "file_id": "1Pio6pfuJFnl1K7Ctg_rdfWk6MOYtG5C9",
-    "name": "content.txt",
-    "bundle": "148379_[비교과]전공기초역량향상 선후배멘토링 신청안내(~52)"
+    "query": "교육과정위원회 위원 임기가 몇 년인가요?",
+    "type": "본문",
+    "expected_file": "1vqLKxnNwyJ0jwCFQfWtM5GmIHWA2ySb4",
+    "name": "12_교육과정위원회규정 개정 전문.hwp",
+    "expected_bundle": "규정 제·개정에 대한 의견 수렴 안내_20260213110213",
+    "expected_evidence": [
+      "③위원의 임기는 2년으로 하되 중임할 수 있다."
+    ],
+    "expected_answer": "교육과정위원회 위원의 임기는 2년이며, 중임할 수 있습니다.",
+    "must_include": [
+      "위원의 임기는 2년",
+      "중임할 수 있다"
+    ],
+    "must_not_include": [],
+    "expected_year_version": null,
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source. No changes are needed."
+    }
   },
   {
     "n": 45,
-    "q": "이중국적자도 외국인 편입학 전형에 지원할 수 있나요?",
-    "type": "본문",
-    "file_id": "13PKvJFWfoSipKZkAaYXO8ujL_sKkU-30",
-    "name": "(심의2호_붙임자료4) 2026학년도 하반기(9월) 편입학 외국인전형 사정원칙(안).hwp",
-    "bundle": "2026년도 제6회 입학관리위원회 개최안내"
+    "query": "교수 자녀가 부모 강의를 수강하면 신고해야 하나요? 안 하면 어떻게 되나요?",
+    "type": "양식",
+    "expected_file": "1QfH5nTC1rEnLTvuWZDa0HEjv1BVxzGwu",
+    "name": "[붙임 1] 신고서 및 서약서(양식).hwp",
+    "expected_bundle": "2026학년도 1학기 교수 자녀의 재학여부 및 수강 신고 안내_20260318010359",
+    "expected_evidence": [
+      "| ※ 신고 유의사항   ① 교수-자녀 재학 현황 : 재직 중인 전체 교원으로, 자녀가 본교(학부 또는 대학원)에 재학하는 경우 신고   ② 교수-자녀 수강 현황 : 재학 중인 자녀가 부모 강의 수강 시 신고 ※ 교수-자녀 수강 관련 유의사항   - 부모 강의를 수강하지 않는 것이 원칙으로 필수 교과목이라 하더라도 타 분반 강의 수강   - 부득이하게 부모 강의를 수강할 경우 교수(부모)는 해당 사실을 교무처(학사운영팀)에 신",
+      "고하고, 성적 산출자료는 학부(과)에 제출하여 공정 여부 확인   - 부모 강의 수강함에도 미신고하거나, 성적산출 근거 미제출 등 위 사항 위반 시 교원인사규정 제48조에 의해 징계위원회에 징계 의결 요구 가능 20    .    .    . 신고인  성명                (서명)                          한국공학대학교 교무처장 귀하 |"
+    ],
+    "expected_answer": "교수 자녀가 부모 강의를 수강하는 경우, 교수(부모)는 해당 사실을 교무처(학사운영팀)에 신고해야 합니다. 신고하지 않거나 성적 산출 자료를 제출하지 않으면 교원인사규정 제48조에 따라 징계위원회에 징계 의결 요구가 가능합니다.",
+    "must_include": [
+      "교수 자녀가 부모 강의 수강 시 신고해야 함",
+      "교무처(학사운영팀)에 신고",
+      "미신고 시 징계 가능"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source units. No changes are needed."
+    }
   },
   {
     "n": 46,
-    "q": "지도교수 상담이 필요한 복학생 명단 있나요?",
-    "type": "스텁",
-    "file_id": "1f6Kj9YuXlaK8hwTAzIO5sXloOip91j3-",
-    "name": "(붙임 2) 2026-1_지도교수 상담 요청 복학생 명단.xlsx",
-    "bundle": "2026학년도 1학기 복학생 대상 대학생활 적응 지원 협조 요청"
+    "query": "지게차나 크레인 쓰는 작업도 안전작업허가서를 내야 하나요?",
+    "type": "본문",
+    "expected_file": "1rTJOp5mWzIIUHCqpdRAZQw78d-aSuC0E",
+    "name": "교내 고위험작업 시 안전작업허가 제도 운영 안내.hwp",
+    "expected_bundle": "교내 고위험작업 시 안전작업허가 제도 운영 안내_20260204010220",
+    "expected_evidence": [
+      "※ 반입·반출 시 사용되는 지게차, 크레인 등 중량물 취급 작업은 안전작업허가서 제출 대상 작업에 해당"
+    ],
+    "expected_answer": "네, 반입·반출 시 사용되는 지게차, 크레인 등 중량물 취급 작업은 안전작업허가서 제출 대상 작업에 해당합니다.",
+    "must_include": [
+      "지게차",
+      "크레인",
+      "중량물 취급 작업",
+      "안전작업허가서 제출 대상"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source unit. No changes are needed."
+    }
   },
   {
     "n": 47,
-    "q": "수업만족도 평가 점수가 3.5 미만이면 교원에게 어떤 조치가 있나요?",
+    "query": "학습경험 궤적 질적분석 연구는 어떤 학생을 대상으로 했나요?",
     "type": "본문",
-    "file_id": "1LRyyXioDF3SYvGDKMoXzwHg4C4LCPsJQ",
-    "name": "[붙임 2] 관련 규정(수업만족도 평가에 관한 규정).hwp",
-    "bundle": "2026학년도 1학기 중간 수업만족도 평가 시행 안내"
+    "expected_file": "1B_UcyXHl30H9a_WhDM0ycf-mv7ceKQCI",
+    "name": "2025학년도 학생 학습경험 궤적 분석 결과보고서 송부.hwp",
+    "expected_bundle": "2025학년도 학생 학습경험 궤적 분석 결과보고서 송부_20260126020107",
+    "expected_evidence": [
+      "라. 대    상: 입학초기 대학생활적응 위험집단군 중 재학중 학습몰입경험 학생"
+    ],
+    "expected_answer": "입학 초기 대학생활 적응에 어려움을 겪는 학생들 중 재학 중에 학습 몰입 경험이 있는 학생들을 대상으로 했습니다.",
+    "must_include": [
+      "입학초기 대학생활적응 위험집단군",
+      "재학중 학습몰입경험 학생"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2025",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source unit."
+    }
   },
   {
     "n": 48,
-    "q": "캡스톤디자인 예산으로 공구나 사무용품을 살 수 있나요?",
+    "query": "편입생 수강신청은 언제 하나요?",
     "type": "본문",
-    "file_id": "1aQPi1MxfSYhTTFDsDKwNvVuDQghZZCYe",
-    "name": "2026학년도 융합·연계형 캡스톤디자인 예산 집행 안내문.hwp",
-    "bundle": "2026학년도 융합·연계형 캡스톤디자인 선발팀 안내"
+    "expected_file": "1H8QMsPhdCydc0Dmw55EXRIUhkqG7Z4zp",
+    "name": "2026학년도 편입생 수강신청 및 오리엔테이션 안내.hwp",
+    "expected_bundle": "2026학년도 편입생 수강신청 및 오리엔테이션 안내_20260212090223",
+    "expected_evidence": [
+      "3. 수강신청 기간: 2026. 2. 25.(수) 10:30~23:59(오리엔테이션 시간은 학과(부)별 상이)"
+    ],
+    "expected_answer": "편입생 수강신청은 2026년 2월 25일 수요일 오전 10시 30분부터 오후 11시 59분까지입니다.",
+    "must_include": [
+      "2026년 2월 25일",
+      "10:30",
+      "23:59",
+      "수요일"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": true,
+      "reason": "The original answer missed '수요일' which is present in the source and should be included for completeness."
+    }
   },
   {
     "n": 49,
-    "q": "신입생 대학 적응과 학습지원 요구를 조사한 FGI 결과보고서 보여줘",
-    "type": "무텍스트",
-    "file_id": "1FX4Ay3kZ7CzMjep6EZ1pwK0mE5D7Xih7",
-    "name": "2025학년도 신입생 대학 적응 및 학습 지원 요구 분석을 위한 FGI 결과보고서.pdf",
-    "bundle": "2025 신입생 대학 적응 및 학습지원 요구 분석을 위한 FGI 결과보고서 송부"
+    "query": "국제학부 책임교수가 누구로 바뀌었나요?",
+    "type": "본문",
+    "expected_file": "1rTpN6Tf3ZNhP06E1HCwVtzYpCB0qfkb6",
+    "name": "26. 3. 1.인사발령(교원임면).hwp",
+    "expected_bundle": "인사발령(교원 임면)_20260227090205",
+    "expected_evidence": [
+      "17,경영학부,교수,이영곤,국제학부 책임교수에 보함"
+    ],
+    "expected_answer": "이영곤 교수가 국제학부 책임교수로 임명되었습니다.",
+    "must_include": [
+      "이영곤",
+      "국제학부 책임교수"
+    ],
+    "must_not_include": [],
+    "expected_year_version": "2026",
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source unit."
+    }
   },
   {
     "n": 50,
-    "q": "개인정보 내부 관리계획이 2026년 2월에 어떤 근거로 개정됐나요?",
+    "query": "연구년은 어느 시스템에서 신청하나요?",
     "type": "본문",
-    "file_id": "1afFpRSmXwtmJcPLf912XpkFuUoJaTL38",
-    "name": "[붙임1] 개인정보 내부 관리계획(2026.2.).hwp",
-    "bundle": "개인정보 내부 관리계획 배포"
+    "expected_file": "1H2eQhLMWlc7eTOcAV4j1oICeGvZiJ-k3",
+    "name": "2026-2학기, 2027-1학기 연구년 신청 안내(정년트랙 전임교원).hwp",
+    "expected_bundle": "2026-2학기, 2027-1학기 연구년 신청 안내(정년트랙 전임교원)_20260106030143",
+    "expected_evidence": [
+      "나. 신청방법 : 통합정보시스템 (개인인사관리/연구년신청 메뉴)"
+    ],
+    "expected_answer": "연구년은 통합정보시스템의 개인인사관리/연구년신청 메뉴에서 신청할 수 있습니다.",
+    "must_include": [
+      "통합정보시스템",
+      "개인인사관리/연구년신청 메뉴"
+    ],
+    "must_not_include": [],
+    "expected_year_version": null,
+    "label_audit": {
+      "model": "gemini-2.5-flash",
+      "changed": false,
+      "reason": "The current label is accurate and directly supported by the provided source unit."
+    }
   }
 ]

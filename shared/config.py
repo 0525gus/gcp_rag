@@ -227,6 +227,30 @@ class Settings:
     # 다만 골든 질의는 문서 어휘와 겹치게 쓰인 편향이 있고, 로그의 실사용 질의
     # 10건에서는 top1 변화가 없었다(해롭지도 않았다).
     search_lexical_rerank: bool = True
+    # Additional RRF channel based on normalized file/title BM25. Zero preserves
+    # the current vector + body-BM25 behavior; canaries use 1, 2, and 3.
+    search_title_rerank_weight: float = 0.0
+    # Regex-only period metadata match/penalty. Zero keeps the rule disabled.
+    search_temporal_rank_weight: float = 0.0
+    search_sequence_rank_weight: float = 0.0
+    search_document_kind_rank_weight: float = 0.0
+    search_revision_rank_weight: float = 0.0
+    # Optional final reranker. "rrf" fixes a larger candidate set without calling
+    # a model, enabling fair A/B/C benchmarks against cross_encoder and llm.
+    search_reranker_mode: str = "none"
+    search_reranker_candidate_k: int = 30
+    search_cross_encoder_model: str = "semantic-ranker-default-004"
+    search_llm_reranker_model: str = "gemini-2.5-flash-lite"
+    search_reranker_timeout_seconds: float = 15.0
+
+    # 원문 검색은 항상 유지하고, 짧은 모델 재작성 질의를 추가 후보로만 쓴다.
+    # 재작성 실패·조건 손실은 원문 검색으로 즉시 되돌아간다.
+    search_rewrite_enabled: bool = False
+    search_rewrite_model: str = "gemini-2.5-flash-lite"
+    search_rewrite_timeout_seconds: float = 2.0
+    # Rewritten queries improved first-rank precision in the measured corpus.
+    # Give their RRF list a modest preference while retaining raw-query recall.
+    search_rewrite_weight: float = 2.0
 
     # 한 문서에서 이어 붙일 최대 청크 수. 1 이면 예전처럼 파일당 1청크만 준다.
     # 긴 규정 문서는 답이 여러 조문에 걸쳐 있어 1이면 필요한 조문이 통째로
@@ -294,7 +318,7 @@ class Settings:
     split_queue_collection: str = "doc_split_queue"
     # 장시간 작업 진행률.
     sync_job_collection: str = "sync_jobs"
-    
+
     # Drive→GCS ingest 병렬 워커 (무료/소형 인스턴스 기준 8 권장).
     # HWP 뿐 아니라 FILE_COPY·GOOGLE_EXPORT 까지 전 라우트를 묶는다.
     ingest_concurrency: int = 8
@@ -378,9 +402,7 @@ class Settings:
             gcs_source_bucket=_env("GCS_SOURCE_BUCKET"),
             firestore_database=os.environ.get("FIRESTORE_DATABASE", "rag-sync-state"),
             doc_state_collection=os.environ.get("DOC_STATE_COLLECTION", "doc_state"),
-            sync_token_collection=os.environ.get(
-                "SYNC_TOKEN_COLLECTION", "sync_tokens"
-            ),
+            sync_token_collection=os.environ.get("SYNC_TOKEN_COLLECTION", "sync_tokens"),
             rag_corpus_name=_env("RAG_CORPUS_NAME"),
             rag_corpus_name_student=os.environ.get("RAG_CORPUS_NAME_STUDENT", ""),
             docai_processor_id=os.environ.get("DOCAI_PROCESSOR_ID", ""),
@@ -388,9 +410,7 @@ class Settings:
             drive_ids=os.environ.get("DRIVE_IDS", ""),
             sync_folder_ids=os.environ.get("SYNC_FOLDER_IDS", ""),
             student_folder_ids=os.environ.get("STUDENT_FOLDER_IDS", ""),
-            departments=_departments_from_json(
-                os.environ.get("DEPARTMENTS_JSON", "")
-            ),
+            departments=_departments_from_json(os.environ.get("DEPARTMENTS_JSON", "")),
             qg_density_threshold=_env_float("QG_DENSITY_THRESHOLD", 0.0005),
             qg_table_loss_ratio=_env_float("QG_TABLE_LOSS_RATIO", 0.3),
             qg_min_text_length=_env_int("QG_MIN_TEXT_LENGTH", 20),
@@ -401,49 +421,67 @@ class Settings:
             search_fetch_max=_env_int("SEARCH_FETCH_MAX", 60),
             search_distance_threshold=_env_float("SEARCH_DISTANCE_THRESHOLD", 0.30),
             search_lexical_rerank=_env_bool("SEARCH_LEXICAL_RERANK", True),
-            search_max_chunks_per_file=max(
-                1, _env_int("SEARCH_MAX_CHUNKS_PER_FILE", 3)
+            search_title_rerank_weight=max(
+                0.0, _env_float("SEARCH_TITLE_RERANK_WEIGHT", 0.0)
             ),
-            search_max_total_chunks=max(
-                1, _env_int("SEARCH_MAX_TOTAL_CHUNKS", 15)
+            search_temporal_rank_weight=max(
+                0.0, _env_float("SEARCH_TEMPORAL_RANK_WEIGHT", 0.0)
             ),
+            search_sequence_rank_weight=max(
+                0.0, _env_float("SEARCH_SEQUENCE_RANK_WEIGHT", 0.0)
+            ),
+            search_document_kind_rank_weight=max(
+                0.0, _env_float("SEARCH_DOCUMENT_KIND_RANK_WEIGHT", 0.0)
+            ),
+            search_revision_rank_weight=max(
+                0.0, _env_float("SEARCH_REVISION_RANK_WEIGHT", 0.0)
+            ),
+            search_reranker_mode=os.environ.get("SEARCH_RERANKER_MODE", "none").strip().lower(),
+            search_reranker_candidate_k=max(
+                10, min(_env_int("SEARCH_RERANKER_CANDIDATE_K", 30), 30)
+            ),
+            search_cross_encoder_model=os.environ.get(
+                "SEARCH_CROSS_ENCODER_MODEL", "semantic-ranker-default-004"
+            ).strip(),
+            search_llm_reranker_model=os.environ.get(
+                "SEARCH_LLM_RERANKER_MODEL", "gemini-2.5-flash-lite"
+            ).strip(),
+            search_reranker_timeout_seconds=max(
+                0.1, _env_float("SEARCH_RERANKER_TIMEOUT_SECONDS", 15.0)
+            ),
+            search_rewrite_enabled=_env_bool("SEARCH_REWRITE_ENABLED", False),
+            search_rewrite_model=os.environ.get(
+                "SEARCH_REWRITE_MODEL", "gemini-2.5-flash-lite"
+            ).strip(),
+            search_rewrite_timeout_seconds=max(
+                0.1, _env_float("SEARCH_REWRITE_TIMEOUT_SECONDS", 2.0)
+            ),
+            search_rewrite_weight=max(0.0, _env_float("SEARCH_REWRITE_WEIGHT", 2.0)),
+            search_max_chunks_per_file=max(1, _env_int("SEARCH_MAX_CHUNKS_PER_FILE", 3)),
+            search_max_total_chunks=max(1, _env_int("SEARCH_MAX_TOTAL_CHUNKS", 15)),
             rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 1024),
             rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 256),
             rag_metadata_bucket=os.environ.get("RAG_METADATA_BUCKET", ""),
             rag_mapping_write_enabled=_env_bool("RAG_MAPPING_WRITE_ENABLED", False),
             rag_mapping_read_enabled=_env_bool("RAG_MAPPING_READ_ENABLED", False),
-            rag_mapping_fallback_scan_enabled=_env_bool(
-                "RAG_MAPPING_FALLBACK_SCAN_ENABLED", True
-            ),
+            rag_mapping_fallback_scan_enabled=_env_bool("RAG_MAPPING_FALLBACK_SCAN_ENABLED", True),
             cloud_tasks_enabled=_env_bool("CLOUD_TASKS_ENABLED", False),
             task_queue_location=os.environ.get(
                 "TASK_QUEUE_LOCATION", os.environ.get("GCP_REGION", "asia-northeast3")
             ),
-            task_queue_faculty=os.environ.get(
-                "TASK_QUEUE_FACULTY", "faculty-rag-sync-queue"
-            ),
-            task_queue_student=os.environ.get(
-                "TASK_QUEUE_STUDENT", "student-rag-sync-queue"
-            ),
+            task_queue_faculty=os.environ.get("TASK_QUEUE_FACULTY", "faculty-rag-sync-queue"),
+            task_queue_student=os.environ.get("TASK_QUEUE_STUDENT", "student-rag-sync-queue"),
             task_service_account=os.environ.get("TASK_SERVICE_ACCOUNT", ""),
             sync_task_base_url=os.environ.get("SYNC_TASK_BASE_URL", ""),
-            index_job_timeout_seconds=max(
-                60, _env_int("INDEX_JOB_TIMEOUT_SECONDS", 900)
-            ),
+            index_job_timeout_seconds=max(60, _env_int("INDEX_JOB_TIMEOUT_SECONDS", 900)),
             rag_delete_pacing_seconds=_env_float("RAG_DELETE_PACING_SECONDS", 1.1),
-            rag_delete_concurrency=max(
-                1, min(_env_int("RAG_DELETE_CONCURRENCY", 1), 16)
-            ),
+            rag_delete_concurrency=max(1, min(_env_int("RAG_DELETE_CONCURRENCY", 1), 16)),
             max_gcs_bytes=_env_int("MAX_GCS_BYTES", 150 * 1024 * 1024),
             enable_docai_fallback=_env_bool("ENABLE_DOCAI_FALLBACK", False),
             dlq_collection=os.environ.get("DLQ_COLLECTION", "doc_dlq"),
-            split_queue_collection=os.environ.get(
-                "SPLIT_QUEUE_COLLECTION", "doc_split_queue"
-            ),
+            split_queue_collection=os.environ.get("SPLIT_QUEUE_COLLECTION", "doc_split_queue"),
             sync_job_collection=os.environ.get("SYNC_JOB_COLLECTION", "sync_jobs"),
-            ingest_concurrency=max(
-                1, min(_env_int("INGEST_CONCURRENCY", 8), 32)
-            ),
+            ingest_concurrency=max(1, min(_env_int("INGEST_CONCURRENCY", 8), 32)),
             sync_max_changes=max(1, min(_env_int("SYNC_MAX_CHANGES", 200), 2000)),
         )
 

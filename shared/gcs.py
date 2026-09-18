@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from google.cloud import storage
 
 from shared.config import Settings, get_settings
@@ -34,9 +36,9 @@ def gs_uri(bucket: str, blob: str) -> str:
 
 
 class GcsClient:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, *, credentials: Any | None = None) -> None:
         self.settings = settings or get_settings()
-        self._client = storage.Client(project=self.settings.gcp_project_id)
+        self._client = storage.Client(project=self.settings.gcp_project_id, credentials=credentials)
 
     def download_bytes(self, uri: str) -> bytes:
         bucket_name, blob_name = parse_gs_uri(uri)

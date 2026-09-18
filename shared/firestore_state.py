@@ -16,11 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 class DocStateStore:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, *, credentials: Any | None = None) -> None:
         self.settings = settings or get_settings()
         self._db = firestore.Client(
             project=self.settings.gcp_project_id,
             database=self.settings.firestore_database,
+            credentials=credentials,
         )
         self._col = self._db.collection(self.settings.doc_state_collection)
         self._tokens = self._db.collection(self.settings.sync_token_collection)

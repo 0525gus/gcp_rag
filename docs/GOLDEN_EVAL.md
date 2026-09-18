@@ -1,10 +1,121 @@
 # 골든셋 검증 결과 (100건)
 
+> **2026-09-13 확장:** 기존 100건을 유지하고 취약 유형 중심 신규 100건을
+> 추가한 `tests/golden200.json`을 만들었다. 신규 문항은 모두 서로 다른 파일과
+> normalized bundle을 사용하며, 상세 구성과 검증 결과는
+> `docs/verification/golden200-expansion-2026-09-13.md`에 기록했다.
+
+## Golden200 frozen split 및 retrieval 채널 평가
+
+고정 스냅샷은 `tests/frozen/golden200-2026-09-13`이며, normalized bundle이
+dev/holdout 양쪽에 섞이지 않는 group-aware stratified split이다.
+
+- dev: `golden200_dev150.json` (튜닝·조합 선택)
+- holdout: `golden200_holdout50.json` (최종 1회 승격 판단)
+- `manifest.json`: `snapshot_id`, split 구성, 파일별 SHA-256
+
+MCP 서비스는 기존 `search` 도구 계약을 바꾸지 않고, 인증이 적용되는 다음 HTTP
+경로를 제공한다.
+
+```text
+POST /retrieval/vector
+POST /retrieval/body
+POST /retrieval/title
+POST /retrieval/bundle
+POST /retrieval/metadata
+```
+
+요청 본문은 `{"query":"...","top_k":20,"candidate_k":30}`이다. 현재 구조에서
+후보를 새로 만드는 채널은 Vertex `vector`뿐이다. 나머지 네 경로는 동일 요청에서
+만든 vector 문서 후보군을 각각 body BM25, normalized title, normalized bundle,
+기간·차수·문서종류·개정 규칙으로 독립 정렬한다. 응답의 `candidateSource`와
+`candidateScope`가 이 경계를 명시한다.
+
+Golden200 채널 평가는 RAG MCP를 직접 호출하며 FactChat 경로를 사용하지 않는다.
+
+```powershell
+$env:MCP_URL = "https://<rag-mcp-service>/mcp"
+python scripts/eval_retrieval_channels.py --dept cs --split dev --top-k 20 --candidate-k 30
+python scripts/eval_retrieval_channels.py --dept cs --split holdout --top-k 20 --candidate-k 30
+```
+
+결과 폴더에는 다음이 생긴다.
+
+- `rows.csv`, `rows.jsonl`: 질의당 정확히 1행. 채널별 rank/Hit@k/MRR 항/근거
+  recall/latency/top IDs가 `vector_*`, `body_*` 같은 flat column으로 저장된다.
+- `summary.json`: 채널별 Hit@1/3/5/20/30, MRR, Evidence Recall, 평균/p95 latency.
+- 모든 행: frozen `snapshot_id`와 SHA-256, runner `commit`/dirty 여부.
+- 채널별 열: Cloud Run revision, 배포 시 자동 주입한 server commit/dirty 여부.
+
+### Phase 1: corpus freeze 진단
+
+후보 생성·랭킹 튜닝 전에 아래 순서를 바꾸지 않고 실행한다. 이 스크립트는
+Firestore/RAG/GCS를 **읽기만** 하며, source 본문은 메모리에서만 사용하고 결과
+폴더에는 저장하지 않는다.
+
+```powershell
+gcloud auth login  # gcloud 사용자 토큰이 만료됐을 때만
+python scripts/run_phase1_diagnosis.py --department cs --split dev
+```
+
+실행 결과는 `tests/_bench_out/phase1/<run_id>/`에 다음 순서의 CSV로 남는다.
+
+| 순서 | 파일 | 내용 |
+|---:|---|---|
+| 1 | `01_gold_audit_rows.csv`, `01_gold_audit_summary.csv` | gold file index/source/evidence 상태와 추출 실패율 |
+| 2 | `02_large_fetch_curve_rows.csv`, `02_large_fetch_curve_summary.csv` | vector/body/title/bundle k=50/100/200 curve 및 metadata exact |
+| 3 | `03_oracle_union_rows.csv`, `03_oracle_union_summary.csv` | pruning 전 채널 합집합 ceiling |
+| 4 | `04_q1_q4_diagnosis_rows.csv`, `04_q1_q4_diagnosis_summary.csv` | Q1 user query, Q2 gold title, Q3 normalized filename, Q4 direct index lookup |
+| 5 | `05_loo_channel_attribution.csv` | channel leave-one-out ΔRecall, unique rescue, weakness tag |
+
+`00_run_metadata.json`에는 Golden `snapshot_id`, corpus `index_version`, code commit/dirty,
+model version, prompt hash와 실행 전후 RAG file-list 일치 여부가 기록된다. Vertex
+RAG의 `retrieveContexts`는 topK 100 상한이므로 vector k=200은 보간하거나 중복 호출하지
+않고 `unsupported_by_vertex_top_k_100`으로 curve 표에 명시한다. body/title/bundle은
+동일 corpus snapshot의 전체 source inventory를 대상으로 실제 Top200을 계산한다.
+Vertex가 file별 chunk 수를 노출하지 않으므로 RAG file은 존재하지만 source GCS 본문
+객체가 없는 경우는 `source_object_missing`으로 별도 기록하며, `no_chunks`로 오인해
+ingestion 중단 조건에 넣지 않는다.
+
+> **2026-09-12 갱신:** Golden100의 재색인 전 파일 ID를 현재 문서 ID로 교체하고,
+> FactChat E2E용 정답·근거·필수 사실·연도/버전 라벨을 100건 모두 채웠다.
+> 아래 2026-07-28 표와 질의별 내역은 이전 골든셋의 역사적 결과다.
+>
+> 갱신본을 현재 통합 랭킹 canary에서 재측정한 결과는 정확 파일 기준
+> Hit@1 47, Hit@3 77, Hit@5 88, MRR 0.627이며 Evidence Recall은
+> 127/174(0.730), 지연은 median 1,413ms / p95 1,853ms였다.
+> 원시 결과는 `tests/_bench_out/golden100_enriched_search_eval.json`에 있다.
+
 - 측정일: 2026. 7. 28.
 - 대상: 배포된 MCP `search` 툴 (`rag-mcp`, 후처리 포함 전 구간)
 - 설정: `top_k=5`, `fetch_k=30`, 거리상한 0.30, 어휘 재정렬 on, 문서당 최대 3청크
 - 데이터셋: [`tests/golden100.json`](../tests/golden100.json)
 - 재현: `python scripts/eval_golden.py tests/golden100.json`
+
+### 데이터 스키마
+
+각 행은 다음 정답 필드를 가진다.
+
+- `expected_file`: 정답 `fileId` 문자열 또는 동등한 복수 파일의 배열
+- `expected_bundle`: 정답 자료묶음 문자열 또는 허용할 복수 묶음의 배열
+- `expected_evidence`: 검색 청크에 포함되어야 할 근거 문구의 배열
+  - 문자열 하나가 근거 단위 하나다.
+  - OCR/띄어쓰기 변형을 허용하려면 대체 문자열을 배열로 묶는다.
+  - 2026-09-12 보완본은 100건 모두 실제 원문 구간 1~5개를 가진다.
+- `expected_answer`: FactChat 최종 답변의 기준 정답
+- `must_include`: 정답 판정 시 반드시 포함해야 하는 핵심 사실
+- `must_not_include`: 구버전 값 등 포함되면 안 되는 명시적 사실(없으면 빈 배열)
+- `expected_year_version`: 적용 연도·학기·버전. 해당하지 않으면 `null`
+- `replaces_query`: 현재 코퍼스에서 정답 원문이 사라져 질문을 교체한 경우의 이전 질문
+- `label_audit`: 별도 검증 모델의 교정 여부와 사유
+
+FactChat E2E에서는 `expected_answer`와 `must_include`로 정답/부분정답/오답을,
+`expected_evidence`로 근거 부족을, `expected_year_version`과
+`must_not_include`로 잘못된 연도·버전을 판정한다. 원문에도 기준 정답에도 없는
+구체 사실을 생성하면 환각으로 판정한다.
+
+평가 결과에는 파일/묶음 기준 `Hit@1`, `Hit@3`, `Hit@5`, `MRR`과 전체
+`Evidence Recall`, 요청 latency(`mean`, `median`, `p95`, `max`)가 기록된다.
 
 ---
 
@@ -276,4 +387,3 @@
 | **0건일 때만 재질의** | 차단 성능 유지 + 빈손 방지 | 구현 필요 |
 
 - □ 세 번째 방안이 유리해 보이나, **측정 없이 변경하지 않음**
-

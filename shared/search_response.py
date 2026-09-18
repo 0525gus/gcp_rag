@@ -33,15 +33,22 @@ class SearchResponse(TypedDict):
     documents: list[EvidenceDocument]
     documentCount: int
     chunkCount: int
+    retrievalDiagnostics: dict[str, int | None] | None
 
 
-def build_search_response(documents: list[EvidenceDocument]) -> SearchResponse:
-    return {
+def build_search_response(
+    documents: list[EvidenceDocument],
+    *,
+    retrieval_diagnostics: dict[str, int | None] | None = None,
+) -> SearchResponse:
+    response: SearchResponse = {
         "schemaVersion": 2,
         "documents": documents,
         "documentCount": len(documents),
         "chunkCount": sum(len(doc["chunks"]) for doc in documents),
+        "retrievalDiagnostics": retrieval_diagnostics,
     }
+    return response
 
 
 def response_documents(result: dict[str, Any]) -> list[dict[str, Any]]:

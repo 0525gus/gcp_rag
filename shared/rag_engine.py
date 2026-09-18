@@ -158,6 +158,7 @@ class RagEngineClient:
         settings: Settings | None = None,
         *,
         corpus_name: str | None = None,
+        credentials: Any | None = None,
     ) -> None:
         """corpus_name 을 주면 그 코퍼스를, 없으면 설정의 기본(=교직원용)을 쓴다.
 
@@ -170,6 +171,7 @@ class RagEngineClient:
         agentplatform.init(
             project=self.settings.gcp_project_id,
             location=self.settings.gcp_region,
+            credentials=credentials,
         )
         self.corpus_name = corpus_name or self.settings.rag_corpus_name
 

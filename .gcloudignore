@@ -12,6 +12,8 @@ config/departments/*.yaml
 tests/
 tests/_bench_out/
 **/_bench_out/
+outputs/
+tmp/
 *.hwp
 *.hwpx
 *.log
