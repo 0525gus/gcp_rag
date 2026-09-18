@@ -2291,7 +2291,10 @@ def retrieve_department_corpus(
                 "rank": index,
                 "text": context_text,
                 "sourceDisplayName": str(item.get("sourceDisplayName") or ""),
-                "sourceUri": citation_view_uri(str(item.get("sourceUri") or "")),
+                "sourceUri": citation_view_uri(
+                    str(item.get("sourceUri") or ""),
+                    str(item.get("sourceDisplayName") or ""),
+                ),
                 "score": item.get("score"),
             }
         )

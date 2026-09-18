@@ -181,6 +181,29 @@ def test_search_returns_preview_for_existing_edit_uri(server, monkeypatch):
         )
 
 
+def test_search_returns_download_link_for_hangul_office_source(server, monkeypatch):
+    app, _, _ = server
+
+    class Store:
+        def get(self, fid):
+            return DocState(
+                file_id=fid,
+                drive_id="d",
+                name="공문.HWPX",
+                status=DocStatus.INDEXED,
+                source_uri=f"https://drive.google.com/file/d/{fid}/view?resourcekey=key",
+            )
+
+    monkeypatch.setattr(app, "DocStateStore", lambda *_: Store())
+    result = app.search("한글 공문")
+    assert result["documents"]
+    for document in result["documents"]:
+        assert document["source"]["sourceUri"] == (
+            f"https://drive.google.com/uc?export=download&id="
+            f"{document['source']['fileId']}&resourcekey=key"
+        )
+
+
 def test_html_preserves_scholarship_table_relationships():
     content = """<html><head><style>noise</style></head><body>
     <h2>성적우수장학금</h2><input type="hidden" value="secret">

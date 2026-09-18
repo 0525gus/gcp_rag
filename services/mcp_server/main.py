@@ -180,7 +180,8 @@ def search(
     작성합니다. documents의 각 항목은 fileId로 구분한 문서이고, chunks는 그
     문서에서 검색된 부분입니다. 청크는 원문 전체나 연속된 구간을 보장하지 않습니다.
     citationId와 source를 사용해 인용하고, 문서 사이의 관계를 근거 없이 추론하지
-    마세요. 검색 결과만으로 답할 수 없으면 확인되지 않은 부분을 밝혀 주세요.
+    마세요. sourceUri는 일반 문서의 미리보기 링크이며 HWP/HWPX 문서에서는 다운로드
+    링크입니다. 검색 결과만으로 답할 수 없으면 확인되지 않은 부분을 밝혀 주세요.
     같은 정보를 얻기 위해 표현만 바꿔 반복 호출할 필요는 없습니다.
 
     Args:
@@ -458,7 +459,8 @@ def search(
             "path": meta.path if meta else None,
             "bundle": meta.bundle if meta else None,
             "sourceUri": citation_view_uri(
-                (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri
+                (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri,
+                display_name,
             ),
             "modifiedTime": (meta.modified_time if meta else hit.source.modified_time),
             "driveId": meta.drive_id if meta else None,
@@ -618,7 +620,8 @@ def retrieve_channel(
             "path": (meta.path if meta else None),
             "bundle": bundles[index] or None,
             "sourceUri": citation_view_uri(
-                (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri
+                (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri,
+                titles[index],
             ),
             "modifiedTime": (meta.modified_time if meta else hit.source.modified_time),
             "driveId": (meta.drive_id if meta else None),

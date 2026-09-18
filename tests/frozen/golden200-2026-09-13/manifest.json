@@ -247,9 +247,9 @@
     }
   },
   "files": {
-    "golden200.json": "sha256:8906c0d709caceb4f8d83990cadd1ddc64238ef08b4f85edca877f54a2e6ebe5",
-    "golden200_dev150.json": "sha256:4e6dd3b775ed479bdd79b974ff4de40d899c34228a47890f33a7f03bc12ee47c",
-    "golden200_holdout50.json": "sha256:d0810b4da5c8dbdac10c1652dcef942d8e7c9f810b09506279453d40164675a3",
-    "golden200_sources.json": "sha256:fbb13dddb508f0a388217e2d399802229f7a7c5164b42534d1caff594633f167"
+    "golden200.json": "sha256:7e192f6679e21f83c0633317c4901dc90926202d78d12a2ab11424ab35d454d8",
+    "golden200_dev150.json": "sha256:7abb6f3eabee65465b7aa331283319a560bdb992c18cf11d8c3a18fe5910821e",
+    "golden200_holdout50.json": "sha256:6d777aee2d671d3a4491ab620953dc79b59f540bade62e629487fe7ebfddb7b5",
+    "golden200_sources.json": "sha256:79aa8b1bdc4066209da232416e1f12865a2fbc07e1469f3a2f400e8ad3eedebe"
   }
 }

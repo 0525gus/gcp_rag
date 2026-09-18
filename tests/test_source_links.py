@@ -34,3 +34,18 @@ def test_other_source_uris_remain_unchanged(uri):
 def test_office_editor_uri_uses_drive_viewer_without_editor_options():
     uri = "https://docs.google.com/document/d/1ltVwKUmqihSeaol1eB_Qmg2K__Se-6TD/preview?usp=drivesdk&ouid=112918399556333167261&rtpof=true&sd=true"
     assert citation_view_uri(uri) == "https://drive.google.com/file/d/1ltVwKUmqihSeaol1eB_Qmg2K__Se-6TD/view"
+
+
+@pytest.mark.parametrize("filename", ["공문.hwp", "붙임.HWPX"])
+def test_hangul_office_files_use_drive_download_link(filename):
+    uri = "https://drive.google.com/file/d/abc-123_/view?resourcekey=access-key&usp=sharing"
+    assert citation_view_uri(uri, filename) == (
+        "https://drive.google.com/uc?export=download&id=abc-123_&resourcekey=access-key"
+    )
+
+
+def test_non_hangul_office_files_still_use_drive_preview():
+    uri = "https://drive.google.com/file/d/abc/view?resourcekey=key"
+    assert citation_view_uri(uri, "공문.pdf") == (
+        "https://drive.google.com/file/d/abc/view?resourcekey=key"
+    )
