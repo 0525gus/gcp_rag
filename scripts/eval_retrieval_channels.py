@@ -274,7 +274,7 @@ def main() -> int:
     parser.add_argument("--snapshot-dir", type=Path, default=DEFAULT_SNAPSHOT)
     parser.add_argument("--split", choices=tuple(SPLIT_FILES), default="dev")
     parser.add_argument("--base-url", help="RAG MCP service root; /mcp suffix is accepted")
-    parser.add_argument("--dept", help="read MCP_API_KEY from config/departments/<dept>.yaml")
+    parser.add_argument("--dept", help="read MCP_API_KEY from the Cloud department registry")
     parser.add_argument("--audience", choices=("staff", "student"), default="staff")
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--candidate-k", type=int, default=30)

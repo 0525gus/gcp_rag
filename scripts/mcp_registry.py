@@ -115,8 +115,6 @@ class RegistryAdmin:
 
     def update_department(self, code: str, config: dict):
         _, current, configs = self.read()
-        if current is None:
-            raise RuntimeError("Unified MCP registry is not initialized")
         replacement = copy.deepcopy(config)
         if "mcpDisabledAudiences" not in replacement:
             replacement["mcpDisabledAudiences"] = copy.deepcopy(
@@ -125,7 +123,10 @@ class RegistryAdmin:
         if "syncDisabled" not in replacement and "syncDisabled" in configs.get(code, {}):
             replacement["syncDisabled"] = configs[code]["syncDisabled"]
         configs[code] = replacement
-        return self.write(configs, expected_revision=current["revision"])
+        return self.write(
+            configs,
+            expected_revision=current["revision"] if current is not None else None,
+        )
 
     def disable_audience(self, code: str, audience: str):
         if audience not in {"staff", "student"}:

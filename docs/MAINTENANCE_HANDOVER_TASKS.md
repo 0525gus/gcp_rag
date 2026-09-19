@@ -75,7 +75,7 @@
 문제:
 
 - 학과 YAML은 MCP 키를 평문으로 저장하고 Git에서만 제외한다.
-- `.gcloudignore`에는 `config/departments/*.yaml` 제외 규칙이 없다.
+- 학과 설정은 Cloud 등록부에만 있으므로 `.gcloudignore` 예외 규칙이 필요 없다.
 - Cloud Build가 저장소 루트 전체를 build context로 제출한다.
 
 작업:
@@ -100,7 +100,7 @@
 - `../.gitignore:38`
 - `../.gcloudignore:1`
 - `../cloudbuild.sync.yaml:9`
-- `../config/departments/README.md:5`
+- 학과 설정은 Secret Manager/Firestore 등록부가 원본이다.
 
 ### OPS-001 Workflow의 실패·무실행 정상 처리 제거
 
@@ -363,8 +363,7 @@
 
 근거:
 
-- `../config/departments/README.md:15`
-- `../config/departments/README.md:20`
+- 학과 키와 코퍼스 설정은 로컬 파일에 저장하지 않는다.
 - `../scripts/dept_gui.py:6`
 - `../scripts/dept_gui.py:5807`
 - `../gui/public/console/app.js:376`

@@ -29,7 +29,7 @@ ok=false, deleted=32, failed=1, listed=33
 
 ### Cloud Run 콜드 스타트 완화
 
-`config/departments/cs.yaml`의 최소 인스턴스를 다음처럼 설정했다. 이 파일은 실제 운영 설정이며 Git 및 Cloud Build 업로드 대상에서 제외된다.
+당시에는 로컬 학과 파일에서 최소 인스턴스를 설정했다. 현재는 Cloud 학과 등록부의 `minInstances`가 운영 원본이다.
 
 ```yaml
 minInstances:
@@ -64,7 +64,7 @@ minInstances:
 
 ### Cloud Build 비밀 파일 제외
 
-`.gcloudignore`에 `config/departments/*.yaml`을 추가했다. 운영 YAML에는 API 키와 corpus/Drive 식별자가 있으므로 빌드 소스에 포함하면 안 된다.
+당시 로컬 학과 파일을 Cloud Build에서 제외했다. 현재 API 키와 corpus/Drive 식별자는 Secret Manager의 Cloud 등록부에만 둔다.
 
 확인 결과:
 
@@ -214,9 +214,8 @@ MCP health 3회씩 모두 HTTP 200:
 - `workflows/daily_sync.yaml`
 - `docs/OPS_RECOVERY_2026-09-04.md`
 
-`config/departments/cs.yaml`은 실제 운영 설정이라 ignore 대상이며 Git 상태에 나타나지 않는다. 교직원·학생 `minInstances: 1` 변경을 덮어쓰지 않도록 주의한다.
+현재 실제 운영 설정은 Cloud 등록부다. 교직원·학생 `minInstances` 변경은 관리 GUI에서 확인한다.
 
 GUI의 다른 환경 복원과 GCP 실시간 설정 연동은 별도 문서
 [`GUI_CLOUD_CONFIG_SYNC.md`](GUI_CLOUD_CONFIG_SYNC.md)에 정리했다. 현재 GUI는
-로컬 YAML을 원본으로 사용하므로, 동일한 GCP 관리자 로그인만으로 설정이 자동
-복원되는 상태는 아니다.
+Cloud 등록부를 원본으로 사용하므로 동일한 GCP 관리자 로그인으로 설정을 복원한다.

@@ -15,15 +15,13 @@ from scripts import dept_config, dept_gui
 @pytest.fixture
 def unified(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
-    dept_dir = config_dir / "departments"
-    dept_dir.mkdir(parents=True)
+    config_dir.mkdir(parents=True)
     common = {"GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3",
               "MCP_UNIFIED_ENABLED": True, "GCS_HWP_ORIGINAL_BUCKET": "common-hwp",
               "GCS_SOURCE_BUCKET": "common-source", "GCS_METADATA_BUCKET": "shared-metadata"}
     (config_dir / "common.yaml").write_text(yaml.safe_dump(common), encoding="utf-8")
     for module in (dept_config, dept_gui):
         monkeypatch.setattr(module, "CONFIG_DIR", config_dir)
-        monkeypatch.setattr(module, "DEPT_DIR", dept_dir)
     departments = {code: {
         "name": f"Cloud {code}",
         "corpora": {aud: f"projects/project-test/locations/asia-northeast3/ragCorpora/{code}-{aud}"
@@ -53,7 +51,11 @@ def unified(tmp_path, monkeypatch):
         elif method == "remove_department":
             departments.pop(code)
 
-    monkeypatch.setattr(dept_gui, "_mcp_registry_read", lambda: (copy.deepcopy(record), copy.deepcopy(departments)))
+    monkeypatch.setattr(
+        dept_gui,
+        "_mcp_registry_read",
+        lambda **_kwargs: (copy.deepcopy(record), copy.deepcopy(departments)),
+    )
     monkeypatch.setattr(dept_gui, "_mcp_registry_mutate", mutate)
     monkeypatch.setattr(dept_gui, "_unified_mcp_service", lambda: service)
     monkeypatch.setattr(dept_gui, "threading", SimpleNamespace(
@@ -67,18 +69,14 @@ def unified(tmp_path, monkeypatch):
     dept_gui._MCP_DEPLOY_CONFIGS.clear()
     dept_gui._TEARDOWN_RUNS.clear()
     yield SimpleNamespace(configs=departments, record=record, service=service,
-                          mutations=mutations, dept_dir=dept_dir)
+                          mutations=mutations)
     dept_gui._LATEST.clear()
     dept_gui._MCP_DEPLOY_RUNS.clear()
     dept_gui._MCP_DEPLOY_CONFIGS.clear()
     dept_gui._TEARDOWN_RUNS.clear()
 
 
-def test_registry_inventory_public_config_and_keys_override_stale_local_yaml(unified):
-    stale = copy.deepcopy(unified.configs["cs"])
-    stale["name"] = "stale local"
-    stale["keys"]["student"] = "stale key"
-    (unified.dept_dir / "cs.yaml").write_text(yaml.safe_dump(stale), encoding="utf-8")
+def test_registry_inventory_public_config_and_keys(unified):
     records = dept_gui.cloud_mcp_department_records()
     assert {r["code"] for r in records} == {"cs", "ee"}
     assert all(r["cloudOnly"] and r["cloudEditable"] and r["unifiedMcp"] for r in records)
@@ -90,6 +88,29 @@ def test_registry_inventory_public_config_and_keys_override_stale_local_yaml(uni
     public = json.dumps(records)
     assert all(key not in public for cfg in unified.configs.values() for key in cfg["keys"].values())
     assert not dept_gui.department_code_availability("ee")["available"]
+
+
+def test_new_department_is_created_directly_in_cloud_registry(unified):
+    candidate = copy.deepcopy(unified.configs["cs"])
+    candidate.pop("keys")
+    candidate["name"] = "Cloud ai"
+    candidate["corpora"] = {
+        audience: value.replace("cs-", "ai-")
+        for audience, value in candidate["corpora"].items()
+    }
+    candidate["drive"] = {
+        "driveIds": ["drive-ai"],
+        "syncFolderIds": ["folder-ai"],
+        "studentFolderIds": ["student-ai"],
+    }
+    candidate["buckets"] = {"hwpOriginal": "ai-hwp", "source": "ai-source"}
+
+    created = dept_gui.create_department("ai", candidate)
+
+    assert set(created["keys"]) == {"staff", "student"}
+    assert all(len(value) >= 24 for value in created["keys"].values())
+    assert unified.configs["ai"] == created
+    assert [method for method, *_ in unified.mutations] == ["update_department"]
 
 
 def test_all_departments_and_audiences_share_uri_with_distinct_disabled_status(unified):
@@ -105,7 +126,6 @@ def test_all_departments_and_audiences_share_uri_with_distinct_disabled_status(u
 
 
 def test_cloud_registry_failure_does_not_fall_back_to_old_local_config(unified, monkeypatch):
-    (unified.dept_dir / "cs.yaml").write_text(yaml.safe_dump(unified.configs["cs"]), encoding="utf-8")
     def offline():
         raise RuntimeError("Registry offline")
     monkeypatch.setattr(dept_gui, "_mcp_registry_read", offline)
@@ -152,8 +172,6 @@ def test_partial_cleanup_preserves_registry_and_shared_resources(unified):
 
 
 def test_sync_stop_persists_and_stale_local_or_deployed_map_cannot_reactivate(unified, monkeypatch):
-    stale = copy.deepcopy(unified.configs["cs"])
-    (unified.dept_dir / "cs.yaml").write_text(yaml.safe_dump(stale), encoding="utf-8")
     expected_maps = []
     monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw: expected_maps.append(json.loads(kw["expected"])) or "ee")
     dept_gui._refresh_cloud_teardown_routing("cs")
@@ -240,14 +258,15 @@ def test_deployment_registers_cloud_routes_without_building_or_deploying_departm
     config = copy.deepcopy(unified.configs["cs"])
     if new_department:
         unified.configs.pop("cs")
-        (unified.dept_dir / "cs.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     elif disabled:
         unified.configs["cs"]["mcpDisabledAudiences"] = ["staff", "student"]
         unified.configs["cs"]["syncDisabled"] = True
     health_calls, maps = [], []
     monkeypatch.setattr(dept_gui, "_http_json", lambda url, **kw: health_calls.append(url) or (200, {"status": "ok"}, 1))
     monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw: maps.append(json.loads(dept_gui.cloud_departments_json())) or "ee")
-    run = dept_gui.start_mcp_deployment("cs")
+    run = dept_gui.start_mcp_deployment(
+        "cs", cloud_config=config if new_department else None
+    )
     assert run["serviceNames"] == ["rag-mcp"] and run["unifiedMcp"]
     dept_gui._execute_mcp_deployment(run["runId"])
     result = dept_gui._MCP_DEPLOY_RUNS[run["runId"]]

@@ -4,13 +4,11 @@
 # 못 붙는다. 공개 URL 은 여기서만 나온다(ALLOW_UNAUTH, 기본 true).
 #
 # 사용:
-#   .\scripts\deploy_mcp.ps1 -Dept cs                 # 그 학과에 설정된 범위 전부
-#   .\scripts\deploy_mcp.ps1 -Dept cs -Audience student  # 하나만
-#   .\scripts\deploy_mcp.ps1 -All                     # 전 학과 x 교직원/학생
+#   .\scripts\deploy_mcp.ps1
+#   .\scripts\deploy_mcp.ps1 -SkipBuild
+# -Dept/-Audience/-All/-ShowKeys는 이전 호출자와의 호환을 위해서만 남아 있다.
 #
-# 설정 원본은 config/common.yaml + config/departments/<학과>.yaml 이다.
-# 학과 yaml 은 코퍼스·키를 함께 담으므로 **커밋되지 않는다**(.gitignore).
-# 커밋되는 것은 dept.yaml.example 템플릿뿐이다.
+# 공통 배포값은 config/common.yaml, 학과 코퍼스·키·경로는 Cloud 등록부가 원본이다.
 #
 # 이미지는 학과와 무관하게 동일하다 — Dockerfile 에 학과별 값이 하나도 안 들어가고
 # 코퍼스·키는 전부 런타임 env 다. 그래서 **빌드는 한 번만** 하고 그 digest 를 전
@@ -38,7 +36,7 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot "_load_env.ps1")
 
 # Cloud registry mode owns the department keys/configs. Rebuilding a runtime must
-# never recreate the old per-department services or reload stale local YAML.
+# never recreate the retired per-department services.
 $py = Get-PythonExe
 $unifiedMode = & $py -c "from scripts.dept_gui import _unified_mcp_enabled; print('1' if _unified_mcp_enabled() else '0')"
 if ($LASTEXITCODE -ne 0) { throw "MCP routing mode lookup failed" }
@@ -81,7 +79,7 @@ function Get-DeployTargets {
       $found += [pscustomobject]@{ Dept = $Dept; Audience = $a }
     }
   } else {
-    throw "-Dept <학과> 또는 -All 이 필요하다 (설정 원본은 config/departments/)"
+    throw "-Dept <학과> 또는 -All 이 필요하다 (대상은 Cloud 학과 등록부에서 조회)"
   }
   return $found
 }
@@ -170,7 +168,7 @@ foreach ($t in $targets) {
   $authArgs = @("--allow-unauthenticated")
   if ($ALLOW_UNAUTH -ne "true") { $authArgs = @("--no-allow-unauthenticated") }
 
-  # 다른 운영 PC가 로컬 YAML 없이도 Cloud Run에서 학과 설정을 복원한다.
+  # 관리 메타데이터는 이전 Cloud Run 배포와의 복구 호환성을 위해 유지한다.
   # annotation 값은 학과 YAML 전체를 담은 JSON의 base64url이고 쉼표가 없어
   # gcloud 인자에 안전하다. keys도 포함되므로 Cloud Run 조회 권한을 제한해야 한다.
   if ([string]::IsNullOrWhiteSpace($env:DEPT_CODE) -or
@@ -199,7 +197,7 @@ foreach ($t in $targets) {
 
   $results += [pscustomobject]@{
     # 학과 코드만 찍으면 20개 표에서 어느 학과인지 못 알아본다.
-    # DEPT_NAME 은 학과 yaml 의 name — 표시 전용이고 Cloud Run 엔 안 넘어간다.
+    # DEPT_NAME 은 Cloud 등록부의 표시 이름이며 Cloud Run 환경에는 넣지 않는다.
     Dept    = if ($env:DEPT_NAME) { $env:DEPT_NAME } else { $env:DEPT_CODE }
     Service = $SERVICE
     Url     = "$MCP_URL/mcp"

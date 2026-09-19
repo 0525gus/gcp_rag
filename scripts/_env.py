@@ -1,6 +1,6 @@
 """로컬 스크립트 공용 유틸.
 
-설정 로딩은 여기 없다 — `scripts/dept_config.load_config_env()` 가 config/ 를
+설정 로딩은 여기 없다 — `scripts/dept_config.load_config_env()` 가 Cloud 등록부를
 읽는다. 예전에는 이 파일이 `.env` 로더를 들고 있었고, 그래서 로컬 도구와
 배포가 서로 다른 원본을 봤다: 평가와 운영이 다른 파라미터로 측정됐다
 (docs/ENV_MIGRATION.md).

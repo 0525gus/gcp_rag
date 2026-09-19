@@ -1,4 +1,4 @@
-"""학과 배포 설정(config/*.yaml) 해석. GCP 호출 없음.
+"""Cloud 학과 등록 설정을 런타임 환경변수로 변환한다.
 
 여기서 지키는 것은 두 가지다.
   1. yaml 이 내는 환경변수가 서비스가 읽는 이름·형식과 맞는가
@@ -26,12 +26,8 @@ if str(ROOT) not in sys.path:
 from scripts import dept_config
 from scripts.dept_config import _fmt, build_env, list_departments
 
-# 학과 yaml 은 **커밋되지 않는다**(키가 들어간다). 그래서 새 클론과 CI 에는
-# 원래 없다 — 실파일이 있어야만 도는 검사는 건너뛴다. 있으면 엄격히 본다.
-requires_dept_files = pytest.mark.skipif(
-    not list_departments(),
-    reason="config/departments/*.yaml 없음 (gitignore 대상)",
-)
+# 실제 Cloud 등록부를 조회하는 운영 통합 검사는 단위 테스트에서 건너뛴다.
+requires_dept_files = pytest.mark.skip(reason="requires live Cloud department registry")
 
 
 def _any_dept() -> str:
@@ -106,14 +102,9 @@ def _write_dept(tmp_path: Path, monkeypatch, body: dict) -> None:
         default_keys["student"] = "T" * 30
         body.setdefault("drive", {}).setdefault("studentFolderIds", ["F_STUDENT"])
     body.setdefault("keys", default_keys)
-    dept_dir = tmp_path / "departments"
-    dept_dir.mkdir()
-    (dept_dir / "x.yaml").write_text(
-        yaml.safe_dump(body, allow_unicode=True), encoding="utf-8"
-    )
     (tmp_path / "common.yaml").write_text("GCP_PROJECT_ID: p\n", encoding="utf-8")
     monkeypatch.setattr(dept_config, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(dept_config, "DEPT_DIR", dept_dir)
+    monkeypatch.setattr(dept_config, "registry_configs", lambda: {"x": body})
 
 
 def test_identical_corpora_rejected(tmp_path, monkeypatch):
@@ -146,6 +137,7 @@ def test_every_department_builds():
             assert env["MCP_SERVICE_NAME"] == f"rag-mcp-{code}-{audience}"
 
 
+@requires_dept_files
 def test_all_departments_use_distinct_corpora():
     """학과끼리 코퍼스를 공유하면 한 학과가 남의 자료를 검색해준다."""
     seen: dict[str, str] = {}
@@ -159,19 +151,14 @@ def test_all_departments_use_distinct_corpora():
 
 # --- 시크릿 유출 방지 -----------------------------------------------------
 
-def test_real_department_files_are_gitignored():
-    """학과 yaml 은 코퍼스 ID 와 MCP 키를 담는다. 커밋되면 회전해도 이력에 남는다.
-
-    .gitignore 규칙이 사라지면 다음 커밋에 키가 실려 나가므로 여기서 막는다.
-    """
+def test_local_department_ignore_rule_is_gone():
     rules = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-    assert "config/departments/*.yaml" in [r.strip() for r in rules]
+    assert not any("departments" in rule for rule in rules)
 
 
-def test_real_department_files_are_excluded_from_cloud_build():
-    """Git 제외만으로는 부족하다. gcloud submit도 비밀 YAML을 업로드하면 안 된다."""
+def test_local_department_cloud_build_rule_is_gone():
     rules = (ROOT / ".gcloudignore").read_text(encoding="utf-8").splitlines()
-    assert "config/departments/*.yaml" in [r.strip() for r in rules]
+    assert not any("departments" in rule for rule in rules)
 
 
 @requires_dept_files
@@ -207,20 +194,8 @@ def test_omitted_buckets_inherit_common(tmp_path, monkeypatch):
     assert build_env("x", "staff")["GCS_SOURCE_BUCKET"] == "shared-src"
 
 
-def test_template_carries_no_real_values():
-    """커밋되는 것은 템플릿뿐이고, 거기엔 실값이 없어야 한다."""
-    # 파일명에 묶지 않는다 — cs.yaml.example / dept.yaml.example 무엇이든 된다.
-    tpls = sorted((ROOT / "config" / "departments").glob("*.yaml.example"))
-    assert tpls, "템플릿이 없으면 새 학과를 만들 방법이 사라진다"
-    assert len(tpls) == 1, f"템플릿이 여러 개다: {[t.name for t in tpls]}"
-    data = yaml.safe_load(tpls[0].read_text(encoding="utf-8")) or {}
-    for audience in ("staff", "student"):
-        assert data["keys"][audience] in dept_config.PLACEHOLDER_KEYS
-        assert "CHANGE_ME" in data["corpora"][audience]
-    # 버킷도 플레이스홀더여야 한다 — 실이름이 템플릿에 남으면 새 학과가
-    # 남의 버킷을 그대로 물려받는다.
-    for key in ("hwpOriginal", "source"):
-        assert data["buckets"][key].isupper() or "DEPT" in data["buckets"][key]
+def test_local_department_directory_is_gone():
+    assert not list((ROOT / "config" / "departments").glob("*"))
 
 
 def test_placeholder_key_is_rejected(tmp_path, monkeypatch):
@@ -271,6 +246,7 @@ def test_weak_key_warns_on_stderr(tmp_path, monkeypatch, capsys):
     assert "약하다" not in captured.out
 
 
+@requires_dept_files
 def test_all_departments_use_distinct_keys():
     """학과끼리 키가 겹치면 한 키로 남의 코퍼스가 열린다."""
     seen: dict[str, str] = {}
@@ -293,16 +269,11 @@ from shared.config import Settings, _departments_from_json
 
 
 def _write_depts(tmp_path: Path, monkeypatch, depts: dict[str, dict]) -> None:
-    dept_dir = tmp_path / "departments"
-    dept_dir.mkdir()
     for i, (code, body) in enumerate(depts.items()):
         body.setdefault("keys", {"staff": f"S{i}" * 20, "student": f"T{i}" * 20})
-        (dept_dir / f"{code}.yaml").write_text(
-            yaml.safe_dump(body, allow_unicode=True), encoding="utf-8"
-        )
     (tmp_path / "common.yaml").write_text("GCP_PROJECT_ID: p\n", encoding="utf-8")
     monkeypatch.setattr(dept_config, "CONFIG_DIR", tmp_path)
-    monkeypatch.setattr(dept_config, "DEPT_DIR", dept_dir)
+    monkeypatch.setattr(dept_config, "registry_configs", lambda: depts)
 
 
 def _dept_body(code: str, **over) -> dict:

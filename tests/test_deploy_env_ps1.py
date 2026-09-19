@@ -378,7 +378,7 @@ def test_base_config_returns_a_real_department_code() -> None:
 
     PowerShell 의 `return` 은 배열을 풀어서 내보낸다. 학과가 하나면 결과가
     문자열이 되고, `$codes[0]` 은 "cs" 가 아니라 "c" 다 — 그대로 배포하면
-    `config/departments/c.yaml` 을 찾다 죽는다. @() 로 감싸는 것이 유일한 방어라
+    학과 코드 `c`를 조회하다 죽는다. @() 로 감싸는 것이 유일한 방어라
     누가 지우기 쉽다. `@(...)` 표기를 검사하지 않고 **실제 동작**으로 잡는다.
     """
     # 스텁은 dot-source **뒤에** 덮어써야 한다 (로더가 같은 이름을 정의한다).

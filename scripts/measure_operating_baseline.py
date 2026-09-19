@@ -329,7 +329,7 @@ def main() -> int:
     parser.add_argument("--snapshot-dir", type=Path, default=DEFAULT_SNAPSHOT)
     parser.add_argument("--target-set", choices=tuple(TARGET_SETS), default=DEFAULT_SET)
     parser.add_argument("--mcp-url", default=os.environ.get("MCP_URL", ""))
-    parser.add_argument("--dept", help="load the scoped MCP key from local department config")
+    parser.add_argument("--dept", help="load the scoped MCP key from the Cloud registry")
     parser.add_argument(
         "--registry-dept",
         help="read the scoped MCP key and URL from the Cloud registry using gcloud auth",

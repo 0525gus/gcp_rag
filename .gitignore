@@ -37,6 +37,3 @@ outputs/
 tmp/
 tests/_bench_out/
 staff_drive_file_names.txt
-
-# 학과 실설정 — 코퍼스 ID 와 MCP 키가 들어간다. 템플릿(*.yaml.example)만 추적한다
-config/departments/*.yaml

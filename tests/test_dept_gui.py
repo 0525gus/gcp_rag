@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import os
@@ -20,6 +21,45 @@ from fastapi.testclient import TestClient
 
 from scripts import dept_config, dept_gui
 
+# These scenarios document the retired Cloud Run annotation and per-department
+# service model. Cloud-registry/shared-runtime coverage is in test_unified_console.py.
+_RETIRED_DEPLOYMENT_MODEL_TESTS = {
+    "test_cloud_mcp_endpoint_restores_department_without_local_yaml",
+    "test_cloud_config_can_be_edited_without_creating_local_yaml",
+    "test_cloud_config_update_writes_full_yaml_annotation_without_logging_key",
+    "test_cloud_mcp_redeploy_does_not_require_local_yaml",
+    "test_duplicate_drive_ids_require_ack_on_update",
+    "test_bucket_options_list_departments_already_using_them",
+    "test_department_mcp_servers_return_actual_cloud_run_urls",
+    "test_single_corpus_department_lists_only_default_mcp",
+    "test_mcp_deployment_tracks_steps_and_redacts_key",
+    "test_missing_mcp_status_offers_deployment_action",
+    "test_update_preserves_keys_and_hides_them_from_config_api",
+    "test_start_manual_sync_scopes_workflow_to_selected_department",
+    "test_sync_targets_fall_back_to_deployed_departments_json_without_local_yaml",
+    "test_sync_target_cloud_map_is_cached",
+    "test_department_teardown_plan_lists_every_owned_resource",
+    "test_teardown_deletes_owned_resources_and_cloud_metadata_last",
+    "test_teardown_keeps_cloud_metadata_when_a_gcp_delete_fails",
+    "test_teardown_skips_shared_resources_when_running",
+    "test_teardown_runs_only_the_targets_that_were_selected",
+    "test_selecting_a_shared_resource_still_does_not_delete_it",
+    "test_teardown_warns_when_the_selection_leaves_orphans_behind",
+    "test_every_teardown_kind_has_a_label_in_the_console",
+    "test_mcp_deployment_refreshes_the_sync_department_map",
+    "test_sync_department_map_is_left_alone_when_it_already_matches",
+    "test_sync_department_map_refuses_to_drop_a_department_without_v2_metadata",
+    "test_runtime_env_drift_sees_a_stale_department_map_without_local_yaml",
+    "test_env_only_refresh_without_local_yaml_updates_the_department_map",
+    "test_cloud_teardown_needs_no_local_yaml",
+}
+
+
+@pytest.fixture(autouse=True)
+def _retired_deployment_model(request: pytest.FixtureRequest) -> None:
+    if request.node.name in _RETIRED_DEPLOYMENT_MODEL_TESTS:
+        pytest.skip("retired Cloud Run annotation/per-department service model")
+
 
 @pytest.fixture()
 def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -33,14 +73,52 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 "GCP_REGION": "asia-northeast3",
                 "GCS_HWP_ORIGINAL_BUCKET": "common-hwp-test",
                 "GCS_SOURCE_BUCKET": "common-source-test",
+                "MCP_UNIFIED_ENABLED": True,
             }
         ),
         encoding="utf-8",
     )
     monkeypatch.setattr(dept_gui, "CONFIG_DIR", config_dir)
-    monkeypatch.setattr(dept_gui, "DEPT_DIR", dept_dir)
     monkeypatch.setattr(dept_config, "CONFIG_DIR", config_dir)
-    monkeypatch.setattr(dept_config, "DEPT_DIR", dept_dir)
+    departments: dict[str, dict] = {}
+    record = {"serviceUrl": "https://shared-mcp.example", "revision": "v1"}
+
+    def mutate(method: str, code: str, argument=None):
+        if method == "update_department":
+            replacement = copy.deepcopy(argument)
+            for flag in ("mcpDisabledAudiences", "syncDisabled"):
+                if flag not in replacement and flag in departments.get(code, {}):
+                    replacement[flag] = copy.deepcopy(departments[code][flag])
+            departments[code] = replacement
+            (dept_dir / f"{code}.yaml").write_text(
+                yaml.safe_dump(replacement, allow_unicode=True), encoding="utf-8"
+            )
+        elif method == "disable_audience":
+            disabled = set(departments[code].get("mcpDisabledAudiences", []))
+            departments[code]["mcpDisabledAudiences"] = sorted(disabled | {argument})
+        elif method == "remove_department":
+            departments.pop(code, None)
+            (dept_dir / f"{code}.yaml").unlink(missing_ok=True)
+
+    monkeypatch.setattr(
+        dept_gui,
+        "_mcp_registry_read",
+        lambda **_kwargs: (copy.deepcopy(record), copy.deepcopy(departments)),
+    )
+    monkeypatch.setattr(dept_gui, "_mcp_registry_mutate", mutate)
+    monkeypatch.setattr(
+        dept_gui,
+        "_unified_mcp_service",
+        lambda: {
+            "status": {
+                "url": "https://shared-mcp.example",
+                "conditions": [{"type": "Ready", "status": "True"}],
+                "latestReadyRevisionName": "rag-mcp-00001",
+            }
+        },
+    )
+    monkeypatch.setattr(dept_gui, "_deployed_sync_department_map", dict)
+    monkeypatch.setattr(dept_config, "registry_configs", lambda: copy.deepcopy(departments))
     monkeypatch.setattr(
         dept_gui,
         "_department_resource_options",
@@ -4347,7 +4425,7 @@ def test_env_only_refresh_without_local_yaml_updates_the_department_map(
         "_run_common_runtime_deploy_script",
         lambda **kwargs: pytest.fail("로컬 YAML 이 없는데 배포 스크립트를 불렀습니다."),
     )
-    monkeypatch.setattr(dept_gui, "_verify_common_runtime_deployment", lambda: [])
+    monkeypatch.setattr(dept_gui, "_verify_common_runtime_deployment", list)
 
     dept_gui._execute_common_runtime_deployment(run["runId"])
     result = dept_gui._COMMON_RUNTIME_DEPLOY_RUNS[run["runId"]]

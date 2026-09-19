@@ -4,3 +4,6 @@ pytest>=8.3.0
 ruff>=0.7.0
 # workflows/daily_sync.yaml 파싱 테스트용 (전이 의존성에 기대지 않도록 명시)
 PyYAML>=6.0
+# Cloud 학과 등록부를 읽는 로컬 배포/관리 도구
+google-cloud-firestore>=2.19.0,<3
+google-auth>=2.35.0,<3

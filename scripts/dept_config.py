@@ -1,8 +1,8 @@
-"""학과 배포 설정(config/*.yaml) → 환경변수 줄.
+"""Cloud 학과 등록 설정 → 환경변수 줄.
 
-PowerShell 배포 스크립트가 부른다. PS 에는 YAML 파서가 없고 이 저장소는 이미
-PyYAML 을 의존(requirements.txt)하므로, 파싱은 파이썬이 하고 결과만 `KEY=VALUE`
-줄로 넘긴다.
+학과 설정의 유일한 원본은 Secret Manager의 ``rag-mcp-departments``와 이를
+가리키는 Firestore ``mcp_registry/current``다. 로컬에는 학과 파일을 만들지 않는다.
+PowerShell 배포 스크립트에는 서비스가 읽는 ``KEY=VALUE`` 줄만 넘긴다.
 
 키 이름은 **서비스가 읽는 환경변수명 그대로** 낸다. 중간 번역 계층을 두면
 "yaml 엔 있는데 서비스엔 안 들어갔다" 가 조용히 생긴다.
@@ -19,6 +19,8 @@ import argparse
 import base64
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,7 +33,6 @@ if str(ROOT) not in sys.path:
 from scripts._env import force_utf8_stdout
 
 CONFIG_DIR = ROOT / "config"
-DEPT_DIR = CONFIG_DIR / "departments"
 
 AUDIENCES = ("staff", "student")
 
@@ -73,12 +74,6 @@ def _fmt(value: object) -> str:
     return str(value)
 
 
-def list_departments() -> list[str]:
-    if not DEPT_DIR.is_dir():
-        return []
-    return sorted(p.stem for p in DEPT_DIR.glob("*.yaml"))
-
-
 def _load_yaml(path: Path) -> dict:
     if not path.is_file():
         raise SystemExit(f"없는 설정 파일: {path}")
@@ -86,6 +81,41 @@ def _load_yaml(path: Path) -> dict:
     if not isinstance(data, dict):
         raise SystemExit(f"최상위가 매핑이 아니다: {path}")
     return data
+
+
+def registry_configs() -> dict[str, dict]:
+    """현재 gcloud 계정으로 Cloud 학과 등록부를 읽는다."""
+    common = _load_yaml(CONFIG_DIR / "common.yaml")
+    project = str(common.get("GCP_PROJECT_ID") or "").strip()
+    region = str(common.get("GCP_REGION") or "asia-northeast3").strip()
+    database = str(common.get("FIRESTORE_DATABASE") or "rag-sync-state").strip()
+    if not project:
+        raise SystemExit("config/common.yaml에 GCP_PROJECT_ID가 없다")
+    gcloud = shutil.which("gcloud")
+    if not gcloud:
+        raise SystemExit("gcloud를 찾을 수 없다")
+    result = subprocess.run(
+        [gcloud, "auth", "print-access-token", "--quiet"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    token = result.stdout.strip()
+    if result.returncode != 0 or not token:
+        raise SystemExit("gcloud 로그인이 필요하다")
+    from scripts.mcp_registry import RegistryAdmin
+
+    _snap, record, configs = RegistryAdmin(project, region, database, token).read()
+    if not record:
+        raise SystemExit("Cloud 학과 등록부가 초기화되지 않았다")
+    return configs
+
+
+def list_departments() -> list[str]:
+    return sorted(registry_configs())
 
 
 def _id_list(value: object) -> list[str]:
@@ -139,17 +169,18 @@ def _deployment_metadata_b64(
 
 
 def build_env(dept: str, audience: str) -> dict[str, str]:
-    """로컬 학과 yaml → 환경변수."""
-    return build_env_from_config(dept, audience, _load_yaml(DEPT_DIR / f"{dept}.yaml"))
+    """Cloud 등록부의 학과 설정 → 환경변수."""
+    configs = registry_configs()
+    if dept not in configs:
+        raise SystemExit(f"Cloud 등록부에 없는 학과: {dept}")
+    return build_env_from_config(dept, audience, configs[dept])
 
 
 def build_env_from_config(dept: str, audience: str, dept_cfg: dict) -> dict[str, str]:
     """학과 설정 매핑 → 환경변수. **파일을 읽지 않는다.**
 
-    설정의 출처가 둘이기 때문에 나눠 뒀다: 로컬 `config/departments/*.yaml` 과
-    Cloud Run v2 주석(`_deployment_metadata_b64` 의 `yaml` 필드)이다. 후자는
-    로컬 YAML 을 두지 않는 운영 환경의 유일한 원본이다. 병합·거부 규칙이 여기
-    한 벌뿐이어야 두 출처가 서로 다른 설정을 배포하는 일이 없다.
+    Cloud 등록부에서 읽은 매핑을 환경변수 계약으로 변환한다. 파일 입출력 없이
+    이 함수만 검사에 사용할 수 있도록 설정 로딩과 변환을 분리했다.
     """
     if audience not in AUDIENCES:
         raise SystemExit(f"audience 는 {AUDIENCES} 중 하나여야 한다: {audience}")
@@ -219,7 +250,7 @@ def build_env_from_config(dept: str, audience: str, dept_cfg: dict) -> dict[str,
     min_instances = dept_cfg.get("minInstances") or {}
     env["MCP_MIN_INSTANCES"] = _fmt(min_instances.get(audience, 0))
 
-    # 3) MCP 키. 학과 yaml 이 커밋되지 않는 유일한 이유다.
+    # 3) MCP 키. Secret Manager의 학과 등록 설정에서만 읽는다.
     key = str(keys.get(audience) or "").strip()
     if not key:
         raise SystemExit(f"{dept}: keys.{audience} 가 비었다")
@@ -289,10 +320,7 @@ def departments_map_from_configs(
     규칙과 거부 조건(코퍼스 동일·버킷 반쪽 등)을 한 벌만 두기 위해서다. 여기서
     따로 설정을 해석하면 배포 env 와 sync 맵이 서로 다른 규칙으로 갈라진다.
 
-    설정을 **받아서** 쓰는 이유는 원본이 둘이기 때문이다: 로컬 YAML 과 Cloud
-    Run v2 주석. 이 함수가 파일을 직접 읽던 시절에는 YAML 없는 운영 환경에서
-    맵을 만들 방법이 아예 없어, MCP 는 배포됐는데 rag-sync 라우팅에는 그 학과가
-    영영 안 들어가는 구멍이 있었다(실측 — cs 가 그렇게 누락됐다).
+    설정을 **받아서** 쓰므로 Cloud 등록부 조회와 순수 변환·검증을 분리할 수 있다.
     """
     if not configs:
         raise SystemExit("학과 설정이 하나도 없다")
@@ -335,13 +363,8 @@ def departments_map_from_configs(
 
 
 def build_departments_map() -> dict[str, dict[str, object]]:
-    """로컬 YAML 전 학과 → sync 라우팅 맵."""
-    codes = list_departments()
-    if not codes:
-        raise SystemExit("config/departments 에 학과 yaml 이 없다")
-    return departments_map_from_configs(
-        {code: _load_yaml(DEPT_DIR / f"{code}.yaml") for code in codes}
-    )
+    """Cloud 등록부 전 학과 → sync 라우팅 맵."""
+    return departments_map_from_configs(registry_configs())
 
 
 def _departments_json(mapping: dict[str, dict[str, object]]) -> str:
@@ -356,7 +379,7 @@ def _departments_json(mapping: dict[str, dict[str, object]]) -> str:
 
 
 def departments_json() -> str:
-    """로컬 YAML 기준 DEPARTMENTS_JSON."""
+    """Cloud 등록부 기준 DEPARTMENTS_JSON."""
     return _departments_json(build_departments_map())
 
 
@@ -365,36 +388,40 @@ def departments_json_from_configs(configs: dict[str, dict]) -> str:
     return _departments_json(departments_map_from_configs(configs))
 
 
-# --- 로컬 스크립트용 로더 --------------------------------------------------
+# --- 로컬 운영 스크립트용 Cloud 설정 로더 ---------------------------------
 
 def load_config_env(dept: str | None = None, audience: str = "staff") -> str:
-    """config 값을 `os.environ` 에 채운다. 채운 학과 코드를 돌려준다.
+    """Cloud 등록값을 `os.environ` 에 채운다. 채운 학과 코드를 돌려준다.
 
     `.env` 로더가 있던 자리다(scripts/_env). setdefault 인 이유도
-    같다 — 명령줄·셸에서 준 값이 파일보다 우선해야 한다. 학과를 순회하는
+    같다 — 명령줄·셸에서 준 값이 Cloud 값보다 우선해야 한다. 학과를 순회하는
     배포 스크립트(PowerShell `Set-DeptConfig`)는 반대로 **매번 비우고** 채운다:
     거기서는 앞 학과 값이 남는 쪽이 사고이기 때문이다.
 
     DEPARTMENTS_JSON 도 함께 넣는다. 그래야 로컬 도구가 `Settings.for_drive()`
     로 학과를 고를 수 있고, 서비스와 같은 라우팅 코드를 쓰게 된다.
     """
-    codes = list_departments()
+    configs = registry_configs()
+    codes = sorted(configs)
     if not codes:
-        raise SystemExit("config/departments 에 학과 yaml 이 없다")
+        raise SystemExit("Cloud 등록부에 학과 설정이 없다")
     code = dept or codes[0]
     if code not in codes:
         raise SystemExit(f"없는 학과: {code} (있는 것: {', '.join(codes)})")
-    for key, val in build_env(code, audience).items():
+    for key, val in build_env_from_config(code, audience, configs[code]).items():
         os.environ.setdefault(key, val)
-    os.environ.setdefault("DEPARTMENTS_JSON", departments_json())
+    os.environ.setdefault("DEPARTMENTS_JSON", departments_json_from_configs(configs))
     return code
 
 
 def configured_audiences(dept: str) -> tuple[str, ...]:
     """설정 검증을 거쳐 실제 배포할 MCP 범위를 반환한다."""
-    env = build_env(dept, "staff")
+    configs = registry_configs()
+    if dept not in configs:
+        raise SystemExit(f"Cloud 등록부에 없는 학과: {dept}")
+    env = build_env_from_config(dept, "staff", configs[dept])
     if env.get("RAG_CORPUS_NAME_STUDENT") and env.get("STUDENT_FOLDER_IDS"):
-        build_env(dept, "student")
+        build_env_from_config(dept, "student", configs[dept])
         return AUDIENCES
     return ("staff",)
 

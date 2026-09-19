@@ -10,7 +10,7 @@ Vertex retrieveContexts 를 직접 부르면 거리 임계값·어휘 재정렬�
     python scripts/eval_golden.py tests/golden50.json --dept cs --audience student
     python scripts/eval_golden.py tests/golden50.json --top-k 10 --out result.json
 
-키는 `--dept` 로 config/departments/<학과>.yaml 에서 꺼낸다. 안 주면
+키는 `--dept` 로 Cloud 학과 등록부에서 꺼낸다. 안 주면
 `MCP_API_KEY` 환경변수를 본다.
 
 지표를 세 가지로 나눠 내는 이유:

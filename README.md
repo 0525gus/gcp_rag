@@ -11,7 +11,6 @@
 **통합 MCP 운영:** 공통 `rag-mcp` URI 하나에 기존 학과·교직원·학생 키를 연결한다.
 Cloud 레지스트리 설정, 범위 격리, 배포와 CPU 비교는
 [`docs/unified-mcp.md`](docs/unified-mcp.md)를 참고한다.
-아래 학과별 MCP 서비스 구성과 배포 항목은 기존 개별 서비스 방식에 대한 설명이다.
 
 ```mermaid
 flowchart TB
@@ -144,22 +143,11 @@ Drive 권한은 GCP IAM 과 **별개 체계**다. 프로젝트 소유자여도 �
 - 한국어 문서라 다국어 임베딩(`text-multilingual-embedding-002`)을 쓴다
 - 벡터 DB는 관리형(RAG Managed DB)과 Vertex Vector Search 중 선택. Vector Search 는 인덱스 엔드포인트가 **상시 과금**이고 코퍼스마다 인덱스가 따로 필요하다
 
-### 3. `config/` 채우기
+### 3. 설정 원본
 
-설정 원본은 `config/` **하나뿐이다** (`.env` 는 없앴다 — [docs/ENV_MIGRATION.md](docs/ENV_MIGRATION.md)).
-
-| 파일 | 커밋 | 담는 것 |
-|---|---|---|
-| `config/common.yaml` | O | 학과 무관 공통값 (프로젝트·리전·Firestore·튜닝) |
-| `config/departments/<학과>.yaml` | **X** (`.gitignore`) | 코퍼스 ID, **MCP 키**, 버킷, 폴더 ID |
-| `config/departments/dept.yaml.example` | O | 그 템플릿 |
-
-```powershell
-Copy-Item config\departments\dept.yaml.example config\departments\cs.yaml
-python -c "import secrets;print(secrets.token_urlsafe(32))"   # 키 2개 생성
-```
-
-**학과 yaml 필수** — 하나라도 비거나 `CHANGE_ME` 가 남으면 배포가 거부됩니다.
+`config/common.yaml`에는 프로젝트·리전·Firestore·런타임 튜닝 같은 공통 배포값만
+둔다. 학과 설정은 로컬 파일을 사용하지 않는다. 관리 GUI가 Secret Manager의
+`rag-mcp-departments`와 Firestore `mcp_registry/current`에 직접 생성·수정한다.
 
 | 키 | 값 |
 |---|---|
@@ -176,11 +164,9 @@ python -c "import secrets;print(secrets.token_urlsafe(32))"   # 키 2개 생성
 - `minInstances` 는 학과당 상주 인스턴스 수. `1` 은 24시간 과금이다
 - `QG_MODE`(common.yaml)는 `log` 유지. `fallback` 은 parser 이미지에 LibreOffice 가 없어 런타임에 실패한다
 
-**주의**
-
-- 학과 파일은 **git 으로 복구할 수 없다.** 백업은 각자 책임 — [config/departments/README.md](config/departments/README.md)
-- 배포는 `--set-env-vars` 로 Cloud Run env 를 **통째로 치환**한다. 설정을 고쳤으면 반드시 재배포해야 반영된다
-- 배포 스크립트는 학과를 순회하며 env 를 매번 비운다 — 셸에 값을 미리 넣어 두는 방식은 통하지 않는다
+MCP 키는 GUI가 생성하며 브라우저 응답이나 Cloud Run 환경변수에 싣지 않는다.
+검색 런타임은 Firestore의 키 해시 라우팅만 읽고, 관리 도구만 Secret Manager의
+원본 설정을 읽는다.
 
 ### 4. preflight
 
@@ -211,24 +197,23 @@ python -c "import secrets;print(secrets.token_urlsafe(32))"   # 키 2개 생성
 | | `deploy.ps1` | `deploy_mcp.ps1` |
 |---|---|---|
 | 빌드 | parser · sync · mcp (3개) | mcp (1개) |
-| Cloud Run | `rag-parser` `rag-sync` **MCP(교직원 + 학생)** | **MCP 1개** (타깃 지정) |
+| Cloud Run | `rag-parser` `rag-sync` `rag-mcp` | `rag-mcp` |
 | MCP 공개 여부 | `ALLOW_UNAUTH` (기본 공개) | 〃 (같은 스위치) |
 | Workflows · Scheduler · IAM | 만든다 | 안 건드린다 |
 
 - **`deploy.ps1` 한 번이면 FactChat 연결까지 끝난다** — MCP 가 공개(`ALLOW_UNAUTH=true`, 기본)로 올라간다
-- 로컬 관리 GUI에서도 학과 생성 직후 또는 상태 상세의 `미배포` 항목에서 학과 MCP만
-  배포할 수 있다. 기존 Artifact Registry 이미지를 우선 재사용하고 단계별 상태를 표시한다
-- 학생 분리(`RAG_CORPUS_NAME_STUDENT` + `STUDENT_FOLDER_IDS`)가 켜져 있으면 **학생 MCP 도 같이** 올린다. `MCP_API_KEY_STUDENT` 가 비면 배포 전에 거부된다
+- 로컬 관리 GUI에서도 공통 MCP를 재배포할 수 있다. 기존 Artifact Registry 이미지를
+  우선 재사용하고 단계별 상태를 표시한다
+- 학생 분리는 공통 `rag-mcp` 내부의 해시 라우팅으로 처리한다
 - `deploy_mcp.ps1` 은 **MCP 만 재배포**할 때 쓴다 (검색 파라미터·키 교체 등)
 - `ALLOW_UNAUTH=false` 로 두면 IAM 전용이 되고 FactChat 은 붙지 못한다
 - **공개 MCP 의 경계는 API 키뿐이다.** 키가 새면 그 코퍼스 전량이 열린다 — 교직원 키는 특히 주의
-- MCP 배포에는 관리 라벨과 **학과 YAML 전체**를 담은 메타데이터 주석도 기록한다. 다른
-  운영 PC에서 같은 프로젝트·리전으로 로그인하면 로컬 학과 YAML 없이도 새 필드를 포함한
-  전체 설정을 불러와 수정·재배포하고 Cloud Run Ready 상태를 확인할 수 있다. `keys`도 주석에 포함되므로
-  Cloud Run 서비스 조회 권한(`run.services.get`)은 설정을 열람해도 되는 관리자에게만 부여한다
+- 학과 설정과 API 키의 원본은 Secret Manager의 `rag-mcp-departments`, 활성 revision은
+  Firestore `mcp_registry/current`이다. 다른 운영 PC에서도 같은 프로젝트·리전으로 로그인하면
+  Cloud 등록부에서 설정을 불러와 수정·재배포할 수 있다.
 - 최초 공통 환경설정은 `rag-parser`·`rag-sync` 존재 여부도 확인한다. 이미 있으면
   유지하고, 없으면 학과가 없는 빈 라우팅 상태로 공용 서비스만 먼저 배포한다
-- 이후 학과 추가는 공용 `rag-sync`의 학과 맵을 갱신하고 학과별 MCP만 늘린다.
+- 이후 학과 추가는 공용 `rag-sync`의 학과 맵과 `rag-mcp` 라우팅을 갱신한다.
   `rag-parser`는 공통 코드나 실행 설정이 바뀔 때만 다시 배포한다
 
 ### 1) 전체
@@ -237,30 +222,24 @@ python -c "import secrets;print(secrets.token_urlsafe(32))"   # 키 2개 생성
 .\scripts\deploy.ps1
 ```
 
-- **`-Dept` 인자는 없다.** `config/departments` 의 학과 목록이 곧 배포 대상이다
-- 올라가는 것: `rag-parser` 1개 · `rag-sync` 1개 · MCP **2N개**(학과 x 교직원/학생) · Workflows · Scheduler
-- MCP 는 `deploy_mcp.ps1 -All` 에 위임한다 — 이미지는 한 번만 빌드하고 그 digest 를 전 학과에 쓴다
-- 끝나면 `PARSER_URL` `SYNC_URL` 과 학과별 MCP URL 표를 출력한다
-- MCP 서버는 기동 시점의 코퍼스 하나만 본다. 그래서 학과 x 대상 = 서비스 한 벌씩
+- **`-Dept` 인자는 없다.** Cloud 등록부의 학과 목록이 배포 대상이다
+- 올라가는 것: `rag-parser` 1개 · `rag-sync` 1개 · 공통 `rag-mcp` 1개 · Workflows · Scheduler
+- 끝나면 `PARSER_URL`, `SYNC_URL`, 공통 MCP URL을 출력한다
 - `-SkipMcp` 로 parser/sync 만, `-ShowKeys` 로 요약표에 키 노출
 
 ### 2) MCP 만 재배포 (필요할 때)
 
 검색 파라미터·키만 바꿨으면 이미지 하나만 다시 빌드한다.
 
-**학과별 배포 (권장)** — 설정은 `config/departments/<학과>.yaml` 에서 온다:
+학과 설정과 키는 Cloud 등록부에서 읽으며 MCP 런타임은 하나다:
 
 ```powershell
-.\scripts\deploy_mcp.ps1 -Dept cs                    # 교직원
-.\scripts\deploy_mcp.ps1 -Dept cs -Audience student  # 학생
-.\scripts\deploy_mcp.ps1 -All                        # 전 학과 x 양쪽
+.\scripts\deploy_mcp.ps1
+.\scripts\deploy_mcp.ps1 -SkipBuild
 ```
 
-- 코퍼스·키·버킷 모두 학과 yaml 이 원본이다. `-Dept` 또는 `-All` 이 **필수**
-- `-All` 은 이미지를 **한 번만** 빌드하고 같은 digest 를 전 학과에 배포한다.
-  학과마다 빌드하면 requirements 가 범위 지정이라 학과별로 다른 의존성이 잡힐 수 있다
-- 요약표의 키는 기본으로 가려진다. 필요하면 `-ShowKeys`
-- 자세한 것은 [config/departments/README.md](config/departments/README.md)
+- 코퍼스·키·버킷 모두 Cloud 등록부가 원본이다
+- 재배포 단위는 공통 `rag-mcp`이며 라우팅은 유지된다
 
 ### 3) FactChat 커넥터
 
@@ -355,16 +334,15 @@ gcloud workflows executions list --workflow=rag-daily-sync --location=$R --proje
 
 ## 학생 분리
 
-- 스위치: 학과 yaml 의 `corpora.student` + `drive.studentFolderIds` (`syncFolderIds` 의 부분집합)
+- 스위치: Cloud 학과 설정의 `corpora.student` + `drive.studentFolderIds` (`syncFolderIds` 의 부분집합)
 - 하나라도 비면 단일 코퍼스로 동작한다
 - 포함 관계: 교직원 코퍼스 ⊇ 학생 코퍼스
 
-**신규 배포**라면 학과 yaml 에 `corpora.student` 와 `drive.studentFolderIds` 를 넣고
-위 배포 순서를 그대로 따르면 된다.
+**신규 배포**라면 관리 GUI에서 학생 코퍼스와 학생 폴더를 설정하고 위 배포 순서를 따른다.
 
 **이미 색인이 돌아간 뒤**에 켜는 경우는 순서를 지켜야 한다.
 
-1. 학과 yaml 에 두 값 넣고 `rag-sync` 재배포 (`.\scripts\deploy.ps1`)
+1. 관리 GUI에서 두 값을 설정하고 `rag-sync` 라우팅 갱신
 2. 기존 INDEXED 문서의 `audience` 일괄 기록
    - `audience` 는 ingest 시점에만 기록된다
    - 이미 INDEXED 인 문서는 ingest 초입에서 UNCHANGED 로 빠져 그 코드에 도달하지 못한다

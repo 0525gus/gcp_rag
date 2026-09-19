@@ -177,7 +177,7 @@ def main() -> int:
     ap.add_argument("--dept", help="이 학과만 (기본: 전 학과)")
     args = ap.parse_args()
 
-    # parse_args 뒤에 부른다 — 앞에 두면 `--help` 조차 학과 yaml 을 요구한다.
+    # parse_args 뒤에 부른다 — 앞에 두면 `--help`도 Cloud 인증을 요구한다.
     load_config_env()
 
     settings = get_settings()

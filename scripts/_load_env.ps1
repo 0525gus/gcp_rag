@@ -2,7 +2,7 @@
 # deploy.ps1 / deploy_mcp.ps1 / preflight.ps1 / share_drive.ps1 / backfill.ps1 /
 # setup_alerts.ps1 이 dot-source 한다.
 #
-# 설정 원본은 config/common.yaml + config/departments/<학과>.yaml **하나뿐이다**
+# 공통값은 config/common.yaml, 학과값은 Cloud 등록부가 유일한 원본이다.
 # (.env 는 없앴다 — docs/ENV_MIGRATION.md). PS 에는 YAML 파서가 없으므로 파싱은
 # scripts/dept_config.py 가 하고, 여기서는 그 KEY=VALUE 출력을 프로세스 환경변수로
 # 옮기기만 한다. 그래서 preflight 처럼 $env: 를 읽는 코드는 손대지 않아도 된다.
@@ -25,7 +25,7 @@ function Get-PythonExe {
   return "python"
 }
 
-# 학과 yaml + common.yaml 이 채우는 키.
+# Cloud 학과 등록부 + common.yaml 이 채우는 키.
 # **반복 배포에서 앞 학과 값이 남지 않게 매번 비운다** — 안 비우면 -All 로 여러
 # 학과를 돌 때 앞 학과 코퍼스·키가 남아 조용히 섞인다. 이 목록에서 빠진 키는
 # 학과 사이로 새어 나가므로, dept_config.py 가 내보내는 이름을 전부 적을 것.
@@ -69,7 +69,7 @@ function Invoke-DeptConfig {
   return $out
 }
 
-# 학과 yaml -> 환경변수. 코퍼스도 키도 여기서만 온다.
+# Cloud 학과 등록부 -> 환경변수. 코퍼스와 키는 여기서만 온다.
 function Set-DeptConfig {
   param([string]$DeptCode, [string]$AudienceName)
 
@@ -90,7 +90,7 @@ function Set-DeptConfig {
 
 function Get-DepartmentCodes {
   $codes = @(Invoke-DeptConfig --list | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-  if (-not $codes) { throw "config/departments 에 학과 yaml 이 없다" }
+  if (-not $codes) { throw "Cloud 등록부에 학과 설정이 없다" }
   return $codes
 }
 
@@ -183,7 +183,7 @@ function Test-PlaceholderValue {
   param([string]$Value)
   if ([string]::IsNullOrWhiteSpace($Value)) { return $true }
   if ($Value.Contains("{")) { return $true }
-  # dept.yaml.example 을 복사만 하고 안 채운 경우. dept_config.py 도 같은 것을
+  # Cloud 등록부에 예시 문자열을 그대로 저장한 경우. dept_config.py도 같은 값을
   # 막지만(PLACEHOLDER_KEYS), 셸에서 직접 넣은 값은 그쪽을 거치지 않는다.
   $examples = @(
     "your-project-id",
@@ -227,7 +227,7 @@ function Require-FullDeployEnv {
   Add-RequiredEnv $errs RAG_CORPUS_NAME "Vertex RAG corpus path"
   Add-RequiredEnv $errs DRIVE_IDS "shared drive id"
   Add-RequiredEnv $errs SYNC_FOLDER_IDS "folder id from Drive URL folders/"
-  Add-RequiredEnv $errs MCP_API_KEY "config/departments/<dept>.yaml keys.staff"
+  Add-RequiredEnv $errs MCP_API_KEY "Cloud 학과 등록부 keys.staff"
 
   $studentCorpus = $env:RAG_CORPUS_NAME_STUDENT
   $studentFolders = $env:STUDENT_FOLDER_IDS
@@ -256,7 +256,7 @@ function Require-McpDeployEnv {
   $errs = [System.Collections.Generic.List[string]]::new()
   Add-RequiredEnv $errs GCP_PROJECT_ID
   Add-RequiredEnv $errs RAG_CORPUS_NAME "Vertex RAG corpus path"
-  Add-RequiredEnv $errs MCP_API_KEY "config/departments/<dept>.yaml keys.<audience>"
+  Add-RequiredEnv $errs MCP_API_KEY "Cloud 학과 등록부 keys.<audience>"
 
   $service = Get-McpDeployServiceName
   if (Test-McpStudentTarget $service) {

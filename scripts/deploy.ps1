@@ -5,11 +5,11 @@
 #       .\scripts\deploy.ps1 -ReuseExisting  이미 있는 이미지·서비스는 건너뜀
 #       .\scripts\deploy.ps1 -EnvOnly       parser/sync env 만 현재 설정으로 갱신
 #
-# 올리는 것: rag-parser 1개, rag-sync 1개, 전 학과 MCP 2N개(deploy_mcp.ps1 위임),
+# 올리는 것: rag-parser 1개, rag-sync 1개, 공통 rag-mcp 1개(deploy_mcp.ps1 위임),
 #            Workflows 1벌, Scheduler 1벌, 그 SA·IAM.
 #
-# **-Dept 인자는 없다.** config/departments 의 학과 목록이 곧 배포 대상이다.
-# 설정 원본도 config/ 하나뿐이다 (.env 는 없앴다 — docs/ENV_MIGRATION.md).
+# **-Dept 인자는 없다.** Cloud 학과 등록부의 목록이 곧 배포 대상이다.
+# 공통 배포값은 config/common.yaml, 학과 설정은 Cloud 등록부가 원본이다.
 #
 # --set-env-vars 는 Cloud Run env 를 통째로 치환한다. 안 넘긴 값은 사라진다.
 # DRIVE_IDS / SYNC_FOLDER_IDS 에 콤마가 있어 구분자는 | (^|^...).
@@ -19,7 +19,7 @@
 # ---- 3. Artifact Registry 확인/생성 ----
 # ---- 4. 이미지 빌드 · 푸시 (parser → sync → mcp, -ReuseExisting 면 없을 때만) ----
 # ---- 5. Cloud Run 배포 (rag-parser → rag-sync, -ReuseExisting 면 없을 때만) ----
-# ---- 6. MCP 전 학과 배포 (deploy_mcp.ps1 -All -SkipBuild) ----
+# ---- 6. 공통 MCP 배포 (deploy_mcp.ps1 -All -SkipBuild; -All은 이전 호출 호환) ----
 # ---- 7. 서비스 URL 조회 ----
 # ---- 8. Workflow 배포 (rag-daily-sync) ----
 # ---- 9. Scheduler SA · App Engine 준비 ----
@@ -245,7 +245,7 @@ function Test-SkipService {
 # parser timeout 540 < sync httpx 600. 서버가 먼저 포기해야 sync 가 오류를 받는다.
 # concurrency 4: 요청당 메모리 한계. 넘치는 요청은 새 인스턴스로.
 # min-instances=0 은 기본값과 같지만 명시한다 — 콜드스타트를 감수하겠다는 의도
-# 표시(docs/DEV_SPEC.md 운영 체크리스트). MCP 응답 지연이 문제되면 학과 yaml 의
+# 표시(docs/DEV_SPEC.md 운영 체크리스트). MCP 응답 지연이 문제되면 Cloud 등록부의
 # minInstances 를 1로, sync/parser 는 배치라 0 유지.
 if (-not (Test-SkipService -Name "rag-parser")) {
   gcloud run deploy rag-parser `
@@ -276,12 +276,11 @@ if (-not (Test-SkipService -Name "rag-sync")) {
   Assert-LastExit
 }
 
-# ---- 6. MCP 전 학과 배포 ----
-# 여기서 루프를 복사하지 않고 deploy_mcp.ps1 에 위임한다. 키 중복 사전 검사,
-# digest 고정, 요약표가 거기 한 벌만 있어야 두 경로가 갈라지지 않는다.
+# ---- 6. 공통 MCP 배포 ----
+# deploy_mcp.ps1에 위임하며, Cloud 등록부의 라우팅은 별도로 유지한다.
 if (-not $SkipMcp) {
   Write-Host ""
-  Write-Host "== MCP 전 학과 배포 (deploy_mcp.ps1 -All) =="
+  Write-Host "== 공통 MCP 배포 (deploy_mcp.ps1) =="
   # **해시테이블 splat 이어야 한다.** 배열 splat 은 요소를 이름이 아니라
   # 위치 인자로 넘긴다 — @("-All","-SkipBuild") 는 $Dept="-All",
   # $Audience="-SkipBuild" 로 박혀 ValidateSet 에서 죽었다(실측, 실배포 중단).
@@ -292,8 +291,7 @@ if (-not $SkipMcp) {
   # deploy_mcp.ps1 은 gcloud 마다 Assert-LastExit 를 건다). $LASTEXITCODE 는
   # 자식이 마지막에 부른 gcloud 것이라 여기서 성패 판정에 쓸 수 없다.
   & (Join-Path $PSScriptRoot "deploy_mcp.ps1") @mcpArgs
-  # 자식 스크립트가 학과 env 를 마지막 학과 값으로 남긴다. 아래 Scheduler·코퍼스
-  # 확인이 그걸 물려받지 않도록 기준 학과로 되돌린다.
+  # 아래 Scheduler·코퍼스 확인에 필요한 기준 학과 환경을 다시 채운다.
   Set-BaseDeployConfig | Out-Null
 }
 
@@ -358,7 +356,7 @@ Write-Host "PARSER_URL=$PARSER_URL"
 Write-Host "SYNC_URL=$SYNC_URL"
 Write-Host ""
 if ($SkipMcp) {
-  Write-Host "MCP 는 건너뛰었다 (-SkipMcp). 올리려면: .\scripts\deploy_mcp.ps1 -All"
+  Write-Host "MCP 는 건너뛰었다 (-SkipMcp). 올리려면: .\scripts\deploy_mcp.ps1"
 } elseif ($ALLOW_UNAUTH -eq "true") {
   Write-Host "MCP 는 공개(--allow-unauthenticated). 경계는 API 키뿐이다."
   Write-Host "FactChat 커넥터: {URL}/mcp / Streamable HTTP / Authorization: Bearer {키}"

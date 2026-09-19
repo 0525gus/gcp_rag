@@ -387,8 +387,9 @@ MCP는 FactChat 연결을 위해 기본적으로 공개 Cloud Run URL을 사용�
 | `SEARCH_FETCH_MAX` | 60 | 후보 청크 상한 |
 | `ALLOW_UNAUTH` | true | MCP Cloud Run 공개 여부 |
 
-학과별 YAML은 Drive ID와 동기화/학생 폴더, 두 GCS 버킷, 교직원·학생 코퍼스,
-MCP API 키를 정의한다. 학생 코퍼스와 학생 폴더가 없으면 학생 분리는 꺼진다.
+Cloud 학과 등록부는 Drive ID와 동기화/학생 폴더, 두 GCS 버킷, 교직원·학생 코퍼스,
+MCP API 키를 정의한다. 설정 본문은 Secret Manager `rag-mcp-departments`, 활성 revision은
+Firestore `mcp_registry/current`에 저장된다. 학생 코퍼스와 학생 폴더가 없으면 학생 분리는 꺼진다.
 
 배포 진입점:
 
@@ -433,17 +434,16 @@ import 시간을 분리해서 본다.
 |---|---|
 | `rag-sync`, `rag-parser` | Cloud Run IAM |
 | Cloud Tasks → `rag-sync` | 서비스 계정 OIDC + Run Invoker |
-| 교직원 MCP | 공개 URL + 교직원 API 키 |
-| 학생 MCP | 공개 URL + 별도 학생 API 키 |
+| 공통 `rag-mcp` | 공개 URL + 교직원·학생별 API 키 해시 라우팅 |
 | Drive | GCP IAM과 별개인 공유 Drive 멤버 권한 |
 
 운영 전 개선이 필요한 항목:
 
-- MCP 키를 학과 YAML·환경변수 평문에서 Secret Manager로 이동
+- MCP 키는 Secret Manager에 저장하고 키 원문이 런타임 환경변수에 들어가지 않는지 지속 검증
 - 기본 Compute 서비스 계정 대신 서비스별 전용 계정과 최소 권한 적용
 - Firestore PITR/삭제 보호와 학과별 GCS versioning 정책 검토
 - Cloud Monitoring 알림과 예산 정책의 실제 적용 확인
-- MCP 콜드 스타트가 문제이면 학과별 `minInstances`를 1 이상으로 조정
+- MCP 콜드 스타트가 문제이면 공통 `rag-mcp`의 최소 인스턴스를 조정
 - `doc_split_queue` 소비자 구현 또는 운영자 처리 절차 마련
 - Vertex SDK의 deprecation 추적과 후속 API 마이그레이션 계획 수립
 

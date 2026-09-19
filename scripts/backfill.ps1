@@ -67,7 +67,7 @@ foreach ($p in $DEPT_MAP.PSObject.Properties) {
 $known = @($owners | ForEach-Object { $_.Value.driveIds } )
 $unknown = @($ids | Where-Object { $known -notcontains $_ })
 if ($unknown.Count -gt 0) {
-  throw "학과 맵에 없는 드라이브: $($unknown -join ', ') — config/departments 를 볼 것"
+  throw "학과 맵에 없는 드라이브: $($unknown -join ', ') — Cloud 학과 등록부를 확인할 것"
 }
 
 foreach ($p in $owners) {

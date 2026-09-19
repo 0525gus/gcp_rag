@@ -42,7 +42,7 @@ def _mcp_service_names() -> list[str]:
     """전 학과 MCP 서비스 이름. 이름은 규칙으로 만든다(저장하지 않는다).
 
     학과가 늘면 로그 대상도 같이 는다 — 목록을 손으로 적어 두면 새 학과 로그가
-    조용히 빠진다. config/departments 가 곧 목록이다.
+    조용히 빠진다. Cloud 학과 등록부가 곧 목록이다.
     """
     return [
         f"rag-mcp-{code}-{audience}"
@@ -188,7 +188,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # parse_args 뒤에 부른다 — 앞에 두면 `--help` 조차 학과 yaml 을 요구한다.
+    # parse_args 뒤에 부른다 — 앞에 두면 `--help`도 Cloud 인증을 요구한다.
     load_config_env()
 
     project = _project()
