@@ -47,7 +47,7 @@ button, select { cursor: pointer; }
 .hidden { display: none !important; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
 
-.setup-gate { position: fixed; inset: 0; z-index: 200; padding: 36px 18px; overflow: auto; display: grid; place-items: center; }
+.setup-gate { position: fixed; inset: 0; z-index: 200; padding: 36px 18px; overflow: auto; display: grid; place-items: safe center; }
 .setup-backdrop { position: fixed; inset: 0; background: radial-gradient(circle at 72% 4%, rgba(75, 111, 235, 0.3), transparent 32rem), linear-gradient(145deg, #0d1b31, #132947 58%, #0d1c32); }
 .setup-backdrop::after { content: ""; position: absolute; inset: 0; opacity: 0.2; background-image: linear-gradient(rgba(255,255,255,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.06) 1px, transparent 1px); background-size: 34px 34px; mask-image: linear-gradient(to bottom, black, transparent 78%); }
 .setup-card { position: relative; width: min(780px, 100%); padding: 30px 34px 32px; border: 1px solid rgba(255,255,255,.7); border-radius: 24px; background: rgba(255,255,255,.97); box-shadow: 0 32px 100px rgba(2, 14, 34, .42); }
@@ -574,6 +574,15 @@ button, select { cursor: pointer; }
 .detail-drawer.open .drawer-panel { transform: none; }
 .drawer-panel > header { padding: 25px 26px 18px; display: flex; justify-content: space-between; background: white; border-bottom: 1px solid var(--line); }
 .drawer-header-actions { display: flex; align-items: flex-start; gap: 6px; }
+.department-management-options.form-grid { padding: 16px; margin: 0; border-top: 1px solid var(--line); }
+.drawer-option-status { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.drawer-option-status[data-error="true"] { color: var(--fail); }
+.docai-setup { margin: 18px 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; }
+.docai-setup h2 { font-size: 15px; }
+.docai-setup h2 small, .docai-setup p { color: var(--muted); font-size: 12px; line-height: 1.7; }
+.docai-setup-card { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.docai-setup-card h3 { font-size: 13px; margin-bottom: 10px; }
+.docai-setup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
 .department-management { margin-top: 28px; border: 1px solid #e4dadd; border-radius: 10px; background: #fff; }
 .department-management summary { padding: 14px 16px; color: #52627a; font-size: 11px; font-weight: 700; cursor: pointer; }
 .department-management summary span { margin-left: 10px; color: #8b7a7d; font-size: 10px; font-weight: 400; }

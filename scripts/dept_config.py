@@ -331,6 +331,14 @@ def departments_map_from_configs(
         # staff 로 한 번만 부른다 — 학생 코퍼스까지 같이 나온다.
         env = build_env_from_config(code, "staff", configs[code])
         entry: dict[str, object] = {}
+        enabled = configs[code].get("enableDocaiFallback", False)
+        if not isinstance(enabled, bool):
+            raise SystemExit(f"{code}: enableDocaiFallback 은 boolean 이어야 한다")
+        entry["enableDocaiFallback"] = enabled
+        image_ocr = configs[code].get("enableImageOcr", False)
+        if not isinstance(image_ocr, bool):
+            raise SystemExit(f"{code}: enableImageOcr 은 boolean 이어야 한다")
+        entry["enableImageOcr"] = image_ocr
         for field, env_key, is_list in _MAP_FIELDS:
             raw = env.get(env_key, "")
             if not raw:

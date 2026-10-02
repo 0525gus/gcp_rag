@@ -29,6 +29,7 @@ class RouteKind(str, Enum):
     """워크플로우 라우팅 키."""
 
     HWP_PARSE = "HWP_PARSE"  # 파서 → 정규화 md → GCS
+    IMAGE_OCR = "IMAGE_OCR"  # 명시적으로 켠 학과의 PNG/JPEG → OCR → MD
     GOOGLE_EXPORT = "GOOGLE_EXPORT"  # Drive export → GCS
     # 파서 서비스를 안 거치고 Drive→GCS 로 직행. 이름과 달리 단순 복사만은
     # 아니다(PDF 분할·XLSX 표 변환 포함) — 처리는 _ingest_direct 참고.
@@ -136,12 +137,22 @@ def is_hwpx(mime_type: str, name: str = "") -> bool:
     return name.lower().endswith(".hwpx")
 
 
-def classify_route(mime_type: str, name: str = "", *, removed: bool = False) -> RouteKind:
+IMAGE_OCR_MIME = {"image/png": ".png", "image/jpeg": ".jpg"}
+# 초기 운영 범위는 단일 이미지 10MB, 40MP 이하. 청킹 크기와 무관하다.
+IMAGE_OCR_MAX_BYTES = 10 * _MB
+IMAGE_OCR_MAX_PIXELS = 40_000_000
+
+
+def classify_route(
+    mime_type: str, name: str = "", *, removed: bool = False, enable_image_ocr: bool = False
+) -> RouteKind:
     if removed:
         return RouteKind.DELETE
     if is_hwp_family(mime_type, name):
         return RouteKind.HWP_PARSE
     mt = (mime_type or "").lower()
+    if mt in IMAGE_OCR_MIME:
+        return RouteKind.IMAGE_OCR if enable_image_ocr else RouteKind.SKIP
     if mt in GOOGLE_NATIVE_MIME:
         return RouteKind.GOOGLE_EXPORT
     if mt in FILE_COPY_MIME:

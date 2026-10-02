@@ -15,6 +15,27 @@ def _named_step(steps: list[dict[str, Any]], name: str) -> dict[str, Any]:
     return next(step[name] for step in steps if name in step)
 
 
+def test_image_ocr_workflow_routes_to_ingest_with_parser_url() -> None:
+    data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+    def mappings(value):
+        if isinstance(value, dict):
+            yield value
+            for child in value.values():
+                yield from mappings(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from mappings(child)
+
+    branch = next(node for node in mappings(data)
+                  if 'change.route == "IMAGE_OCR"' in str(node.get("condition", "")))
+    call = _named_step(branch["steps"], "do_ingest")["try"]
+    assert call["args"]["url"] == '${sync_url + "/sync/ingest"}'
+    assert call["args"]["body"]["parserUrl"] == "${parser_url}"
+    assert call["args"]["body"]["route"] == "${change.route}"
+    assert call["args"]["body"]["driveId"] == "${change.driveId}"
+
+
 def _source_call_steps() -> tuple[dict[str, Any], dict[str, Any]]:
     data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     drive_loop = _named_step(data["main"]["steps"], "for_each_drive")["for"]

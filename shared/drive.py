@@ -120,15 +120,20 @@ class DriveClient:
             new_start = page_token
         return changes, new_start, False
 
-    def download_file(self, file_id: str) -> bytes:
+    def download_file(self, file_id: str, *, max_bytes: int | None = None) -> bytes:
         request = self._service.files().get_media(
             fileId=file_id, supportsAllDrives=True
         )
         buffer = io.BytesIO()
-        downloader = MediaIoBaseDownload(buffer, request)
+        downloader = (
+            MediaIoBaseDownload(buffer, request, chunksize=min(max_bytes + 1, 1024 * 1024))
+            if max_bytes is not None else MediaIoBaseDownload(buffer, request)
+        )
         done = False
         while not done:
             _, done = downloader.next_chunk(num_retries=NUM_RETRIES)
+            if max_bytes is not None and buffer.tell() > max_bytes:
+                raise ValueError(f"DOWNLOAD_SIZE_EXCEEDED:{max_bytes}")
         return buffer.getvalue()
 
     def export_file(self, file_id: str, export_mime: str) -> bytes:

@@ -11,6 +11,8 @@
     activeRunId: null,
     checkingCodes: new Set(),
     selectedCode: null,
+    drawerDocaiConfig: null,
+    drawerDocaiRequest: 0,
     pollTimer: null,
     editingCode: null,
     editingSource: null,
@@ -1016,7 +1018,7 @@
         : service.revision || service.schedule || "";
       return `<article class="runtime-card status-${escapeHtml(tone)}">
         <header>
-          <div><b>${escapeHtml(service.name)}</b><small>${escapeHtml(service.purpose)}</small></div>
+          <div><b>${escapeHtml(service.displayName || service.name)}</b><small>${escapeHtml(service.purpose)}</small></div>
           <span class="runtime-chip">${escapeHtml(runtimeStateLabels[service.state] || service.state)}</span>
         </header>
         <div class="runtime-body">
@@ -1025,7 +1027,7 @@
         </div>
         <footer>
           ${service.url ? `<button type="button" class="copy-value-button" data-copy-value="${escapeHtml(service.url)}">URL 복사</button>` : "<span></span>"}
-          ${deletable ? `<button type="button" class="button danger compact" data-runtime-delete="${escapeHtml(service.key)}" aria-label="${escapeHtml(service.name)} 삭제">삭제</button>` : ""}
+          ${deletable ? `<button type="button" class="button danger compact" data-runtime-delete="${escapeHtml(service.key)}" aria-label="${escapeHtml(service.displayName || service.name)} 삭제">삭제</button>` : ""}
         </footer>
       </article>`;
     }).join("");
@@ -1277,6 +1279,131 @@
     }
   }
 
+  const docaiSetup = { revision: "", requests: {}, plans: {}, saved: {} };
+  const docaiKinds = { fallback: "HWP/HWPX 품질 보완 · Layout Parser", ocr: "PNG/JPG 텍스트 추출 · Enterprise Document OCR" };
+  const docaiLocations = ["us", "eu", "asia-south1", "asia-southeast1", "australia-southeast1", "europe-west2", "europe-west3", "northamerica-northeast1"];
+
+  function docaiElement(kind, field) { return document.getElementById(`docai-${kind}-${field}`); }
+
+  function renderDocaiSetup(saved = {}) {
+    docaiSetup.project = $("#commonSetupForm").elements.projectId.value;
+    docaiSetup.saved = saved;
+    docaiSetup.plans = {};
+    for (const kind of Object.keys(docaiKinds)) docaiSetup.requests[kind] = (docaiSetup.requests[kind] || 0) + 1;
+    $("#docaiSetupOptions").innerHTML = Object.entries(docaiKinds).map(([kind, label]) => {
+      const item = saved[kind] || {};
+      return `<div class="docai-setup-card"><h3>${label}</h3>
+        <div class="form-grid two-columns">
+          <label class="field"><span>프로세서 리전</span><select id="docai-${kind}-location"><option value="">선택하세요</option>${docaiLocations.map((location) => `<option value="${location}" ${location === item.location ? "selected" : ""}>${location}</option>`).join("")}</select></label>
+          <label class="field"><span>기존 프로세서</span><select id="docai-${kind}-processor"><option value="">연결하지 않음</option>${item.processorId ? `<option value="${escapeHtml(item.processorId)}" selected>${escapeHtml(item.processorId)} · 저장된 설정 (재확인 필요)</option>` : ""}</select></label>
+        </div><div class="docai-setup-actions">
+          <button type="button" class="button secondary compact" id="docai-${kind}-lookup">기존 프로세서 조회</button>
+          <button type="button" class="button secondary compact" id="docai-${kind}-check">연결 확인</button>
+          <button type="button" class="button primary compact" id="docai-${kind}-create" disabled>없으면 새로 생성</button>
+        </div><p id="docai-${kind}-status" role="status">리전을 선택하고 먼저 조회해 주세요. 서울 리전과 별개이며, 문서는 선택한 Document AI 리전으로 전송됩니다.</p>
+        <div id="docai-${kind}-plan" class="hidden"><p id="docai-${kind}-plan-text"></p><button type="button" class="button primary compact" id="docai-${kind}-confirm">확인하고 프로세서 생성</button></div>
+      </div>`;
+    }).join("");
+    for (const kind of Object.keys(docaiKinds)) {
+      docaiElement(kind, "location").addEventListener("change", () => {
+        ++docaiSetup.requests[kind];
+        delete docaiSetup.plans[kind];
+        docaiElement(kind, "processor").innerHTML = '<option value="">연결하지 않음</option>';
+        docaiElement(kind, "create").disabled = true;
+        docaiElement(kind, "plan").classList.add("hidden");
+        docaiElement(kind, "status").textContent = "리전이 변경됐습니다. 다시 조회해 주세요.";
+      });
+      docaiElement(kind, "lookup").addEventListener("click", () => lookupDocai(kind));
+      docaiElement(kind, "check").addEventListener("click", () => checkDocai(kind));
+      docaiElement(kind, "create").addEventListener("click", () => {
+        const plan = docaiSetup.plans[kind];
+        if (!plan) return;
+        docaiElement(kind, "plan-text").textContent = `${plan.projectId} / ${plan.location}에 ${plan.displayName} (${docaiKinds[kind]}) 프로세서 1개를 만듭니다. 생성 직전에 기존 프로세서를 다시 조회합니다. 실제 문서 처리 시 과금됩니다.`;
+        docaiElement(kind, "plan").classList.remove("hidden");
+      });
+      docaiElement(kind, "confirm").addEventListener("click", () => createDocai(kind));
+    }
+  }
+
+  function docaiSelections() {
+    return Object.fromEntries(Object.keys(docaiKinds).map((kind) => {
+      const processorId = docaiElement(kind, "processor").value;
+      return [kind, { processorId, location: processorId ? docaiElement(kind, "location").value : "" }];
+    }));
+  }
+
+  async function lookupDocai(kind, preferred = "") {
+    const projectId = $("#commonSetupForm").elements.projectId.value;
+    const location = docaiElement(kind, "location").value;
+    const requestId = ++docaiSetup.requests[kind];
+    delete docaiSetup.plans[kind];
+    docaiElement(kind, "create").disabled = true;
+    docaiElement(kind, "plan").classList.add("hidden");
+    docaiElement(kind, "status").textContent = "기존 프로세서를 조회하는 중…";
+    try {
+      const result = await api("/api/v1/common-config/docai/lookup", { method: "POST", body: { projectId, kind, location } });
+      if (requestId !== docaiSetup.requests[kind] || projectId !== $("#commonSetupForm").elements.projectId.value) return;
+      const previous = preferred || docaiElement(kind, "processor").value;
+      docaiElement(kind, "processor").innerHTML = '<option value="">연결하지 않음</option>' + result.processors.map((item) => `<option value="${escapeHtml(item.id)}" ${item.state !== "ENABLED" ? "disabled" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.id)} · ${escapeHtml(item.state)}</option>`).join("");
+      if (result.processors.some((item) => item.id === previous && item.state === "ENABLED")) docaiElement(kind, "processor").value = previous;
+      docaiSetup.plans[kind] = result;
+      docaiElement(kind, "create").disabled = !result.canCreate;
+      docaiElement(kind, "status").textContent = `${result.processors.length}개 확인. ${result.reason}`;
+    } catch (error) {
+      if (requestId === docaiSetup.requests[kind]) docaiElement(kind, "status").textContent = `${error.message} 조회 실패는 ‘없음’이 아니므로 생성할 수 없습니다.`;
+    }
+  }
+
+  async function checkDocai(kind) {
+    const requestId = docaiSetup.requests[kind];
+    const selection = docaiSelections()[kind];
+    const projectId = $("#commonSetupForm").elements.projectId.value;
+    try {
+      if (!selection.processorId) throw new Error("프로세서를 먼저 선택해 주세요.");
+      const result = await api("/api/v1/common-config/docai/check", { method: "POST", body: { projectId, kind, selection } });
+      if (requestId === docaiSetup.requests[kind] && JSON.stringify(selection) === JSON.stringify(docaiSelections()[kind])) docaiElement(kind, "status").textContent = result.message;
+    } catch (error) {
+      if (requestId === docaiSetup.requests[kind]) docaiElement(kind, "status").textContent = error.message;
+    }
+  }
+
+  async function createDocai(kind) {
+    const plan = docaiSetup.plans[kind];
+    if (!plan?.planId || plan.projectId !== $("#commonSetupForm").elements.projectId.value || plan.location !== docaiElement(kind, "location").value) return;
+    const requestId = docaiSetup.requests[kind];
+    docaiElement(kind, "confirm").disabled = true;
+    docaiElement(kind, "create").disabled = true;
+    delete docaiSetup.plans[kind];
+    try {
+      const result = await api("/api/v1/common-config/docai/create", { method: "POST", body: { planId: plan.planId } });
+      if (requestId !== docaiSetup.requests[kind]) return;
+      await lookupDocai(kind, result.processorId);
+      docaiElement(kind, "status").textContent += " 생성됐습니다. 공통 설정 저장 후 공통 런타임에 반영해 주세요.";
+    } catch (error) {
+      if (requestId === docaiSetup.requests[kind]) docaiElement(kind, "status").textContent = `${error.message} 재시도 전에 다시 조회해 주세요.`;
+    } finally {
+      if (requestId === docaiSetup.requests[kind] || docaiSetup.requests[kind] === requestId + 1) {
+        docaiElement(kind, "confirm").disabled = false;
+        docaiElement(kind, "plan").classList.add("hidden");
+      }
+    }
+  }
+
+  async function openDocaiSetup() {
+    try {
+      const config = await api("/api/v1/common-config/docai");
+      applySetupMode("docai");
+      docaiSetup.revision = config.configRevision;
+      $("#commonSetupForm").elements.projectId.value = config.projectId;
+      renderDocaiSetup(config.docai);
+      clearSetupErrors();
+      $("#docaiSetupStatus").textContent = `프로젝트: ${config.projectId} · 저장 후 공통 런타임 환경변수 반영이 필요합니다.`;
+      $("#createCommonConfig").disabled = false;
+      $("#createCommonConfig").textContent = "Document AI 설정 저장";
+      $("#setupGate").classList.remove("hidden");
+    } catch (error) { toast("공통 설정을 열지 못했습니다", error.message, "fail"); }
+  }
+
   function commonSetupPayload() {
     const form = $("#commonSetupForm");
     const value = (name) => form.elements[name]?.value?.trim() || "";
@@ -1285,6 +1412,7 @@
       region: value("region"),
       artifactRepo: value("artifactRepo"),
       firestoreDatabase: value("firestoreDatabase"),
+      docai: docaiSelections(),
     };
   }
 
@@ -1429,6 +1557,7 @@
   function onProjectInput(event) {
     window.clearTimeout(state.projectSearchTimer);
     const term = event.target.value;
+    if (term !== docaiSetup.project) renderDocaiSetup();
     // 글자마다 왕복시키지 않는다 — 서버 호출은 ~0.4초짜리다.
     state.projectSearchTimer = window.setTimeout(() => searchProjects(term), 280);
   }
@@ -1654,6 +1783,7 @@
   async function loadSetupResources() {
     const form = $("#commonSetupForm");
     const project = form.elements.projectId.value;
+    if (project !== docaiSetup.project) renderDocaiSetup();
     const region = form.elements.region.value;
     const status = $("#setupResourceStatus");
     const requestId = ++state.setupResourceRequest;
@@ -1714,13 +1844,18 @@
   function applySetupMode(mode) {
     state.setupMode = mode;
     const loginOnly = mode === "login";
+    $("#commonBootstrapFields").classList.toggle("hidden", mode === "docai");
+    $("#setupAuth").classList.toggle("hidden", mode === "docai");
+    $("#closeDocaiSetup").classList.toggle("hidden", mode !== "docai");
+    $("#setupStep").classList.toggle("hidden", mode === "docai");
     $("#setupGate").dataset.mode = mode;
     $("#commonSetupForm").classList.toggle("hidden", loginOnly);
-    $("#setupEyebrow").textContent = loginOnly ? "SIGN IN REQUIRED" : "FIRST RUN SETUP";
+    $("#setupEyebrow").textContent = loginOnly ? "SIGN IN REQUIRED" : mode === "docai" ? "COMMON SETTINGS" : "FIRST RUN SETUP";
     $("#setupTitle").textContent = loginOnly ? "gcloud 로그인" : "공통 환경 설정";
     $("#setupStep").textContent = loginOnly ? "" : "01 / 01";
     $("#setupIntro").textContent = loginOnly
       ? "공통 설정은 이미 있습니다. 콘솔이 GCP를 호출하려면 gcloud 로그인만 마치면 됩니다."
+      : mode === "docai" ? "공통 프로세서를 조회·선택하거나 생성합니다. 저장 후 공통 런타임에 반영하고 학과별로 사용 여부를 선택해 주세요."
       : "학과 설정을 만들기 전에 이 콘솔이 사용할 GCP 기본 환경을 연결합니다. 검증된 운영 기본값은 자동으로 채워집니다.";
   }
 
@@ -1817,6 +1952,18 @@
     event.preventDefault();
     clearSetupErrors();
     const button = $("#createCommonConfig");
+    if (state.setupMode === "docai") {
+      button.disabled = true;
+      try {
+        const result = await api("/api/v1/common-config/docai", { method: "PUT", body: { docai: docaiSelections(), configRevision: docaiSetup.revision } });
+        docaiSetup.revision = result.configRevision;
+        $("#docaiSetupStatus").textContent = "설정 저장 완료. 운영 환경 → 공통 런타임에서 환경변수를 반영해 주세요. 실제 문서 처리 검증은 별도입니다.";
+        toast("Document AI 설정을 저장했습니다", "공통 런타임 반영이 필요합니다", "ok");
+      } catch (error) {
+        $("#docaiSetupStatus").textContent = error.message;
+      } finally { button.disabled = false; }
+      return;
+    }
     button.disabled = true;
     button.textContent = "필수 API 확인 중…";
     try {
@@ -1972,7 +2119,9 @@
   function openDrawer(code, announce = true) {
     const dept = state.departments.find((item) => item.code === code);
     if (!dept) return;
+    const changed = state.selectedCode !== code;
     state.selectedCode = code;
+    if (changed || announce) loadDrawerDocai(code);
     $("#drawerTitle").textContent = dept.name;
     $("#drawerPath").textContent = dept.path;
     const overall = effectiveStatus(dept);
@@ -2020,8 +2169,8 @@
       ? "기존 v1 배포는 원래 환경에서 한 번 재배포해야 수정할 수 있습니다."
       : dept.cloudOnly ? "Cloud 설정 수정" : "설정 수정";
     $("#drawerDelete").dataset.code = code;
-    $("#drawerMore").removeAttribute("open");
-    $("#drawerMore").classList.toggle("hidden", !dept.cloudOnly);
+    if (changed || announce) $("#drawerMore").removeAttribute("open");
+    $("#drawerDeleteSection").classList.toggle("hidden", !dept.cloudOnly);
     const drawer = $("#detailDrawer");
     drawer.classList.add("open");
     drawer.setAttribute("aria-hidden", "false");
@@ -2032,6 +2181,84 @@
     state.selectedCode = null;
     $("#detailDrawer").classList.remove("open");
     $("#detailDrawer").setAttribute("aria-hidden", "true");
+  }
+
+  const drawerParserOptions = [
+    { key: "enableDocaiFallback", select: "#drawerDocaiFallback", button: "#saveDrawerDocai", status: "#drawerDocaiStatus", endpoint: "docai-fallback", label: "HWP/HWPX fallback" },
+    { key: "enableImageOcr", select: "#drawerImageOcr", button: "#saveDrawerImageOcr", status: "#drawerImageOcrStatus", endpoint: "image-ocr", label: "이미지 OCR" },
+  ];
+
+  async function loadDrawerDocai(code) {
+    const requestId = ++state.drawerDocaiRequest;
+    state.drawerDocaiConfig = null;
+    for (const option of drawerParserOptions) {
+      $(option.select).disabled = true;
+      $(option.button).disabled = true;
+      $(option.status).dataset.error = "false";
+      $(option.status).textContent = "설정을 불러오는 중…";
+    }
+    try {
+      const config = await api(`/api/v1/departments/${encodeURIComponent(code)}/config`);
+      if (state.selectedCode !== code || requestId !== state.drawerDocaiRequest) return;
+      state.drawerDocaiConfig = config;
+      for (const option of drawerParserOptions) {
+        $(option.select).value = String(config[option.key] === true);
+        $(option.select).disabled = false;
+      }
+      updateDrawerDocaiChoice();
+    } catch (error) {
+      if (state.selectedCode !== code || requestId !== state.drawerDocaiRequest) return;
+      for (const option of drawerParserOptions) {
+        $(option.status).dataset.error = "true";
+        $(option.status).textContent = error.message;
+      }
+    }
+  }
+
+  function updateDrawerDocaiChoice() {
+    const config = state.drawerDocaiConfig;
+    if (!config || config.code !== state.selectedCode) return;
+    for (const option of drawerParserOptions) {
+      const changed = ($(option.select).value === "true") !== (config[option.key] === true);
+      $(option.button).disabled = !changed;
+      $(option.status).dataset.error = "false";
+      $(option.status).textContent = changed
+        ? "저장하면 이 항목만 학과 설정에 반영됩니다."
+        : `저장된 설정: ${config[option.key] ? "켜기" : "끄기"}`;
+    }
+  }
+
+  async function saveDrawerDocai(option) {
+    const config = state.drawerDocaiConfig;
+    if (!config || config.code !== state.selectedCode || $(option.button).disabled) return;
+    const code = config.code;
+    const requestId = state.drawerDocaiRequest;
+    const enabled = $(option.select).value === "true";
+    for (const item of drawerParserOptions) {
+      $(item.button).disabled = true;
+      $(item.select).disabled = true;
+    }
+    $(option.status).textContent = "변경사항을 저장하는 중…";
+    try {
+      const result = await api(`/api/v1/departments/${encodeURIComponent(code)}/${option.endpoint}`, {
+        method: "PUT",
+        body: { [option.key]: enabled, configRevision: config.configRevision },
+      });
+      if (state.selectedCode === code) closeDrawer();
+      state.mcpDeploymentCode = code;
+      renderMcpDeployment(result.deployment);
+      showMcpDeploymentModal();
+      pollMcpDeployment(result.deployment.runId);
+      toast(`${option.label} 설정 반영을 시작했습니다`, config.name, "ok");
+    } catch (error) {
+      if (state.selectedCode !== code || requestId !== state.drawerDocaiRequest) return;
+      if (error.data?.error?.code !== "REVISION_CONFLICT") {
+        for (const item of drawerParserOptions) $(item.select).disabled = false;
+        updateDrawerDocaiChoice();
+      }
+      $(option.status).dataset.error = "true";
+      $(option.status).textContent = error.message;
+    }
   }
 
   function splitIds(value) {
@@ -3201,6 +3428,8 @@
       code: value("code").toLowerCase(),
       name: value("name"),
       corpusMode: state.corpusMode,
+      enableDocaiFallback: value("enableDocaiFallback") === "true",
+      enableImageOcr: value("enableImageOcr") === "true",
       corpora: { staff: value("staffCorpus"), student: state.corpusMode === "split" ? value("studentCorpus") : "" },
       buckets: { hwpOriginal: value("hwpBucket"), source: value("sourceBucket") },
       drive: {
@@ -3331,6 +3560,8 @@
     syncFolderIds: "drive.syncFolderIds",
     studentFolderIds: "drive.studentFolderIds",
     staffMin: "minInstances.staff",
+    enableDocaiFallback: "enableDocaiFallback",
+    enableImageOcr: "enableImageOcr",
     studentMin: "minInstances.student",
   };
 
@@ -3389,6 +3620,8 @@
       ...(state.corpusMode === "split" ? [["학생 코퍼스", selectedText("studentCorpus", payload.corpora.student)]] : []),
       ["버킷", `${payload.buckets.hwpOriginal} / ${payload.buckets.source}`],
       ["Drive 범위", `${payload.drive.driveIds.length}개 drive · ${payload.drive.syncFolderIds.length}개 folder`],
+      ["HWP/HWPX 품질 보완 (DocAI fallback)", payload.enableDocaiFallback ? "켜기" : "끄기"],
+      ["이미지 텍스트 추출 (PNG/JPG OCR)", payload.enableImageOcr ? "켜기" : "끄기"],
       ["MCP", state.corpusMode === "single" ? "기본 서버 1개 · 키 자동 관리" : "교직원·학생 서버 2개 · 키 자동 관리"],
     ];
     $("#reviewSummary").innerHTML = rows.map(([label, value]) => `<div class="review-item"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join("");
@@ -3478,7 +3711,7 @@
     const form = $("#departmentForm");
     form.elements.staffMin.disabled = Boolean(state.environment?.unifiedMcp);
     form.elements.studentMin.disabled = Boolean(state.environment?.unifiedMcp);
-    form.elements.staffMin.closest("details").classList.toggle("hidden", Boolean(state.environment?.unifiedMcp));
+    $("#minInstancesFields").classList.toggle("hidden", Boolean(state.environment?.unifiedMcp));
     $$('[data-corpus-mode]').forEach((button) => { button.disabled = false; });
     window.clearTimeout(state.codeAvailabilityTimer);
     state.editingCode = null;
@@ -3553,9 +3786,11 @@
       form.elements.studentFolderIds.value = (config.drive?.studentFolderIds || []).join("\n");
       form.elements.staffMin.value = config.minInstances?.staff ?? 0;
       form.elements.studentMin.value = config.minInstances?.student ?? 0;
+      form.elements.enableDocaiFallback.value = String(config.enableDocaiFallback === true);
+      form.elements.enableImageOcr.value = String(config.enableImageOcr === true);
       form.elements.staffMin.disabled = Boolean(config.unifiedMcp);
       form.elements.studentMin.disabled = Boolean(config.unifiedMcp);
-      form.elements.staffMin.closest("details").classList.toggle("hidden", Boolean(config.unifiedMcp));
+      $("#minInstancesFields").classList.toggle("hidden", Boolean(config.unifiedMcp));
       setCorpusMode(config.corpusMode || (config.corpora?.student ? "split" : "single"));
       $$('[data-corpus-mode]').forEach((button) => { button.disabled = true; });
       $("#corpusModeHelp").textContent += " 운영 중 구성 변경은 재색인과 기존 서비스 정리가 필요해 별도 마이그레이션으로 진행합니다.";
@@ -3752,6 +3987,18 @@
     $("#cancelCreate").addEventListener("click", () => { resetWizard(); switchView("dashboard"); });
     $("#departmentForm").addEventListener("submit", submitDepartment);
     $("#commonSetupForm").addEventListener("submit", submitCommonSetup);
+    renderDocaiSetup();
+    $("#openDocaiSetup").addEventListener("click", openDocaiSetup);
+    $("#closeDocaiSetup").addEventListener("click", () => { $("#setupGate").classList.add("hidden"); applySetupMode("create"); });
+    $("#commonSetupForm").elements.projectId.addEventListener("change", () => renderDocaiSetup());
+    $("#enableDocaiApi").addEventListener("click", async () => {
+      $("#enableDocaiApi").disabled = true;
+      try {
+        await api("/api/v1/common-config/docai/enable-api", { method: "POST", body: { projectId: $("#commonSetupForm").elements.projectId.value } });
+        $("#docaiSetupStatus").textContent = "Document AI API 활성화 완료. 프로세서를 조회해 주세요.";
+      } catch (error) { $("#docaiSetupStatus").textContent = error.message; }
+      finally { $("#enableDocaiApi").disabled = false; }
+    });
     $("#refreshGcloudAuth").addEventListener("click", refreshGcloudSetup);
     $("#confirmDriveSaRepair").addEventListener("click", confirmDriveSaAction);
     $$("[data-close-drive-sa]").forEach((item) => item.addEventListener("click", closeDriveSaModal));
@@ -3896,6 +4143,10 @@
     $("#departmentForm").addEventListener("change", clearChangedFormFieldError);
     $$('[data-close-drawer]').forEach((item) => item.addEventListener("click", closeDrawer));
     $("#drawerEdit").addEventListener("click", (event) => beginEdit(event.currentTarget.dataset.code));
+    for (const option of drawerParserOptions) {
+      $(option.select).addEventListener("change", updateDrawerDocaiChoice);
+      $(option.button).addEventListener("click", () => saveDrawerDocai(option));
+    }
     $("#drawerDelete").addEventListener("click", (event) => {
       $("#drawerMore").removeAttribute("open");
       openTeardown("department", event.currentTarget.dataset.code);

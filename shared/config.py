@@ -62,6 +62,8 @@ class Department:
     source_bucket: str = ""
     student_folder_ids: tuple[str, ...] = ()
     sync_folder_ids: tuple[str, ...] = ()
+    enable_docai_fallback: bool = False
+    enable_image_ocr: bool = False
 
 
 def _departments_from_json(raw: str) -> tuple[Department, ...]:
@@ -107,6 +109,10 @@ def _departments_from_json(raw: str) -> tuple[Department, ...]:
     for code, d in data.items():
         if not isinstance(d, dict):
             raise ValueError(f"DEPARTMENTS_JSON department {code} must be a mapping")
+        if not isinstance(d.get("enableDocaiFallback", False), bool):
+            raise ValueError(f"DEPARTMENTS_JSON department {code}: enableDocaiFallback must be boolean")
+        if not isinstance(d.get("enableImageOcr", False), bool):
+            raise ValueError(f"DEPARTMENTS_JSON department {code}: enableImageOcr must be boolean")
         out.append(
             Department(
                 code=str(code),
@@ -117,6 +123,8 @@ def _departments_from_json(raw: str) -> tuple[Department, ...]:
                 source_bucket=_string(d.get("sourceBucket")),
                 student_folder_ids=_tuple(d.get("studentFolderIds")),
                 sync_folder_ids=_tuple(d.get("syncFolderIds")),
+                enable_docai_fallback=d.get("enableDocaiFallback", False),
+                enable_image_ocr=d.get("enableImageOcr", False),
             )
         )
     result = tuple(out)
@@ -173,6 +181,10 @@ class Settings:
     rag_corpus_name_student: str = ""
     docai_processor_id: str = ""
     docai_location: str = "asia-northeast3"
+    # OCR_PROCESSOR 전용. Layout Parser 설정이나 GCP 기본 리전을 상속하지 않는다.
+    docai_ocr_processor_id: str = ""
+    docai_ocr_location: str = ""
+    enable_image_ocr: bool = False
     drive_ids: str = ""
 
     # 공유 드라이브 내부에서 RAG/GCS 대상 폴더만. 배포는 필수(비우면 거부).
@@ -385,6 +397,8 @@ class Settings:
             gcs_source_bucket=dept.source_bucket,
             student_folder_ids=",".join(dept.student_folder_ids),
             sync_folder_ids=",".join(dept.sync_folder_ids),
+            enable_docai_fallback=dept.enable_docai_fallback,
+            enable_image_ocr=dept.enable_image_ocr,
         )
 
     @classmethod
@@ -407,6 +421,8 @@ class Settings:
             rag_corpus_name_student=os.environ.get("RAG_CORPUS_NAME_STUDENT", ""),
             docai_processor_id=os.environ.get("DOCAI_PROCESSOR_ID", ""),
             docai_location=os.environ.get("DOCAI_LOCATION", "asia-northeast3"),
+            docai_ocr_processor_id=os.environ.get("DOCAI_OCR_PROCESSOR_ID", ""),
+            docai_ocr_location=os.environ.get("DOCAI_OCR_LOCATION", ""),
             drive_ids=os.environ.get("DRIVE_IDS", ""),
             sync_folder_ids=os.environ.get("SYNC_FOLDER_IDS", ""),
             student_folder_ids=os.environ.get("STUDENT_FOLDER_IDS", ""),

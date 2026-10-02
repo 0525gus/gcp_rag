@@ -158,6 +158,8 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dept_gui._SYNC_AUTH_TOKEN_EXPIRES = 0.0
     dept_gui._SYNC_TARGET_CACHE.clear()
     dept_gui._CLOUD_DEPARTMENT_CONFIG_CACHE.clear()
+    dept_gui._MCP_REGISTRY_READ_CACHE.clear()
+    dept_gui._UNIFIED_MCP_SERVICE_CACHE.clear()
     return dept_dir
 
 
@@ -1545,6 +1547,69 @@ def test_status_run_cache_deduplicates_concurrent_gcloud_calls(
 
     assert calls == 1
     assert all(result[0] is True for result in results)
+
+
+def test_registry_read_uses_short_cache_and_mutation_invalidates_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "common.yaml").write_text(
+        yaml.safe_dump({"GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dept_gui, "CONFIG_DIR", config_dir)
+    dept_gui._MCP_REGISTRY_READ_CACHE.clear()
+    reads = 0
+    mutations: list[tuple] = []
+
+    class Admin:
+        def read(self):
+            nonlocal reads
+            reads += 1
+            return object(), {"revision": f"v{reads}"}, {"ee": {"name": "전자공학과"}}
+
+        def update_department(self, *args):
+            mutations.append(args)
+
+    monkeypatch.setattr(dept_gui, "_mcp_registry_admin", Admin)
+
+    first = dept_gui._mcp_registry_read()
+    second = dept_gui._mcp_registry_read()
+    assert first == second
+    assert reads == 1
+
+    dept_gui._mcp_registry_mutate("update_department", "ee", {"name": "변경"})
+    refreshed = dept_gui._mcp_registry_read()
+    assert mutations == [("ee", {"name": "변경"})]
+    assert reads == 2
+    assert refreshed[0]["revision"] == "v2"
+
+
+def test_unified_mcp_service_uses_short_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "common.yaml").write_text(
+        yaml.safe_dump({"GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(dept_gui, "CONFIG_DIR", config_dir)
+    dept_gui._UNIFIED_MCP_SERVICE_CACHE.clear()
+    calls = 0
+
+    def fake_gcloud(args, timeout=12):
+        nonlocal calls
+        calls += 1
+        return True, {"status": {"url": "https://mcp.example"}, "call": calls}
+
+    monkeypatch.setattr(dept_gui, "_gcloud_json", fake_gcloud)
+
+    first = dept_gui._unified_mcp_service()
+    second = dept_gui._unified_mcp_service()
+    assert first == second
+    assert calls == 1
 
 
 def test_status_run_checks_departments_in_parallel(
@@ -3785,7 +3850,9 @@ class _FakeFirestoreCollection:
     def document(self, name: str) -> _FakeFirestoreDoc:
         return _FakeFirestoreDoc(self.store, f"{self.path}/{name}")
 
-    def where(self, field: str, op: str, value) -> _FakeFirestoreCollection:
+    def where(self, field: str = "", op: str = "", value=None, *, filter=None) -> _FakeFirestoreCollection:
+        if filter is not None:
+            field, op, value = filter.field_path, filter.op_string, filter.value
         assert op == "in"
         return _FakeFirestoreCollection(
             self.store, self.path, lambda data: data.get(field) in value
@@ -3818,9 +3885,47 @@ class _FakeFirestoreCollection:
 class _FakeFirestoreClient:
     def __init__(self, store: dict) -> None:
         self.store = store
+        self.commit_sizes: list[int] = []
 
     def collection(self, name: str) -> _FakeFirestoreCollection:
         return _FakeFirestoreCollection(self.store, name)
+
+    def batch(self):
+        client = self
+
+        class Batch:
+            def __init__(self) -> None:
+                self.references: list[_FakeFirestoreDoc] = []
+
+            def delete(self, reference: _FakeFirestoreDoc) -> None:
+                self.references.append(reference)
+
+            def commit(self) -> None:
+                client.commit_sizes.append(len(self.references))
+                for reference in self.references:
+                    reference.delete()
+
+        return Batch()
+
+
+def test_firestore_client_uses_active_gcloud_token(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from google.cloud import firestore
+
+    captured: dict = {}
+
+    def fake_client(**kwargs):
+        captured.update(kwargs)
+        return "client"
+
+    monkeypatch.setattr(dept_gui, "_provision_access_token", lambda: "gcloud-token")
+    monkeypatch.setattr(firestore, "Client", fake_client)
+
+    assert dept_gui._firestore_client("project-test") == "client"
+    assert captured["project"] == "project-test"
+    assert captured["database"] == "rag-sync-state"
+    assert captured["credentials"].token == "gcloud-token"
 
 
 def test_firestore_teardown_removes_history_for_this_departments_drives_only(
@@ -3839,17 +3944,40 @@ def test_firestore_teardown_removes_history_for_this_departments_drives_only(
         "sync_tokens/DRIVE-1": {"pageToken": "t1"},
         "sync_tokens/DRIVE-OTHER": {"pageToken": "t2"},
     }
-    monkeypatch.setattr(dept_gui, "_firestore_client", lambda project: _FakeFirestoreClient(store))
+    firestore = _FakeFirestoreClient(store)
+    monkeypatch.setattr(dept_gui, "_firestore_client", lambda project: firestore)
 
     detail = dept_gui._delete_department_firestore_state(["DRIVE-1"], "project-test")
 
     assert "문서 1건" in detail and "매핑 2건" in detail
+    assert firestore.commit_sizes == [6]
     assert set(store) == {
         "doc_state/file-b",
         "doc_state/file-b/rag_files/m3",
         "doc_dlq/file-b",
         "sync_tokens/DRIVE-OTHER",
     }
+
+
+def test_firestore_teardown_commits_at_configured_batch_size(
+    isolated_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = {
+        f"doc_state/file-{index}": {"fileId": f"file-{index}", "driveId": "DRIVE-1"}
+        for index in range(150)
+    }
+    firestore = _FakeFirestoreClient(store)
+    monkeypatch.setattr(dept_gui, "_firestore_client", lambda project: firestore)
+    progress: list[str] = []
+
+    dept_gui._delete_department_firestore_state(
+        ["DRIVE-1"], "project-test", progress=progress.append
+    )
+
+    # 문서마다 queue 두 건 + doc_state 한 건, 마지막 sync token 한 건.
+    assert firestore.commit_sizes == [200, 200, 51]
+    assert progress and "문서 150건" in progress[-1]
+    assert not store
 
 
 def test_common_runtime_status_reports_each_service(
@@ -3884,7 +4012,9 @@ def test_common_runtime_status_reports_each_service(
     # 미배포와 조회 실패는 화면에서 다른 행동으로 이어진다 — 구분해야 한다.
     assert by_key["parser"]["state"] == "MISSING"
     assert by_key["workflow"]["state"] == "READY"
+    assert by_key["workflow"]["displayName"] == "rag-daily-sync · Workflow"
     assert by_key["scheduler"]["state"] == "READY"
+    assert by_key["scheduler"]["displayName"] == "rag-daily-sync · Scheduler"
 
 
 def test_common_runtime_status_flags_a_revision_that_never_became_ready(

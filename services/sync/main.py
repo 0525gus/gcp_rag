@@ -41,6 +41,8 @@ from shared.hashing import sha256_bytes, sha256_text  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
 from shared.mime_types import (  # noqa: E402
     GOOGLE_EXPORT_MAP,
+    IMAGE_OCR_MAX_BYTES,
+    IMAGE_OCR_MIME,
     SIDECAR_ONLY_MIME,
     RouteKind,
     classify_route,
@@ -249,6 +251,7 @@ def _route_file_meta(
     file_meta: dict[str, Any],
     folder_ids: list[str],
     drive: DriveClient,
+    enable_image_ocr: bool = False,
 ) -> dict[str, Any] | None:
     """Drive files.list 항목 → workflow change entry. 폴더는 None."""
     mime = file_meta.get("mimeType") or ""
@@ -257,7 +260,7 @@ def _route_file_meta(
     file_id = file_meta.get("id") or ""
     name = file_meta.get("name") or ""
     parents = list(file_meta.get("parents") or [])
-    kind = classify_route(mime, name, removed=False)
+    kind = classify_route(mime, name, removed=False, enable_image_ocr=enable_image_ocr)
     skip_reason: str | None = None
     if folder_ids and kind != RouteKind.DELETE:
         if not drive.is_in_sync_scope(file_id, folder_ids, parents=parents):
@@ -304,6 +307,7 @@ def _build_backfill_changes(
             file_meta=meta,
             folder_ids=folder_ids,
             drive=drive,
+            enable_image_ocr=getattr(settings, "enable_image_ocr", False),
         )
         if entry is None:
             continue
@@ -760,7 +764,10 @@ def list_changes(body: ChangesBody) -> dict[str, Any]:
         # 집계로 넘기지 않는다. pageToken 은 응답 전체 기준으로 계속 전진한다.
         if ch.mime_type == "application/vnd.google-apps.folder":
             continue
-        kind = classify_route(ch.mime_type, ch.name, removed=ch.removed)
+        kind = classify_route(
+            ch.mime_type, ch.name, removed=ch.removed,
+            enable_image_ocr=getattr(settings, "enable_image_ocr", False),
+        )
         skip_reason: str | None = None
         if folder_ids and kind != RouteKind.DELETE:
             in_scope = drive.is_in_sync_scope(
@@ -1039,13 +1046,25 @@ def _ingest_locked(
         }
 
     route = RouteKind(body.route) if body.route else classify_route(
-        body.mime_type, body.name, removed=body.removed
+        body.mime_type, body.name, removed=body.removed,
+        enable_image_ocr=getattr(settings, "enable_image_ocr", False),
     )
+    # 과거 큐에 남은 route 값으로 OCR 허용 여부를 우회하지 않는다.
+    if route != RouteKind.DELETE and not body.removed and (body.mime_type.lower() in IMAGE_OCR_MIME or route == RouteKind.IMAGE_OCR):
+        route = classify_route(
+            body.mime_type, body.name,
+            enable_image_ocr=getattr(settings, "enable_image_ocr", False),
+        )
 
     if route == RouteKind.DELETE or body.removed:
         return {"fileId": body.file_id, "status": "DELETE_PENDING", "route": "DELETE"}
 
     if route == RouteKind.SKIP:
+        if body.mime_type.lower() in IMAGE_OCR_MIME:
+            existing = store.get(body.file_id)
+            if existing and existing.status == DocStatus.INDEXED:
+                # 끄기는 추가 OCR을 멈출 뿐, 이전 색인의 메타데이터를 숨기지 않는다.
+                return {"fileId": body.file_id, "status": "SKIPPED", "route": "SKIP"}
         store.upsert(
             DocState(
                 file_id=body.file_id,
@@ -1071,6 +1090,8 @@ def _ingest_locked(
             return {"fileId": body.file_id, "status": "UNCHANGED", "route": route.value}
 
     try:
+        if route == RouteKind.IMAGE_OCR:
+            return _ingest_image_ocr(body, store, gcs, drive, settings)
         if route == RouteKind.HWP_PARSE:
             return _ingest_hwp(body, store, gcs, drive, settings)
         if route == RouteKind.GOOGLE_EXPORT:
@@ -1322,6 +1343,7 @@ def _ingest_hwp(
                 "mimeType": body.mime_type,
                 "fileId": body.file_id,
                 "sourceBucket": settings.gcs_source_bucket,
+                "enableDocaiFallback": settings.enable_docai_fallback,
             },
         )
         if resp.status_code == 422:
@@ -1430,6 +1452,66 @@ def _ingest_hwp(
         uris=[md_uri],
         content_hash=content_hash,
         path_ctx=path_ctx,
+    )
+
+
+def _ingest_image_ocr(
+    body: IngestBody, store: DocStateStore, gcs: GcsClient,
+    drive: DriveClient, settings: Settings,
+) -> dict[str, Any]:
+    if not settings.enable_image_ocr:
+        raise ValueError("IMAGE_OCR_DISABLED")
+    mime = body.mime_type.lower()
+    if mime not in IMAGE_OCR_MIME:
+        raise ValueError("OCR_UNSUPPORTED_TYPE")
+    if not body.parser_url:
+        raise ValueError("parserUrl required for IMAGE_OCR")
+    limit = min(settings.max_gcs_bytes, IMAGE_OCR_MAX_BYTES)
+    gated = _size_gate(store, settings, body, body.size_bytes, splittable=False, ext=IMAGE_OCR_MIME[mime], limit=limit)
+    if gated:
+        return {**gated, "route": RouteKind.IMAGE_OCR.value}
+    raw = drive.download_file(body.file_id, max_bytes=limit)
+    gated = _size_gate(store, settings, body, len(raw), splittable=False, ext=IMAGE_OCR_MIME[mime], limit=limit)
+    if gated:
+        return {**gated, "route": RouteKind.IMAGE_OCR.value}
+    # 원본은 기존 원본 버킷에 보관하고, RAG import에는 OCR 본문만 전달한다.
+    raw_uri = gcs.upload_bytes(
+        raw, settings.gcs_hwp_original_bucket, body.file_id + IMAGE_OCR_MIME[mime], mime,
+    )
+    with httpx.Client(timeout=180.0) as client:
+        response = client.post(
+            body.parser_url.rstrip("/") + "/ocr",
+            headers=_cloud_run_auth_headers(body.parser_url),
+            json={"gcsUri": raw_uri, "fileId": body.file_id, "mimeType": mime,
+                  "enableImageOcr": True},
+        )
+        if response.status_code != 200:
+            raise ValueError(f"IMAGE_OCR_FAILED:{response.status_code}:{response.text[:500]}")
+        result = response.json()
+    text = result.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("OCR_EMPTY_TEXT")
+    path_ctx = _resolve_path_ctx(drive, body)
+    audience = _resolve_audience(drive, settings, body)
+    markdown = build_breadcrumb_markdown(
+        path=path_ctx.path, bundle=path_ctx.bundle, title=body.name or body.file_id, body=text,
+    )
+    gated = _size_gate(store, settings, body, len(markdown.encode("utf-8")), splittable=False, ext=".md")
+    if gated:
+        return {**gated, "route": RouteKind.IMAGE_OCR.value}
+    content_hash = sha256_text(markdown)
+    if store.should_skip_reindex(body.file_id, content_hash):
+        store.touch_modified_time(body.file_id, body.modified_time, audience=audience)
+        return {"fileId": body.file_id, "status": "HASH_UNCHANGED", "route": "IMAGE_OCR"}
+    md_uri = gcs.upload_source_md(markdown, body.file_id)
+    store.upsert(_state_fields(
+        body, content_hash=content_hash, status=DocStatus.PARSED,
+        parse_route=ParseRoute.IMAGE_DOCAI, source_uri=body.web_view_link or md_uri,
+        path_ctx=path_ctx, audience=audience,
+    ))
+    return _gcs_ready(
+        body=body, route="IMAGE_OCR", parse_route=ParseRoute.IMAGE_DOCAI,
+        uris=[md_uri], content_hash=content_hash, path_ctx=path_ctx,
     )
 
 

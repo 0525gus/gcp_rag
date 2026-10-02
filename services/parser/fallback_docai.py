@@ -11,8 +11,8 @@ from pathlib import Path
 from google.api_core.client_options import ClientOptions
 from google.cloud import documentai
 
-from shared.config import Settings, get_settings
 from services.parser.quality_gate import ParseMetrics
+from shared.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,7 @@ def hwp_to_pdf(source_path: Path, out_dir: Path) -> Path:
 
     cmd = [
         soffice,
+        f"-env:UserInstallation={(out_dir / 'lo-profile').resolve().as_uri()}",
         "--headless",
         "--nologo",
         "--nofirststartwizard",
@@ -38,7 +39,10 @@ def hwp_to_pdf(source_path: Path, out_dir: Path) -> Path:
         str(out_dir),
         str(source_path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise FallbackParseError(f"LibreOffice convert failed: {exc}") from exc
     if result.returncode != 0:
         raise FallbackParseError(
             f"LibreOffice convert failed: {result.stderr or result.stdout}"

@@ -410,8 +410,8 @@ main:
                                     severity: "INFO"
                                     text: ${"sync-file-result status=SKIPPED " + json.encode_to_string(change)}
 
-                          # === HWP/HWPX · Google export · 원본 복사 → GCS ===
-                          - condition: ${change.route == "HWP_PARSE" or change.route == "GOOGLE_EXPORT" or change.route == "FILE_COPY"}
+                          # === HWP/HWPX · Google export · 원본 복사 · 이미지 OCR → GCS ===
+                          - condition: ${change.route == "HWP_PARSE" or change.route == "GOOGLE_EXPORT" or change.route == "FILE_COPY" or change.route == "IMAGE_OCR"}
                             steps:
                               - do_ingest:
                                   try:

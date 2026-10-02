@@ -283,6 +283,19 @@ def test_department_save_preserves_disabled_scopes_until_explicitly_enabled():
     assert writes[-1][0]["cs"]["syncDisabled"] is False
 
 
+def test_disabling_an_already_disabled_audience_does_not_republish_registry():
+    from scripts.mcp_registry import RegistryAdmin
+
+    admin = RegistryAdmin.__new__(RegistryAdmin)
+    departments = configs()
+    departments["cs"]["mcpDisabledAudiences"] = ["student"]
+    current = {"revision": "v1"}
+    admin.read = lambda: (object(), current, copy.deepcopy(departments))
+    admin.write = lambda *args, **kwargs: pytest.fail("registry must not be republished")
+
+    assert admin.disable_audience("cs", "student") is current
+
+
 @pytest.mark.parametrize("secret_failure,conflict", [(False, False), (True, False), (False, True)])
 def test_registry_activation_is_pinned_atomic_and_preserves_live_state_on_failure(secret_failure, conflict):
     from google.api_core.exceptions import FailedPrecondition

@@ -524,7 +524,7 @@ function Assert-GcpPrereqs {
   }
 
   if ($qg -eq "fallback") {
-    Write-Host "WARN QG_MODE=fallback : parser 이미지에 LibreOffice 가 없어 런타임에 FALLBACK_FAILED 가 난다. docs/PARSER_DOCAI_FALLBACK.md"
+    Write-Host "INFO Doc AI fallback : PDF 변환과 Document AI 설정은 docs/PARSER_DOCAI_FALLBACK.md 참고"
     Add-PreflightResult $errs (Test-DocAiProcessor -Project $project -Location $docaiLoc -ProcessorId $docai) `
       "Document AI processor" `
       "processor missing. QG_MODE=log 이거나 DOCAI_PROCESSOR_ID 를 실존 ID 로"

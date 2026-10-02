@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -30,7 +31,7 @@ from shared.config import get_settings  # noqa: E402
 from shared.gcs import GcsClient, parse_gs_uri  # noqa: E402
 from shared.hashing import sha256_text  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
-from shared.mime_types import is_hwpx  # noqa: E402
+from shared.mime_types import IMAGE_OCR_MAX_BYTES, is_hwpx  # noqa: E402
 from shared.models import ParseResult, ParseRoute  # noqa: E402
 
 from services.parser.cleanup import cleanup_markdown  # noqa: E402
@@ -59,8 +60,45 @@ class ParseRequestBody(BaseModel):
     # 공용 Parser가 첫 학과 설정에 묶이지 않도록 Sync가 요청별 출력 버킷을 준다.
     # 비우면 기존 직접 호출과 이전 Sync 버전을 위해 환경변수 버킷으로 폴백한다.
     source_bucket: str = Field(default="", alias="sourceBucket", max_length=222)
+    # 생략한 이전 호출만 환경변수를 따른다. 명시한 false는 공용 fallback도 끈다.
+    enable_docai_fallback: bool | None = Field(
+        default=None, alias="enableDocaiFallback", strict=True
+    )
 
     model_config = {"populate_by_name": True}
+
+
+class ImageOcrRequestBody(BaseModel):
+    gcs_uri: str = Field(..., alias="gcsUri")
+    mime_type: str = Field(..., alias="mimeType")
+    file_id: str = Field(..., alias="fileId")
+    enable_image_ocr: bool = Field(default=False, alias="enableImageOcr", strict=True)
+
+
+@app.post("/ocr")
+def ocr_image(req: ImageOcrRequestBody) -> JSONResponse:
+    from services.parser.image_ocr import ImageOcrError, extract_image_text
+
+    if not req.enable_image_ocr:
+        raise HTTPException(status_code=403, detail="IMAGE_OCR_DISABLED")
+    settings = get_settings()
+    if not settings.docai_ocr_processor_id or not settings.docai_ocr_location:
+        raise HTTPException(status_code=503, detail="OCR_NOT_CONFIGURED")
+    gcs = GcsClient(settings)
+    # 원본 크기를 확인하지 못하면 읽지 않는다. 다운로드에도 상한을 적용한다.
+    bucket, name = parse_gs_uri(req.gcs_uri)
+    blob = gcs._client.bucket(bucket).get_blob(name)
+    if blob is None:
+        raise HTTPException(status_code=404, detail="OCR_SOURCE_NOT_FOUND")
+    if blob.size is None or blob.size > IMAGE_OCR_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="OCR_SIZE_LIMIT")
+    data = blob.download_as_bytes(end=IMAGE_OCR_MAX_BYTES)
+    try:
+        text = extract_image_text(data, req.mime_type, settings)
+    except ImageOcrError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Sync가 본문 검증과 해시 비교를 마친 후에만 기존 색인용 객체를 갱신한다.
+    return JSONResponse({"text": text, "route": ParseRoute.IMAGE_DOCAI.value})
 
 
 @app.get("/health")
@@ -77,6 +115,15 @@ def health() -> dict[str, str]:
 @app.post("/parse")
 def parse_document(req: ParseRequestBody) -> JSONResponse:
     settings = get_settings()
+    if req.enable_docai_fallback is not None:
+        settings = replace(
+            settings,
+            enable_docai_fallback=req.enable_docai_fallback,
+            qg_mode=(
+                "fallback" if req.enable_docai_fallback
+                else "log" if settings.qg_mode == "fallback" else settings.qg_mode
+            ),
+        )
     gcs = GcsClient(settings)
 
     filename = (

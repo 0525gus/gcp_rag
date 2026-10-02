@@ -5,6 +5,7 @@ uvicorn[standard]>=0.32.0,<1
 pydantic>=2.9.0,<3
 google-cloud-storage>=2.18.0,<4
 google-cloud-documentai>=3.0.0,<4
+Pillow>=11.0.0,<13
 google-cloud-firestore>=2.19.0,<3
 httpx>=0.27.0,<1
 # HWP(구형 바이너리) → Markdown

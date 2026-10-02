@@ -78,6 +78,7 @@ class ParseRoute(str, Enum):
     RHWP = "RHWP"  # rhwp-python (HWP 바이너리 → MD)
     HWPX = "HWPX"  # python-hwpx (HWPX ZIP+XML → MD)
     PDF_DOCAI = "PDF_DOCAI"  # 선택: QG_MODE=fallback
+    IMAGE_DOCAI = "IMAGE_DOCAI"  # PNG/JPEG OCR 본문
     GCS_EXPORT = "GCS_EXPORT"  # Google Workspace export → GCS
     GCS_COPY = "GCS_COPY"  # 원본 바이너리 → GCS
     NONE = "NONE"

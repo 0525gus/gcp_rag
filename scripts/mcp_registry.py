@@ -135,6 +135,10 @@ class RegistryAdmin:
         if code not in configs:
             return
         disabled = set(configs[code].get("mcpDisabledAudiences", []))
+        # 이미 비활성화된 범위 때문에 Secret Manager 새 버전과 Firestore revision을
+        # 다시 만들지 않는다. teardown 재시도는 이 경로를 자주 지난다.
+        if audience in disabled:
+            return current
         disabled.add(audience)
         configs[code]["mcpDisabledAudiences"] = sorted(disabled)
         self.write(configs, expected_revision=current["revision"])

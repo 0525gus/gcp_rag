@@ -22,6 +22,7 @@
           <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
           <div><span class="eyebrow" id="setupEyebrow">FIRST RUN SETUP</span><h1 id="setupTitle">공통 환경 설정</h1></div>
           <span class="setup-step" id="setupStep">01 / 01</span>
+          <button type="button" class="button ghost compact hidden" id="closeDocaiSetup">닫기</button>
         </header>
         <p class="setup-intro" id="setupIntro">학과 설정을 만들기 전에 이 콘솔이 사용할 GCP 기본 환경을 연결합니다. 검증된 운영 기본값은 자동으로 채워집니다.</p>
         <div class="setup-auth" id="setupAuth" data-status="checking">
@@ -30,6 +31,7 @@
           <button type="button" class="button secondary compact" id="refreshGcloudAuth">다시 확인</button>
         </div>
         <form id="commonSetupForm" novalidate>
+          <div id="commonBootstrapFields">
           <div class="form-grid two-columns">
             <label class="field">
               <span>GCP 프로젝트 ID <em>필수</em></span>
@@ -74,7 +76,16 @@
               <button type="button" class="button primary compact" id="confirmCommonProvision">확인하고 진행</button>
             </div>
           </div>
-          <div class="setup-note"><span>✓</span><p><b>민감정보는 저장하지 않습니다.</b> 프로젝트 ID와 배포 기본값만 <code>config/common.yaml</code>에 기록합니다.</p></div>
+          </div>
+          <section class="docai-setup" aria-labelledby="docaiSetupTitle">
+            <h2 id="docaiSetupTitle">Document AI 연결 <small>선택 사항</small></h2>
+            <p>두 기능의 프로세서를 각각 연결합니다. 학과별 사용 여부는 고급 관리에서 켭니다. 아래 조회는 선택한 프로젝트·리전 기준입니다.</p>
+            <button type="button" class="button secondary compact" id="enableDocaiApi">이 프로젝트의 Document AI API 활성화</button>
+            <div id="docaiSetupOptions"></div>
+            <p class="setup-resource-status" id="docaiSetupStatus" role="status"></p>
+            <p>기본 OCR·Layout Parser는 처리량 기준 과금입니다. 예약 용량·커스텀 모델 배포는 생성하지 않습니다. RAG DB·저장소·Cloud Run 비용은 별도입니다. <a href="https://cloud.google.com/products/document-ai/pricing" target="_blank" rel="noopener noreferrer">공식 요금 확인</a></p>
+          </section>
+          <div class="setup-note"><span>✓</span><p><b>민감정보는 저장하지 않습니다.</b> 프로젝트 ID, 프로세서 ID·리전과 배포 기본값을 <code>config/common.yaml</code>에 기록합니다.</p></div>
           <div class="validation-banner hidden" id="setupValidationBanner"></div>
           <button type="submit" class="button primary setup-submit" id="createCommonConfig">설정 저장하고 시작</button>
         </form>
@@ -331,8 +342,28 @@
                   </section>
                 </div>
                 <details class="advanced-options">
-                  <summary>고급 설정 <span>최소 인스턴스</span></summary>
-                  <div class="form-grid two-columns">
+                  <summary>고급 설정 <span>이미지 OCR · Doc AI fallback · 최소 인스턴스</span></summary>
+                  <div class="form-grid">
+                    <label class="field">
+                      <span>HWP/HWPX 품질 보완 (DocAI fallback)</span>
+                      <select name="enableDocaiFallback">
+                        <option value="false">끄기 (기본값)</option>
+                        <option value="true">켜기</option>
+                      </select>
+                      <small>기본 파싱 결과가 품질 기준에 미달하면 PDF 변환 후 Document AI Layout Parser로 재처리합니다. PDF 변환에 실패하면 재처리할 수 없습니다. 별도 프로세서 설정과 추가 비용이 필요합니다. PNG/JPG 이미지 OCR과 독립된 옵션입니다.</small>
+                      <span class="field-error" data-error="enableDocaiFallback"></span>
+                    </label>
+                    <label class="field">
+                      <span>이미지 텍스트 추출 (PNG/JPG OCR)</span>
+                      <select name="enableImageOcr">
+                        <option value="false">끄기 (기본값)</option>
+                        <option value="true">켜기</option>
+                      </select>
+                      <small>PNG/JPG(JPEG)의 글자를 Document AI OCR 전용 프로세서로 추출해 검색에 포함합니다. HWP/HWPX fallback과 독립적으로 작동하며, 별도 프로세서 설정과 추가 비용이 필요합니다. 표 구조 복원과 스캔 PDF는 포함하지 않습니다. 기존 이미지는 전체 동기화로 수집해 주세요.</small>
+                      <span class="field-error" data-error="enableImageOcr"></span>
+                    </label>
+                  </div>
+                  <div class="form-grid two-columns" id="minInstancesFields">
                     <label class="field"><span>교직원 최소 인스턴스</span><input name="staffMin" type="number" min="0" value="0" /></label>
                     <label class="field" id="studentMinField"><span>학생 최소 인스턴스</span><input name="studentMin" type="number" min="0" value="0" /></label>
                   </div>
@@ -529,6 +560,7 @@
               <h1 id="environmentTitle">운영 환경</h1>
               <p>현재 콘솔이 사용하는 로컬 저장소와 인증 상태입니다.</p>
             </div>
+            <button type="button" class="button secondary" id="openDocaiSetup">공통 설정 · Document AI</button>
           </div>
           <div class="environment-grid" id="environmentGrid">
             <div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div>
@@ -576,9 +608,33 @@
         <section class="drawer-mcp-servers" id="drawerMcpServers" aria-live="polite"></section>
         <div class="drawer-content">
           <div id="drawerContent"></div>
-          <details class="department-management hidden" id="drawerMore">
-            <summary>고급 관리 <span>Cloud 리소스 삭제</span></summary>
-            <div class="department-management-body">
+          <details class="department-management" id="drawerMore">
+            <summary>고급 관리 <span>이미지 OCR · Doc AI fallback · 리소스 삭제</span></summary>
+            <div class="department-management-options form-grid">
+              <label class="field" for="drawerDocaiFallback">
+                <span>HWP/HWPX 품질 보완 (DocAI fallback)</span>
+                <select id="drawerDocaiFallback" disabled>
+                  <option value="false">끄기 (기본값)</option>
+                  <option value="true">켜기</option>
+                </select>
+                <small>기본 파싱 결과가 품질 기준에 미달하면 PDF 변환 후 Document AI Layout Parser로 재처리합니다. PDF 변환에 실패하면 재처리할 수 없습니다. 별도 프로세서 설정과 추가 비용이 필요합니다. PNG/JPG 이미지 OCR과 독립된 옵션입니다.</small>
+              </label>
+              <span class="drawer-option-status" id="drawerDocaiStatus" role="status">설정을 불러오는 중…</span>
+              <button type="button" class="button primary compact" id="saveDrawerDocai" disabled>HWP/HWPX fallback만 저장</button>
+            </div>
+            <div class="department-management-options form-grid">
+              <label class="field" for="drawerImageOcr">
+                <span>이미지 텍스트 추출 (PNG/JPG OCR)</span>
+                <select id="drawerImageOcr" disabled>
+                  <option value="false">끄기 (기본값)</option>
+                  <option value="true">켜기</option>
+                </select>
+                <small>PNG/JPG(JPEG)의 글자를 Document AI OCR 전용 프로세서로 추출해 검색에 포함합니다. HWP/HWPX fallback과 독립적으로 작동하며, 별도 프로세서 설정과 추가 비용이 필요합니다. 표 구조 복원과 스캔 PDF는 포함하지 않습니다. 기존 이미지는 전체 동기화로 수집해 주세요. 끄기는 이후 OCR 처리를 중단하며 기존 색인 삭제는 별도입니다.</small>
+              </label>
+              <span class="drawer-option-status" id="drawerImageOcrStatus" role="status">설정을 불러오는 중…</span>
+              <button type="button" class="button primary compact" id="saveDrawerImageOcr" disabled>이미지 OCR만 저장</button>
+            </div>
+            <div class="department-management-body" id="drawerDeleteSection">
               <b>학과 리소스 삭제</b>
               <p>이 학과의 MCP, 코퍼스, 버킷과 동기화 이력을 선택하여 영구 삭제합니다. 서비스가 중단되며 삭제한 데이터는 복구할 수 없습니다.</p>
               <button type="button" class="button danger compact" id="drawerDelete">삭제 대상 검토</button>

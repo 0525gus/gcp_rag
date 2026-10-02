@@ -29,6 +29,7 @@ import urllib.error
 import urllib.request
 import uuid
 import webbrowser
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
@@ -44,7 +45,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts import dept_config
+from scripts import dept_config, docai_setup
 from shared.source_links import citation_view_uri
 
 CONFIG_DIR = ROOT / "config"
@@ -125,6 +126,12 @@ _SYNC_TARGET_CACHE_TTL_SECONDS = 30
 _CLOUD_DEPARTMENT_CONFIG_CACHE_LOCK = threading.Lock()
 _CLOUD_DEPARTMENT_CONFIG_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
 _CLOUD_DEPARTMENT_CONFIG_CACHE_TTL_SECONDS = 60
+_MCP_REGISTRY_READ_CACHE_LOCK = threading.Lock()
+_MCP_REGISTRY_READ_CACHE: dict[tuple[str, str, str], dict[str, Any]] = {}
+_MCP_REGISTRY_READ_CACHE_TTL_SECONDS = 15
+_UNIFIED_MCP_SERVICE_CACHE_LOCK = threading.Lock()
+_UNIFIED_MCP_SERVICE_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_UNIFIED_MCP_SERVICE_CACHE_TTL_SECONDS = 15
 
 PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, str]] = {
     "bucketHwp": {"kind": "bucket", "label": "HWP 원본 버킷"},
@@ -220,10 +227,30 @@ def _mcp_registry_admin() -> Any:
 def _mcp_registry_read(
     *, allow_empty: bool = False
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-    try:
-        _snap, record, configs = _mcp_registry_admin().read()
-    except Exception as exc:
-        raise RuntimeError("통합 MCP Cloud 등록부 조회에 실패했습니다.") from exc
+    common = _common()
+    cache_key = (
+        str(common.get("GCP_PROJECT_ID") or ""),
+        str(common.get("GCP_REGION") or "asia-northeast3"),
+        str(common.get("FIRESTORE_DATABASE") or "rag-sync-state"),
+    )
+    now = time.monotonic()
+    # 목록·상세 화면이 연달아 같은 등록부를 요청한다. 짧은 캐시를 잠금 안에서
+    # 채워 동시 요청도 Firestore/Secret Manager를 한 번만 호출하게 한다.
+    with _MCP_REGISTRY_READ_CACHE_LOCK:
+        cached = _MCP_REGISTRY_READ_CACHE.get(cache_key)
+        if cached and now - float(cached["created"]) < _MCP_REGISTRY_READ_CACHE_TTL_SECONDS:
+            record = copy.deepcopy(cached["record"])
+            configs = copy.deepcopy(cached["configs"])
+        else:
+            try:
+                _snap, record, configs = _mcp_registry_admin().read()
+            except Exception as exc:
+                raise RuntimeError("통합 MCP Cloud 등록부 조회에 실패했습니다.") from exc
+            _MCP_REGISTRY_READ_CACHE[cache_key] = {
+                "created": now,
+                "record": copy.deepcopy(record),
+                "configs": copy.deepcopy(configs),
+            }
     if not record and allow_empty:
         return {}, {}
     if not record or not isinstance(configs, dict):
@@ -236,6 +263,8 @@ def _mcp_registry_mutate(method: str, *args: Any) -> Any:
         result = getattr(_mcp_registry_admin(), method)(*args)
     except Exception as exc:
         raise RuntimeError("통합 MCP Cloud 등록부 변경에 실패했습니다. 설정을 새로 조회한 후 다시 시도해 주세요.") from exc
+    with _MCP_REGISTRY_READ_CACHE_LOCK:
+        _MCP_REGISTRY_READ_CACHE.clear()
     with _CLOUD_DEPARTMENT_CONFIG_CACHE_LOCK:
         _CLOUD_DEPARTMENT_CONFIG_CACHE.clear()
     return result
@@ -243,11 +272,24 @@ def _mcp_registry_mutate(method: str, *args: Any) -> Any:
 
 def _unified_mcp_service() -> dict[str, Any]:
     common = _common()
-    ok, service = _gcloud_json([
-        "run", "services", "describe", "rag-mcp",
-        f"--region={common.get('GCP_REGION') or 'asia-northeast3'}",
-        f"--project={common.get('GCP_PROJECT_ID') or ''}",
-    ], timeout=30)
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    cache_key = (project, region)
+    now = time.monotonic()
+    with _UNIFIED_MCP_SERVICE_CACHE_LOCK:
+        cached = _UNIFIED_MCP_SERVICE_CACHE.get(cache_key)
+        if cached and now - float(cached["created"]) < _UNIFIED_MCP_SERVICE_CACHE_TTL_SECONDS:
+            return copy.deepcopy(cached["service"])
+        ok, service = _gcloud_json([
+            "run", "services", "describe", "rag-mcp",
+            f"--region={region}",
+            f"--project={project}",
+        ], timeout=30)
+        if ok and isinstance(service, dict):
+            _UNIFIED_MCP_SERVICE_CACHE[cache_key] = {
+                "created": now,
+                "service": copy.deepcopy(service),
+            }
     if not ok or not isinstance(service, dict):
         raise RuntimeError("공통 rag-mcp 서비스를 조회하지 못했습니다.")
     return service
@@ -297,6 +339,10 @@ def validate_common_candidate(payload: dict[str, Any]) -> tuple[dict[str, Any], 
         "FIRESTORE_DATABASE": firestore,
         **COMMON_DEFAULTS,
     }
+    try:
+        candidate.update(docai_setup.selection_fields(payload.get("docai", {})))
+    except ValueError as exc:
+        _field_error(errors, "docai", str(exc))
     return candidate, {"valid": not errors, "fieldErrors": errors}
 
 
@@ -519,6 +565,17 @@ def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) 
         except (TypeError, ValueError):
             _field_error(errors, f"minInstances.{audience}", "0 이상의 정수여야 합니다.")
 
+    enable_docai_fallback = payload.get("enableDocaiFallback", False)
+    if not isinstance(enable_docai_fallback, bool):
+        _field_error(errors, "enableDocaiFallback", "켜기 또는 끄기를 선택해 주세요.")
+    elif enable_docai_fallback and not all(common.get(k) for k in ("DOCAI_PROCESSOR_ID", "DOCAI_LOCATION")):
+        _field_error(errors, "enableDocaiFallback", "공통 설정의 Layout Parser ID와 리전을 먼저 설정해 주세요.")
+    enable_image_ocr = payload.get("enableImageOcr", False)
+    if not isinstance(enable_image_ocr, bool):
+        _field_error(errors, "enableImageOcr", "켜기 또는 끄기를 선택해 주세요.")
+    elif enable_image_ocr and not all(common.get(k) for k in ("DOCAI_OCR_PROCESSOR_ID", "DOCAI_OCR_LOCATION")):
+        _field_error(errors, "enableImageOcr", "공통 설정의 OCR 프로세서 ID와 리전을 먼저 설정해 주세요.")
+
     candidate: dict[str, Any] = {
         "name": name,
         "corpora": {"staff": staff_corpus},
@@ -528,6 +585,8 @@ def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) 
             "syncFolderIds": sync_ids,
         },
         "minInstances": min_instances,
+        "enableDocaiFallback": enable_docai_fallback,
+        "enableImageOcr": enable_image_ocr,
     }
     if split_enabled:
         candidate["corpora"]["student"] = student_corpus
@@ -562,6 +621,8 @@ def _render_yaml(
         "buckets": body["buckets"],
         "drive": body["drive"],
         "minInstances": body["minInstances"],
+        "enableDocaiFallback": body.get("enableDocaiFallback", False),
+        "enableImageOcr": body.get("enableImageOcr", False),
     }
     return yaml.safe_dump(ordered, allow_unicode=True, sort_keys=False, width=1000)
 
@@ -717,6 +778,8 @@ def cloud_department_public_config(code: str) -> dict[str, Any]:
         "buckets": copy.deepcopy(config.get("buckets") or {}),
         "drive": copy.deepcopy(config.get("drive") or {}),
         "minInstances": copy.deepcopy(config.get("minInstances") or {}),
+        "enableDocaiFallback": config.get("enableDocaiFallback", False),
+        "enableImageOcr": config.get("enableImageOcr", False),
         "corpusMode": "split" if (config.get("corpora") or {}).get("student") else "single",
         "configRevision": revision,
         "source": "cloud",
@@ -756,10 +819,16 @@ def _cloud_run_management_annotation(service: dict[str, Any]) -> str:
 
 
 def _unified_department_records() -> list[dict[str, Any]]:
-    registry, configs = _mcp_registry_read(allow_empty=True)
-    if not registry:
-        return []
-    service = _unified_mcp_service()
+    # 등록부(Firestore + Secret Manager)와 Cloud Run 상태는 서로 독립적이다.
+    # 직렬 조회하지 않고 동시에 시작해 첫 화면 지연을 둘 중 느린 쪽으로 제한한다.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        registry_future = pool.submit(_mcp_registry_read, allow_empty=True)
+        service_future = pool.submit(_unified_mcp_service)
+        registry, configs = registry_future.result()
+        if not registry:
+            service_future.cancel()
+            return []
+        service = service_future.result()
     records = []
     for code, config in sorted(configs.items()):
         servers = _unified_mcp_servers(config, registry, service)
@@ -2941,7 +3010,17 @@ def common_runtime_state() -> dict[str, Any]:
     def _probe(item: tuple[str, str, str, str]) -> dict[str, Any]:
         key, kind, name, purpose = item
         ok, data = _gcloud_json(commands[kind](name), timeout=25)
-        base = {"key": key, "kind": kind, "name": name, "purpose": purpose}
+        display_name = {
+            "workflow": f"{name} · Workflow",
+            "scheduler": f"{name} · Scheduler",
+        }.get(kind, name)
+        base = {
+            "key": key,
+            "kind": kind,
+            "name": name,
+            "displayName": display_name,
+            "purpose": purpose,
+        }
         if not ok or not isinstance(data, dict):
             missing = _missing_resource_output(str(data or ""))
             return {
@@ -3017,6 +3096,8 @@ def runtime_env_drift(cache: _StatusRunCache | None = None) -> dict[str, Any]:
 
     expected_by_service = {
         "rag-parser": {
+            **{key: str(common[key] or (region if key == "DOCAI_LOCATION" else "")) for keys in docai_setup.KINDS.values()
+               for key in keys[1:] if key in common},
             "GCS_HWP_ORIGINAL_BUCKET": base_env.get("GCS_HWP_ORIGINAL_BUCKET", ""),
             "GCS_SOURCE_BUCKET": base_env.get("GCS_SOURCE_BUCKET", ""),
             "RAG_CORPUS_NAME": base_env.get("RAG_CORPUS_NAME", ""),
@@ -3055,7 +3136,7 @@ def runtime_env_drift(cache: _StatusRunCache | None = None) -> dict[str, Any]:
                 "expected": str(value or "")[:200],
             }
             for key, value in expected.items()
-            if value and str(deployed.get(key) or "") != str(value)
+            if (value or key.startswith("DOCAI_")) and str(deployed.get(key) or "") != str(value)
         ]
         if stale:
             drifted = True
@@ -3468,7 +3549,9 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
 
     targets: list[dict[str, Any]] = []
     audiences = ["staff", "student"] if str(corpora.get("student") or "").strip() else ["staff"]
+    disabled_audiences = set(config.get("mcpDisabledAudiences") or [])
     for audience in audiences:
+        already_disabled = audience in disabled_audiences
         targets.append(
             _teardown_target(
                 f"mcp-{audience}",
@@ -3476,8 +3559,14 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
                 f"MCP 접근 중지 ({audience})" if _unified_mcp_enabled(common) else f"MCP Cloud Run ({audience})",
                 f"{normalised}/{audience}" if _unified_mcp_enabled(common) else f"rag-mcp-{normalised}-{audience}",
                 [],
-                note="이 학과·대상의 인증 키 접근을 중지합니다. 공통 MCP 서비스는 유지됩니다." if _unified_mcp_enabled(common) else "검색 엔드포인트가 즉시 사라집니다. 연결된 챗봇은 404 를 받습니다.",
-                meta={"audience": audience},
+                note=(
+                    "이미 접근이 중지되어 있어 Cloud 등록부를 다시 쓰지 않습니다."
+                    if _unified_mcp_enabled(common) and already_disabled
+                    else "이 학과·대상의 인증 키 접근을 중지합니다. 공통 MCP 서비스는 유지됩니다."
+                    if _unified_mcp_enabled(common)
+                    else "검색 엔드포인트가 즉시 사라집니다. 연결된 챗봇은 404 를 받습니다."
+                ),
+                meta={"audience": audience, "alreadyDisabled": already_disabled},
             )
         )
     for audience in ("staff", "student"):
@@ -3811,21 +3900,36 @@ def _firestore_collection_names() -> dict[str, str]:
 
 
 def _firestore_client(project: str):
-    """Cloud 등록부와 운영 상태를 관리할 Firestore 클라이언트를 만든다."""
+    """활성 gcloud 계정으로 운영 상태를 관리할 Firestore 클라이언트를 만든다.
+
+    ADC는 gcloud 활성 계정과 별도로 저장된다. 로컬 콘솔이 서로 다른 두 계정을
+    섞으면 리소스 조회는 되지만 Firestore 삭제만 403으로 실패할 수 있으므로,
+    다른 관리 API와 동일하게 매번 활성 gcloud 계정의 토큰을 사용한다.
+    """
     try:
         from google.cloud import firestore
+        from google.oauth2.credentials import Credentials
     except ImportError as exc:  # pragma: no cover - 설치 환경에 따라 갈린다
         raise RuntimeError(
             "google-cloud-firestore 가 설치되어 있지 않습니다. "
             "`pip install google-cloud-firestore` 후 다시 시도하세요."
         ) from exc
-    return firestore.Client(project=project, database=_firestore_database_name())
+    return firestore.Client(
+        project=project,
+        database=_firestore_database_name(),
+        credentials=Credentials(token=_provision_access_token()),
+    )
 
 
 _FIRESTORE_DELETE_BATCH = 200
 
 
-def _delete_department_firestore_state(drive_ids: list[str], project: str) -> str:
+def _delete_department_firestore_state(
+    drive_ids: list[str],
+    project: str,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> str:
     """이 학과 공유드라이브에 속한 동기화 이력을 지운다.
 
     doc_state 는 fileId 하나로 전 학과가 같은 컬렉션을 쓴다. 학과를 가르는 축은
@@ -3836,41 +3940,70 @@ def _delete_department_firestore_state(drive_ids: list[str], project: str) -> st
     """
     if not drive_ids:
         return "대상 없음"
+    from google.cloud.firestore_v1.base_query import FieldFilter
+
     client = _firestore_client(project)
     names = _firestore_collection_names()
     docs = client.collection(names["docState"])
     deleted_docs = 0
     deleted_mappings = 0
-    deleted_queue = 0
+    deleted_queue_refs = 0
+    deleted_tokens = 0
+    batch = client.batch()
+    pending_writes = 0
+
+    def detail(*, running: bool = False) -> str:
+        prefix = "Firestore 배치 삭제 중 · " if running else ""
+        return (
+            f"{prefix}문서 {deleted_docs}건 · 매핑 {deleted_mappings}건 · "
+            f"큐 참조 {deleted_queue_refs}건 · 페이지 토큰 {deleted_tokens}건 삭제"
+        )
+
+    def flush() -> None:
+        nonlocal batch, pending_writes
+        if not pending_writes:
+            return
+        batch.commit()
+        pending_writes = 0
+        if progress is not None:
+            progress(detail(running=True))
+        batch = client.batch()
+
+    def queue_delete(reference: Any) -> None:
+        nonlocal pending_writes
+        batch.delete(reference)
+        pending_writes += 1
+        if pending_writes >= _FIRESTORE_DELETE_BATCH:
+            flush()
 
     # `in` 은 한 번에 30개까지다. 학과당 드라이브는 한두 개지만 상한은 지킨다.
     for start in range(0, len(drive_ids), 30):
         chunk = drive_ids[start : start + 30]
-        for snapshot in docs.where("driveId", "in", chunk).stream():
+        for snapshot in docs.where(
+            filter=FieldFilter("driveId", "in", chunk)
+        ).stream():
             file_id = snapshot.id
             for mapping in snapshot.reference.collection("rag_files").list_documents():
-                mapping.delete()
                 deleted_mappings += 1
+                queue_delete(mapping)
             for collection in (names["dlq"], names["splitQueue"]):
                 reference = client.collection(collection).document(file_id)
-                if reference.get().exists:
-                    reference.delete()
-                    deleted_queue += 1
-            snapshot.reference.delete()
+                # Firestore delete는 문서가 없어도 성공한다. 존재 확인용 get을 없애
+                # 문서마다 두 번씩 발생하던 불필요한 네트워크 왕복을 피한다.
+                deleted_queue_refs += 1
+                queue_delete(reference)
             deleted_docs += 1
+            queue_delete(snapshot.reference)
 
-    deleted_tokens = 0
     tokens = client.collection(names["syncTokens"])
     for drive_id in drive_ids:
         reference = tokens.document(drive_id)
-        if reference.get().exists:
-            reference.delete()
-            deleted_tokens += 1
+        deleted_tokens += 1
+        queue_delete(reference)
 
-    return (
-        f"문서 {deleted_docs}건 · 매핑 {deleted_mappings}건 · "
-        f"큐 {deleted_queue}건 · 페이지 토큰 {deleted_tokens}건 삭제"
-    )
+    flush()
+
+    return detail()
 
 
 def _delete_gcs_prefix(uri: str) -> str:
@@ -3956,8 +4089,13 @@ def _execute_teardown_run(run_id: str) -> None:
                     raise ValueError("공통 MCP는 학과 삭제 대상이 될 수 없습니다.")
                 detail = _delete_cloud_run_service(name, project, region)
             elif kind == "mcpRoute":
-                _mcp_registry_mutate("disable_audience", run["code"], target["meta"]["audience"])
-                detail = "해당 학과·대상 접근 중지 완료 · 공통 MCP 유지"
+                if target["meta"].get("alreadyDisabled"):
+                    detail = "이미 접근 중지됨 · Cloud 등록부 변경 없음 · 공통 MCP 유지"
+                else:
+                    _mcp_registry_mutate(
+                        "disable_audience", run["code"], target["meta"]["audience"]
+                    )
+                    detail = "해당 학과·대상 접근 중지 완료 · 공통 MCP 유지"
             elif kind == "mcpRegistryConfig":
                 _mcp_registry_mutate("remove_department", run["code"])
                 detail = "학과 Cloud 등록 설정 삭제 완료 · 공통 MCP 유지"
@@ -3972,7 +4110,11 @@ def _execute_teardown_run(run_id: str) -> None:
                 detail = _delete_bucket_resource(name)
             elif kind == "firestoreState":
                 detail = _delete_department_firestore_state(
-                    list((target.get("meta") or {}).get("driveIds") or []), project
+                    list((target.get("meta") or {}).get("driveIds") or []),
+                    project,
+                    progress=lambda current, target_key=key: _set_teardown_target(
+                        run_id, target_key, status="RUNNING", detail=current
+                    ),
                 )
             elif kind == "metadataObjects":
                 detail = _delete_gcs_prefix(name)
@@ -3982,9 +4124,16 @@ def _execute_teardown_run(run_id: str) -> None:
             else:
                 raise ValueError(f"지원하지 않는 삭제 대상: {kind}")
             _set_teardown_target(run_id, key, status="COMPLETE", detail=detail)
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        # 백그라운드 작업의 최종 예외 경계다. Google SDK의 PermissionDenied 같은
+        # 예외를 놓치면 thread만 종료되고 화면은 영원히 RUNNING으로 남는다.
+        except Exception as exc:  # noqa: BLE001
             failed += 1
-            _set_teardown_target(run_id, key, status="FAILED", detail=str(exc)[:400])
+            _set_teardown_target(
+                run_id,
+                key,
+                status="FAILED",
+                detail=f"{type(exc).__name__}: {exc}"[:400],
+            )
 
     with _TEARDOWN_LOCK:
         current = _TEARDOWN_RUNS.get(run_id)
@@ -6722,6 +6871,120 @@ def start_gcloud_login(request: Request) -> JSONResponse:
     )
 
 
+_DOCAI_SETUP = docai_setup.ProcessorSetup(
+    lambda *a, **kw: _http_json(*a, **kw),
+    lambda *a, **kw: _http_post_json(*a, **kw),
+    lambda: _provision_access_token(),
+)
+_DOCAI_CONFIG_LOCK = threading.Lock()
+
+
+def _docai_common_view():
+    path = CONFIG_DIR / "common.yaml"
+    raw = path.read_bytes()
+    common = yaml.safe_load(raw)
+    return {
+        "projectId": common["GCP_PROJECT_ID"],
+        "configRevision": hashlib.sha256(raw).hexdigest(),
+        "docai": {kind: {"processorId": str(common.get(keys[1]) or ""),
+                         "location": str(common.get(keys[2]) or "") if common.get(keys[1]) else ""}
+                  for kind, keys in docai_setup.KINDS.items()},
+        "locations": docai_setup.LOCATIONS,
+    }
+
+
+@app.get("/api/v1/common-config/docai")
+def docai_common_config() -> JSONResponse:
+    try:
+        return JSONResponse(_docai_common_view())
+    except (OSError, KeyError, TypeError, yaml.YAMLError):
+        return JSONResponse({"error": {"message": "공통 설정을 먼저 준비해 주세요."}}, status_code=422)
+
+
+@app.post("/api/v1/common-config/docai/lookup")
+async def lookup_docai_processors(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    try:
+        if not isinstance(payload, dict):
+            raise ValueError("조회 요청을 확인해 주세요.")
+        result = _DOCAI_SETUP.lookup(payload.get("projectId"), payload.get("kind"), payload.get("location"))
+        return JSONResponse(result)
+    except (ValueError, RuntimeError, TypeError) as exc:
+        return JSONResponse({"error": {"message": str(exc)[:400]}}, status_code=422)
+
+
+@app.post("/api/v1/common-config/docai/create")
+async def create_docai_processor(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    try:
+        if not isinstance(payload, dict) or set(payload) != {"planId"} or not isinstance(payload["planId"], str):
+            raise ValueError("먼저 프로세서를 조회하고 생성 계획을 확인해 주세요.")
+        return JSONResponse(_DOCAI_SETUP.create(payload["planId"]), status_code=201)
+    except (ValueError, RuntimeError) as exc:
+        return JSONResponse({"error": {"message": str(exc)[:400]}}, status_code=422)
+
+
+@app.post("/api/v1/common-config/docai/check")
+async def check_docai_processor(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    try:
+        if not isinstance(payload, dict) or not isinstance(payload.get("selection"), dict):
+            raise ValueError("프로세서를 선택해 주세요.")
+        _DOCAI_SETUP.base(payload.get("projectId"), payload.get("kind"), payload["selection"].get("location"))
+        _DOCAI_SETUP.verify(payload["projectId"], payload["kind"], payload["selection"])
+        return JSONResponse({"ok": True, "message": "현재 로그인 계정으로 존재·종류·활성 상태를 확인했습니다. 실제 문서 처리와 Parser 실행 계정 권한은 별도 검증이 필요합니다."})
+    except (ValueError, RuntimeError, TypeError) as exc:
+        return JSONResponse({"error": {"message": str(exc)[:400]}}, status_code=422)
+
+
+@app.post("/api/v1/common-config/docai/enable-api")
+async def enable_docai_api(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    try:
+        project = payload.get("projectId") if isinstance(payload, dict) else ""
+        _DOCAI_SETUP.base(project, "ocr", "us")
+        _enable_gcloud_service("documentai.googleapis.com", project)
+        return JSONResponse({"enabled": True})
+    except (ValueError, RuntimeError) as exc:
+        return JSONResponse({"error": {"message": str(exc)[:400]}}, status_code=422)
+
+
+@app.put("/api/v1/common-config/docai")
+async def save_docai_common_config(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    try:
+        if not isinstance(payload, dict) or set(payload) != {"docai", "configRevision"}:
+            raise ValueError("Document AI 설정 요청을 확인해 주세요.")
+        fields = docai_setup.selection_fields(payload["docai"])
+        with _DOCAI_CONFIG_LOCK:
+            view = _docai_common_view()
+            if payload["configRevision"] != view["configRevision"]:
+                return JSONResponse({"error": {"message": "공통 설정이 변경됐습니다. 화면을 다시 열어 주세요."}}, status_code=409)
+            for kind, selection in payload["docai"].items():
+                _DOCAI_SETUP.verify(view["projectId"], kind, selection)
+            target = CONFIG_DIR / "common.yaml"
+            # Recheck after remote I/O; preserve every unrelated setting.
+            raw = target.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != view["configRevision"]:
+                return JSONResponse({"error": {"message": "공통 설정이 변경됐습니다. 다시 열어 주세요."}}, status_code=409)
+            common = yaml.safe_load(raw)
+            common.update(fields)
+            temp = CONFIG_DIR / f".common.docai.{uuid.uuid4().hex}.tmp"
+            try:
+                temp.write_text(yaml.safe_dump(common, allow_unicode=True, sort_keys=False), encoding="utf-8")
+                os.replace(temp, target)
+            finally:
+                temp.unlink(missing_ok=True)
+            return JSONResponse({**_docai_common_view(), "deploymentRequired": True})
+    except (ValueError, RuntimeError, OSError, TypeError, KeyError, yaml.YAMLError) as exc:
+        return JSONResponse({"error": {"message": str(exc)[:400]}}, status_code=422)
+
+
 @app.post("/api/v1/common-config")
 async def create_common(request: Request) -> JSONResponse:
     _require_local_session(request)
@@ -6781,6 +7044,11 @@ async def create_common(request: Request) -> JSONResponse:
             },
             status_code=422,
         )
+    try:
+        for kind, selection in payload.get("docai", {}).items():
+            _DOCAI_SETUP.verify(candidate["GCP_PROJECT_ID"], kind, selection)
+    except (ValueError, RuntimeError) as exc:
+        return JSONResponse({"error": {"message": str(exc)[:400]}}, status_code=422)
     try:
         target = create_common_config(candidate)
     except FileExistsError:
@@ -7252,7 +7520,7 @@ async def update(code: str, request: Request) -> JSONResponse:
         if cloud_revision != current["configRevision"]:
             raise RuntimeError("Cloud 설정이 변경되었습니다. 다시 열어 주세요.")
         merged = copy.deepcopy(existing)
-        for key in ("name", "corpora", "buckets", "drive", "minInstances"):
+        for key in ("name", "corpora", "buckets", "drive", "minInstances", "enableDocaiFallback", "enableImageOcr"):
             merged[key] = copy.deepcopy(candidate[key])
         run = start_mcp_deployment(code, cloud_config=merged)
     except FileExistsError as exc:
@@ -7281,6 +7549,81 @@ async def update(code: str, request: Request) -> JSONResponse:
         },
         status_code=202,
     )
+
+
+@app.put("/api/v1/departments/{code}/docai-fallback")
+async def update_docai_fallback(code: str, request: Request) -> JSONResponse:
+    return await _update_parser_options(code, request, option="enableDocaiFallback")
+
+
+@app.put("/api/v1/departments/{code}/image-ocr")
+async def update_image_ocr(code: str, request: Request) -> JSONResponse:
+    return await _update_parser_options(code, request, option="enableImageOcr")
+
+
+@app.put("/api/v1/departments/{code}/parser-options")
+async def update_parser_options(code: str, request: Request) -> JSONResponse:
+    return await _update_parser_options(code, request)
+
+
+async def _update_parser_options(
+    code: str, request: Request, *, option: str | None = None,
+) -> JSONResponse:
+    """상세 패널의 파서 옵션만 변경하고 나머지 Cloud 설정은 보존한다."""
+    _require_local_session(request)
+    payload = await request.json()
+    allowed_keys = ({option, "configRevision"},) if option else (
+        {"enableDocaiFallback", "configRevision"},
+        {"enableDocaiFallback", "enableImageOcr", "configRevision"},
+    )
+    if (
+        not isinstance(payload, dict)
+        or set(payload) not in allowed_keys
+        or any(not isinstance(payload[key], bool) for key in payload if key != "configRevision")
+        or not isinstance(payload.get("configRevision"), str)
+        or not payload["configRevision"]
+    ):
+        return JSONResponse(
+            {"error": {"code": "INVALID_UPDATE", "message": "설정 변경 요청이 올바르지 않습니다."}},
+            status_code=400,
+        )
+    try:
+        existing, revision = cloud_department_config(code)
+        if payload["configRevision"] != revision:
+            return JSONResponse(
+                {"error": {"code": "REVISION_CONFLICT", "message": "설정이 다른 곳에서 변경되었습니다. 학과 상세를 다시 열어 주세요."}},
+                status_code=409,
+            )
+        merged = copy.deepcopy(existing)
+        if "enableDocaiFallback" in payload:
+            if payload["enableDocaiFallback"] and not all(
+                _common().get(k) for k in ("DOCAI_PROCESSOR_ID", "DOCAI_LOCATION")
+            ):
+                raise ValueError("공통 설정의 Layout Parser ID와 리전을 먼저 설정해 주세요.")
+            merged["enableDocaiFallback"] = payload["enableDocaiFallback"]
+        if "enableImageOcr" in payload:
+            if payload["enableImageOcr"] and not all(
+                _common().get(k) for k in ("DOCAI_OCR_PROCESSOR_ID", "DOCAI_OCR_LOCATION")
+            ):
+                raise ValueError("공통 설정의 OCR 프로세서 ID와 리전을 먼저 설정해 주세요.")
+            merged["enableImageOcr"] = payload["enableImageOcr"]
+        run = start_mcp_deployment(code, cloud_config=merged)
+    except FileNotFoundError:
+        return JSONResponse(
+            {"error": {"code": "NOT_FOUND", "message": "학과 설정을 찾을 수 없습니다."}},
+            status_code=404,
+        )
+    except FileExistsError as exc:
+        return JSONResponse(
+            {"error": {"code": "MCP_DEPLOYMENT_RUNNING", "message": "이 학과의 설정 반영이 이미 진행 중입니다.", "runId": str(exc)}},
+            status_code=409,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, yaml.YAMLError) as exc:
+        return JSONResponse(
+            {"error": {"code": "CLOUD_UPDATE_FAILED", "message": str(exc)[:400]}},
+            status_code=422,
+        )
+    return JSONResponse({"code": code, "deployment": run}, status_code=202)
 
 
 @app.get("/api/v1/sync-runs")

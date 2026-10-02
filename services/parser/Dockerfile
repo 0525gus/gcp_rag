@@ -5,7 +5,7 @@ FROM python:3.12-slim-bookworm
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libexpat1 \
+    && apt-get install -y --no-install-recommends libexpat1 libreoffice-writer fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements-parser.txt /app/requirements.txt

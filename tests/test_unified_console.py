@@ -17,6 +17,7 @@ def unified(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir(parents=True)
     common = {"GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3",
+              "DOCAI_PROCESSOR_ID": "layout", "DOCAI_LOCATION": "us",
               "MCP_UNIFIED_ENABLED": True, "GCS_HWP_ORIGINAL_BUCKET": "common-hwp",
               "GCS_SOURCE_BUCKET": "common-source", "GCS_METADATA_BUCKET": "shared-metadata"}
     (config_dir / "common.yaml").write_text(yaml.safe_dump(common), encoding="utf-8")
@@ -88,6 +89,149 @@ def test_registry_inventory_public_config_and_keys(unified):
     public = json.dumps(records)
     assert all(key not in public for cfg in unified.configs.values() for key in cfg["keys"].values())
     assert not dept_gui.department_code_availability("ee")["available"]
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_docai_choice_is_saved_by_update_and_returned_to_editor(unified, monkeypatch, enabled):
+    from fastapi.testclient import TestClient
+
+    # 반대값에서 시작해 켜기와 끄기 모두 저장되는지 확인한다.
+    unified.configs["cs"]["enableDocaiFallback"] = not enabled
+    unified.configs["cs"]["drive"]["syncFolderIds"].append("student-cs")
+    monkeypatch.setattr(dept_gui, "_merge_live_resource_validation", lambda *a: None)
+    monkeypatch.setattr(dept_gui, "_http_json", lambda *a, **kw: (200, {"status": "ok"}, 1))
+    maps = []
+    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw:
+                        maps.append(json.loads(dept_gui.cloud_departments_json())) or "cs")
+    client = TestClient(dept_gui.app)
+    headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"],
+               "Origin": "http://testserver"}
+    payload = client.get("/api/v1/departments/cs/config").json()
+    assert payload["enableDocaiFallback"] is not enabled
+    payload["enableDocaiFallback"] = enabled
+    preview = client.post("/api/v1/departments/cs/preview", headers=headers, json=payload)
+    assert preview.json()["valid"], preview.text
+    assert yaml.safe_load(preview.json()["yamlPreview"])["enableDocaiFallback"] is enabled
+    response = client.put("/api/v1/departments/cs", headers=headers, json=payload)
+    assert response.status_code == 202, response.text
+    dept_gui._execute_mcp_deployment(response.json()["deployment"]["runId"])
+    assert client.get("/api/v1/departments/cs/config").json()["enableDocaiFallback"] is enabled
+    assert maps[-1]["cs"]["enableDocaiFallback"] is enabled
+    assert maps[-1]["ee"]["enableDocaiFallback"] is False
+
+
+@pytest.mark.parametrize("value", ["false", 1, None, {}])
+def test_docai_choice_rejects_non_boolean_values(unified, value):
+    payload = {**dept_gui.department_public_config_any("cs"), "enableDocaiFallback": value}
+    _, validation = dept_gui.validate_candidate(payload, check_existing=False)
+    assert "enableDocaiFallback" in validation["fieldErrors"]
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.parametrize("fallback", [True, False])
+@pytest.mark.parametrize("endpoint", ["image-ocr", "parser-options"])
+def test_image_ocr_option_save_is_independent_and_reaches_sync_map(unified, monkeypatch, enabled, fallback, endpoint):
+    from fastapi.testclient import TestClient
+
+    common = dept_gui._common()
+    common.update(DOCAI_OCR_PROCESSOR_ID="ocr", DOCAI_OCR_LOCATION="us")
+    monkeypatch.setattr(dept_gui, "_common", lambda: common)
+    monkeypatch.setattr(dept_gui, "_http_json", lambda *a, **kw: (200, {"status": "ok"}, 1))
+    maps = []
+    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw:
+                        maps.append(json.loads(dept_gui.cloud_departments_json())) or "cs")
+    unified.configs["cs"]["enableDocaiFallback"] = fallback
+    original = copy.deepcopy(unified.configs["cs"])
+    client = TestClient(dept_gui.app)
+    headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"], "Origin": "http://testserver"}
+    config = dept_gui.department_public_config_any("cs")
+    payload = {
+        "enableImageOcr": enabled,
+        "configRevision": config["configRevision"],
+    }
+    if endpoint == "parser-options":
+        payload["enableDocaiFallback"] = fallback
+    response = client.put(f"/api/v1/departments/cs/{endpoint}", headers=headers, json=payload)
+    assert response.status_code == 202, response.text
+    dept_gui._execute_mcp_deployment(response.json()["deployment"]["runId"])
+    public = dept_gui.department_public_config_any("cs")
+    assert public["enableImageOcr"] is enabled and public["enableDocaiFallback"] is fallback
+    assert unified.configs["cs"] == {**original, "enableImageOcr": enabled}
+    assert maps[-1]["cs"]["enableImageOcr"] is enabled
+    assert maps[-1]["ee"]["enableImageOcr"] is False
+
+
+@pytest.mark.parametrize("endpoint", ["image-ocr", "parser-options"])
+def test_image_ocr_enable_requires_explicit_processor_and_location(unified, endpoint):
+    from fastapi.testclient import TestClient
+
+    config = dept_gui.department_public_config_any("cs")
+    _, validation = dept_gui.validate_candidate({**config, "enableImageOcr": True}, check_existing=False)
+    assert "enableImageOcr" in validation["fieldErrors"]
+    client = TestClient(dept_gui.app)
+    headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"], "Origin": "http://testserver"}
+    payload = {"enableImageOcr": True, "configRevision": config["configRevision"]}
+    if endpoint == "parser-options":
+        payload["enableDocaiFallback"] = False
+    response = client.put(f"/api/v1/departments/cs/{endpoint}", headers=headers, json=payload)
+    assert response.status_code == 422
+    assert not dept_gui._MCP_DEPLOY_RUNS
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_drawer_docai_save_preserves_other_settings(unified, monkeypatch, enabled):
+    from fastapi.testclient import TestClient
+
+    # OCR이 이미 켜져 있어도 fallback만 저장할 때는 OCR 설정을 변경·검증하지 않는다.
+    unified.configs["cs"]["enableImageOcr"] = True
+    original = copy.deepcopy(unified.configs["cs"])
+    monkeypatch.setattr(dept_gui, "_http_json", lambda *a, **kw: (200, {"status": "ok"}, 1))
+    maps = []
+    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw:
+                        maps.append(json.loads(dept_gui.cloud_departments_json())) or "cs")
+    client = TestClient(dept_gui.app)
+    headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"],
+               "Origin": "http://testserver"}
+    config = client.get("/api/v1/departments/cs/config").json()
+    response = client.put("/api/v1/departments/cs/docai-fallback", headers=headers, json={
+        "enableDocaiFallback": enabled, "configRevision": config["configRevision"],
+    })
+    assert response.status_code == 202, response.text
+    dept_gui._execute_mcp_deployment(response.json()["deployment"]["runId"])
+    assert unified.configs["cs"] == {**original, "enableDocaiFallback": enabled}
+    assert maps[-1]["cs"]["enableDocaiFallback"] is enabled
+    assert maps[-1]["ee"]["enableDocaiFallback"] is False
+
+
+@pytest.mark.parametrize("endpoint,key,other", [
+    ("docai-fallback", "enableDocaiFallback", "enableImageOcr"),
+    ("image-ocr", "enableImageOcr", "enableDocaiFallback"),
+])
+@pytest.mark.parametrize("case,status", [
+    ("no-session", 403), ("stale", 409), ("string", 400), ("extra-field", 400), ("other-option", 400),
+])
+def test_drawer_docai_save_rejects_invalid_or_stale_requests(unified, case, status, endpoint, key, other):
+    from fastapi.testclient import TestClient
+
+    client = TestClient(dept_gui.app)
+    headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"],
+               "Origin": "http://testserver"}
+    payload = {key: True,
+               "configRevision": dept_gui.department_public_config_any("cs")["configRevision"]}
+    if case == "no-session":
+        headers = {}
+    elif case == "stale":
+        payload["configRevision"] = "old-revision"
+    elif case == "string":
+        payload[key] = "false"
+    elif case == "extra-field":
+        payload["corpora"] = {"staff": "other-corpus"}
+    elif case == "other-option":
+        payload[other] = True
+    response = client.put(f"/api/v1/departments/cs/{endpoint}", headers=headers, json=payload)
+    assert response.status_code == status, response.text
+    assert not dept_gui._MCP_DEPLOY_RUNS
+    assert not unified.mutations
 
 
 def test_new_department_is_created_directly_in_cloud_registry(unified):
@@ -171,6 +315,27 @@ def test_partial_cleanup_preserves_registry_and_shared_resources(unified):
     assert rows["bucket-source"]["skipped"] and not rows["bucket-source"]["selectable"]
 
 
+def test_teardown_does_not_rewrite_an_already_disabled_mcp_route(unified, monkeypatch):
+    unified.configs["cs"]["mcpDisabledAudiences"] = ["student"]
+    plan = dept_gui.department_teardown_plan("cs")
+    student = next(row for row in plan["targets"] if row["key"] == "mcp-student")
+    assert student["meta"]["alreadyDisabled"] is True
+    monkeypatch.setattr(
+        dept_gui,
+        "_mcp_registry_mutate",
+        lambda *args: pytest.fail("already disabled route must not be rewritten"),
+    )
+
+    run = dept_gui.start_teardown_run(plan, "cs", ["mcp-student"])
+    dept_gui._execute_teardown_run(run["runId"])
+    result = dept_gui._TEARDOWN_RUNS[run["runId"]]
+    student = next(row for row in result["targets"] if row["key"] == "mcp-student")
+
+    assert result["status"] == "COMPLETED"
+    assert student["status"] == "COMPLETE"
+    assert "이미 접근 중지됨" in student["detail"]
+
+
 def test_sync_stop_persists_and_stale_local_or_deployed_map_cannot_reactivate(unified, monkeypatch):
     expected_maps = []
     monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw: expected_maps.append(json.loads(kw["expected"])) or "ee")
@@ -222,6 +387,30 @@ def test_shared_service_guard_blocks_even_a_malformed_department_plan(unified, m
     assert dept_gui._TEARDOWN_RUNS[run["runId"]]["status"] == "FAILED"
 
 
+def test_unexpected_sdk_error_marks_teardown_failed_instead_of_leaving_running(
+    unified, monkeypatch
+):
+    plan = dept_gui.department_teardown_plan("cs")
+    selected = ["mcp-staff", "mcp-student", "sync-env", "firestore-state"]
+    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw: "ee")
+
+    class PermissionDeniedLike(Exception):
+        pass
+
+    def fail_firestore(*args, **kwargs):
+        raise PermissionDeniedLike("403 Missing or insufficient permissions")
+
+    monkeypatch.setattr(dept_gui, "_delete_department_firestore_state", fail_firestore)
+    run = dept_gui.start_teardown_run(plan, "cs", selected)
+    dept_gui._execute_teardown_run(run["runId"])
+    result = dept_gui._TEARDOWN_RUNS[run["runId"]]
+    firestore = next(row for row in result["targets"] if row["key"] == "firestore-state")
+
+    assert result["status"] == "PARTIAL"
+    assert firestore["status"] == "FAILED"
+    assert "PermissionDeniedLike" in firestore["detail"]
+
+
 def test_full_cleanup_disables_access_and_sync_before_data_and_removes_config_last(unified, monkeypatch):
     events = []
     original_mutate = dept_gui._mcp_registry_mutate
@@ -230,7 +419,7 @@ def test_full_cleanup_disables_access_and_sync_before_data_and_removes_config_la
         events.append(method)
         return original_mutate(method, *args)
 
-    def delete(*args):
+    def delete(*args, **kwargs):
         events.append("delete-data")
         assert unified.configs["cs"]["syncDisabled"] is True
         assert set(unified.configs["cs"]["mcpDisabledAudiences"]) == {"staff", "student"}
