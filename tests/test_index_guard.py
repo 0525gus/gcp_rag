@@ -242,3 +242,69 @@ def test_legacy_unversioned_task_fails_without_mutation(monkeypatch):
     )
     assert sync_main.index_gcs_task(body)["status"] == "FAILED"
     assert store.get(FILE_ID).status == DocStatus.PARSED
+
+def test_partial_batch_checkpoints_success_and_retries_only_failed_document(monkeypatch):
+    from shared.models import DocState
+    from shared.index_guard import document_version
+
+    store, job, body = setup_job(monkeypatch)
+    second = "another_document_id"
+    store.upsert(DocState(file_id=second, drive_id="drive", status=DocStatus.PARSED,
+                          content_hash="v1", modified_time="2026-09-01T00:00:00Z"))
+    body.file_ids.append(second)
+    body.gcs_uris.append(f"gs://source/{second}.md")
+    body.file_versions[second] = document_version(store.get(second))
+    job.set({"fileIds": body.file_ids, "gcsUris": body.gcs_uris,
+             "fileVersions": body.file_versions}, merge=True)
+    calls = []
+    fail_second = True
+
+    def importing(_store, uris, ids, **kwargs):
+        calls.append(ids[0])
+        bad = ids == [second] and fail_second
+        return ImportOutcome(uris, 0 if bad else len(uris), 1 if bad else 0, 0)
+
+    monkeypatch.setattr(sync_main, "_import_and_mark", importing)
+    with pytest.raises(RuntimeError, match="import incomplete"):
+        sync_main.index_gcs_task(body)
+    assert store.get(FILE_ID).status == DocStatus.INDEXED
+    assert store.get(second).status == DocStatus.PARSED
+    results = job.collection("parts").document("faculty").get().to_dict()["fileResults"]
+    assert results[FILE_ID]["status"] == "DONE"
+    assert results[second]["status"] == "FAILED"
+    fail_second = False
+    assert sync_main.index_gcs_task(body)["status"] == "DONE"
+    assert calls == [FILE_ID, second, second]
+    assert store.get(second).status == DocStatus.INDEXED
+
+
+def test_file_checkpoint_requires_both_corpora(monkeypatch):
+    store, job, body = setup_job(monkeypatch, parts=("faculty", "student"))
+    monkeypatch.setattr(sync_main, "_import_and_mark",
+                        lambda _store, uris, ids, **kw: ImportOutcome(uris, 1, 0, 0))
+    assert sync_main.index_gcs_task(body)["status"] == "RUNNING"
+    assert store.get(FILE_ID).status == DocStatus.PARSED
+    body.audience, body.part_id = "STUDENT", "student"
+    monkeypatch.setattr(sync_main, "_sync_student_corpus",
+                        lambda *a: {"ok": False, "imported": 0})
+    with pytest.raises(RuntimeError):
+        sync_main.index_gcs_task(body)
+    assert store.get(FILE_ID).status == DocStatus.PARSED
+    monkeypatch.setattr(sync_main, "_sync_student_corpus",
+                        lambda *a: {"ok": True, "imported": 1})
+    assert sync_main.index_gcs_task(body)["status"] == "DONE"
+    assert store.get(FILE_ID).status == DocStatus.INDEXED
+
+def test_checkpoint_stores_document_results_separately(monkeypatch):
+    store, job, body = setup_job(monkeypatch)
+    monkeypatch.setattr(sync_main, "_import_and_mark",
+                        lambda _store, uris, ids, **kw: ImportOutcome(uris, 0, 1, 0))
+    with pytest.raises(RuntimeError):
+        sync_main.index_gcs_task(body)
+    ref=store._col.document(FILE_ID).collection("index_results").document("job")
+    assert ref.get().to_dict()["status"] == "FAILED"
+    monkeypatch.setattr(sync_main, "_import_and_mark",
+                        lambda _store, uris, ids, **kw: ImportOutcome(uris, 1, 0, 0))
+    sync_main.index_gcs_task(body)
+    assert ref.get().to_dict()["status"] == "DONE"
+    assert ref.get().to_dict()["fileVersion"] == body.file_versions[FILE_ID]

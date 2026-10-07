@@ -150,7 +150,8 @@ class MutationLease:
                 for fid in self.file_ids:
                     # Reindexing an INDEXED document must not leave a success
                     # status behind if deletion succeeds but import fails.
-                    txn.update(self.store._col.document(fid), {"status": "PARSED"})
+                    if (part.get("fileResults", {}).get(fid) or {}).get("status") != "DONE":
+                        txn.update(self.store._col.document(fid), {"status": "PARSED"})
             return True
 
         return run(self.store._db.transaction())
@@ -188,6 +189,54 @@ class MutationLease:
 
         run(self.store._db.transaction())
         self.pinned = True
+
+    def checkpoint_file(self, file_id: str, result: dict[str, Any]) -> None:
+        """Persist one revision's corpus result before processing another document."""
+        if self.part_ref is None or file_id not in self.file_ids:
+            raise ValueError("checkpoint requires an owned task document")
+
+        @firestore.transactional
+        def run(txn: Any) -> None:
+            self._owned(txn)
+            job = self.job_ref.get(transaction=txn).to_dict() or {}
+            part = self.part_ref.get(transaction=txn).to_dict() or {}
+            results = dict(part.get("fileResults") or {})
+            results[file_id] = result
+            all_done = result.get("status") == "DONE" and bool(job.get("expectedParts"))
+            corpus_results = {}
+            for pid in job.get("expectedParts") or []:
+                ref = self.job_ref.collection("parts").document(pid)
+                other = ref.get(transaction=txn).to_dict() or {}
+                corpus_results[pid] = (result if ref.path == self.part_ref.path else
+                    (other.get("fileResults", {}).get(file_id) or
+                     {"status": "DONE" if other.get("status") == "DONE" else "UNKNOWN"}))
+                if ref.path != self.part_ref.path:
+                    all_done = all_done and (
+                        other.get("status") == "DONE"
+                        or (other.get("fileResults", {}).get(file_id) or {}).get("status") == "DONE"
+                    )
+            txn.set(self.part_ref, {"fileResults": results}, merge=True)
+            states = [row.get("status") for row in corpus_results.values()]
+            status = "DONE" if all_done else "FAILED" if "FAILED" in states else "PENDING"
+            txn.set(self.store._col.document(file_id).collection("index_results")
+                    .document(self.job_ref.path.rsplit("/", 1)[-1]), {
+                "status": status, "corpora": corpus_results,
+                "fileVersion": (self.versions or {}).get(file_id),
+                "routingVersion": job.get("routingVersion"),
+                "jobId": self.job_ref.path.rsplit("/", 1)[-1],
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            })
+            if all_done:
+                txn.update(self.store._col.document(file_id), {
+                    "status": "INDEXED", "error": None,
+                    "lastSyncedAt": firestore.SERVER_TIMESTAMP,
+                })
+            elif result.get("status") == "FAILED":
+                txn.update(self.store._col.document(file_id), {
+                    "status": "PARSED", "error": str(result.get("error") or "index incomplete")[:2000],
+                })
+
+        run(self.store._db.transaction())
 
     def finish(
         self, result: dict[str, Any] | None = None, error: BaseException | None = None

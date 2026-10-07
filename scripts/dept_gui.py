@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
 import copy
 import hashlib
@@ -45,7 +46,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts import dept_config, docai_setup
+from scripts import dept_config, docai_setup, index_issues
 from shared.source_links import citation_view_uri
 
 CONFIG_DIR = ROOT / "config"
@@ -5633,7 +5634,7 @@ def _sync_execution_record(
         if len(owners) == 1:
             code = owners.pop()
     mode = str(labels.get("mode") or "")
-    if mode not in {"backfill", "delta"}:
+    if mode not in {"backfill", "delta", "reprocess"}:
         mode = "backfill" if bool(arguments.get("backfill")) else "delta"
     run_id = str(labels.get("run_id") or arguments.get("runId") or "")
     result = _json_mapping(row.get("result"))
@@ -5963,6 +5964,7 @@ def _firestore_document_summaries(
         decoded = {key: _firestore_value(value) for key, value in fields.items()}
         return file_id, {
             "fileId": file_id,
+            "driveId": str(decoded.get("driveId") or ""),
             "name": str(decoded.get("name") or file_id),
             "path": str(decoded.get("path") or ""),
             "status": str(decoded.get("status") or ""),
@@ -5975,12 +5977,12 @@ def _firestore_document_summaries(
         return dict(executor.map(load, unique_ids))
 
 
-def _start_manual_sync(code: str, mode: str) -> dict[str, Any]:
+def _start_manual_sync(code: str, mode: str, *, file_id: str = "", request_id: str = "") -> dict[str, Any]:
     departments, _drive_owners = _sync_department_targets()
     target = departments.get(code)
     if not target:
         raise FileNotFoundError(code)
-    if mode not in {"delta", "backfill"}:
+    if mode not in {"delta", "backfill", "reprocess"}:
         raise ValueError("동기화 방식은 delta 또는 backfill이어야 합니다.")
     drive_ids = target["driveIds"]
     if not drive_ids:
@@ -5989,9 +5991,33 @@ def _start_manual_sync(code: str, mode: str) -> dict[str, Any]:
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
     region = str(common.get("GCP_REGION") or "asia-northeast3")
+    selected = None
+    if mode == "reprocess":
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", file_id) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
+            raise ValueError("문서 또는 재처리 요청 ID가 올바르지 않습니다.")
+        names = _firestore_collection_names()
+        snap = _firestore_client(project).collection(names["docState"]).document(file_id).get(timeout=20)
+        doc = snap.to_dict() or {}
+        if not snap.exists or doc.get("driveId") not in drive_ids:
+            raise FileNotFoundError(file_id)
+        if not index_issues.issue_item(file_id, doc):
+            raise ValueError("이미 처리됐거나 수집 대상에서 제외된 문서입니다. 목록을 새로고침해 주세요.")
+        selected = {"fileId": file_id, "driveId": doc["driveId"]}
+        # An older Workflow ignores unknown args and would run a full delta!
+        ok, deployed = _gcloud_json([
+            "workflows", "describe", SYNC_WORKFLOW_NAME,
+            f"--location={region}", f"--project={project}",
+        ], timeout=20)
+        if not ok or "reprocess_document:" not in str(deployed.get("sourceContents") or ""):
+            raise ValueError("선택 문서 재처리를 지원하는 Sync·Workflow 배포가 필요합니다. 새 Sync 이미지와 workflows/daily_sync.yaml을 배포한 뒤 다시 시도해 주세요.")
     rows = _list_sync_execution_rows(project, region, limit=20)
     requested = set(drive_ids)
     for row in rows:
+        if selected and (row.get("labels") or {}).get("run_id") == request_id:
+            args = _execution_arguments(row)
+            if args.get("reprocessFile") == selected and args.get("departmentCode") == code:
+                return _sync_execution_record(row, departments, _drive_owners)
+            raise ValueError("이미 사용된 요청 ID입니다.")
         if str(row.get("state") or "") != "ACTIVE":
             continue
         labels = row.get("labels") if isinstance(row.get("labels"), dict) else {}
@@ -6014,7 +6040,7 @@ def _start_manual_sync(code: str, mode: str) -> dict[str, Any]:
         action = str(drive_check.get("action") or "")
         raise RuntimeError(f"{detail} · {action}" if action else detail)
     sync_url, parser_url = _cloud_run_sync_urls(project, region)
-    run_id = uuid.uuid4().hex
+    run_id = request_id if selected else uuid.uuid4().hex
     arguments = {
         "syncUrl": sync_url,
         "parserUrl": parser_url,
@@ -6023,6 +6049,8 @@ def _start_manual_sync(code: str, mode: str) -> dict[str, Any]:
         "runId": run_id,
         "departmentCode": code,
     }
+    if selected:
+        arguments["reprocessFile"] = selected
     execution_url = (
         "https://workflowexecutions.googleapis.com/v1/projects/"
         f"{quote(project, safe='')}/locations/{quote(region, safe='')}/workflows/"
@@ -6038,7 +6066,7 @@ def _start_manual_sync(code: str, mode: str) -> dict[str, Any]:
         timeout=20,
     )
     if status not in {200, 201} or not isinstance(body, dict):
-        raise RuntimeError(f"Workflow 실행 요청 실패 (HTTP {status or 'timeout'})")
+        raise RuntimeError(f"Workflow 실행 접수 여부를 확인하지 못했습니다 (HTTP {status or 'timeout'}). 실행 이력을 확인한 뒤 재시도해 주세요.")
     created = dict(body)
     created.setdefault("argument", json.dumps(arguments, ensure_ascii=False))
     created.setdefault("labels", {"department": code, "mode": mode, "run_id": run_id})
@@ -6223,6 +6251,182 @@ def session() -> dict[str, Any]:
 @app.get("/api/v1/departments")
 def departments() -> dict[str, Any]:
     return {"departments": list_department_records()}
+
+
+def _index_issue_context(code: str):
+    if not DEPT_CODE_RE.fullmatch(code):
+        raise FileNotFoundError(code)
+    config = department_public_config_any(code)
+    drives = _normalise_ids((config.get("drive") or {}).get("driveIds"))
+    common = _common()
+    project = str(common.get("GCP_PROJECT_ID") or "")
+    if not project:
+        raise RuntimeError("공통 프로젝트 설정이 없습니다.")
+    names = {**_firestore_collection_names(), "jobs": str(common.get("SYNC_JOB_COLLECTION") or "sync_jobs")}
+    return config, drives, common, names
+
+
+def _index_issue_evidence(file_id: str, config: dict, common: dict, detail: dict) -> list[dict]:
+    """Read bounded import-result history; never infer file failure from batch counts."""
+    from datetime import timedelta
+    from shared.rag_import_result import parse_import_results
+
+    jobs = detail.get("jobs") or []
+    metadata_bucket = str(common.get("RAG_METADATA_BUCKET") or "")
+    source_bucket = str((config.get("buckets") or {}).get("source") or "")
+    if not jobs or not BUCKET_RE.fullmatch(metadata_bucket) or not BUCKET_RE.fullmatch(source_bucket):
+        return []
+    job = jobs[0]
+    start = datetime.fromisoformat(job["createdAt"])
+    end = datetime.fromisoformat(job["deadlineAt"]) + timedelta(minutes=10)
+    token = _provision_access_token()
+    status, body, _ = _http_post_json("https://logging.googleapis.com/v2/entries:list", {
+        "resourceNames": [f"projects/{common['GCP_PROJECT_ID']}"],
+        "filter": 'resource.type="cloud_run_revision" AND resource.labels.service_name="rag-sync" '
+                  'AND textPayload:"RAG import result sink read" '
+                  f'AND timestamp>="{start.isoformat()}" AND timestamp<="{end.isoformat()}"',
+        "orderBy": "timestamp desc", "pageSize": 40,
+    }, token, timeout=20)
+    if status != 200:
+        raise RuntimeError("RAG 파일별 결과 로그를 조회하지 못했습니다.")
+    entries = body.get("entries") or []
+    corpora = {str(v).rsplit("/", 1)[-1] for v in (config.get("corpora") or {}).values() if v}
+    sinks = {}
+    for entry in entries:
+        match = re.search(r"sink=(gs://[^\s]+)", str(entry.get("textPayload") or ""))
+        if not match:
+            continue
+        uri = match.group(1)
+        parsed = urlparse(uri)
+        parts = parsed.path.strip("/").split("/")
+        if (parsed.netloc == metadata_bucket and len(parts) == 3 and parts[0] == "import-results"
+                and parts[1] in corpora and re.fullmatch(r"[a-f0-9]+\.ndjson", parts[2])):
+            sinks.setdefault(uri, entry.get("timestamp", ""))
+    if body.get("nextPageToken") or len(sinks) > 20:
+        detail["notices"].append("파일별 결과는 해당 작업 시간대의 최근 결과 파일 최대 20개에서 확인했습니다.")
+
+    def read_sink(pair):
+        uri, checked_at = pair
+        parsed = urlparse(uri)
+        url = f"https://storage.googleapis.com/storage/v1/b/{metadata_bucket}/o/{quote(parsed.path.lstrip('/'), safe='')}?alt=media"
+        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            payload = response.read(512 * 1024 + 1)
+        if len(payload) > 512 * 1024:
+            raise RuntimeError("결과 파일 크기가 조회 한도를 초과했습니다.")
+        evidence = []
+        for row in parse_import_results(payload):
+            source = urlparse(row.gcs_uri)
+            # Only this exact Drive file's generated objects, in this department's bucket.
+            if source.netloc != source_bucket or not re.fullmatch(re.escape(file_id) + r"\.[A-Za-z0-9.]+", source.path.lstrip("/")):
+                continue
+            evidence.append({"object": source.path.lstrip("/"), "status": row.status,
+                             "error": str(row.error or "")[:2000], "checkedAt": checked_at,
+                             "corpusId": parsed.path.strip("/").split("/")[1]})
+        return evidence
+
+    results = {}
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(read_sink, pair) for pair in list(sinks.items())[:20]]
+        for future in futures:
+            try:
+                for row in future.result():
+                    key = (row["object"], row["corpusId"])
+                    if key not in results or row["checkedAt"] > results[key]["checkedAt"]:
+                        results[key] = row
+            except (OSError, ValueError, RuntimeError) as exc:
+                detail["notices"].append(f"일부 결과 파일을 조회하지 못했습니다: {type(exc).__name__}")
+    return list(results.values())
+
+
+@app.get("/api/v1/departments/{code}/index-issues")
+def department_index_issues(code: str, cursor: str = "") -> JSONResponse:
+    try:
+        config, drives, common, names = _index_issue_context(code)
+        result = index_issues.list_issues(_firestore_client(common["GCP_PROJECT_ID"]), names["docState"], drives,
+                                         cursor=cursor, split_collection=names["splitQueue"])
+        return JSONResponse({"code": code, "name": config["name"], **result})
+    except FileNotFoundError:
+        raise HTTPException(404, "학과 설정을 찾을 수 없습니다.") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        return JSONResponse({"error": {"message": f"색인 상태 조회 실패: {str(exc)[:300]}"}}, status_code=503)
+
+
+@app.get("/api/v1/departments/{code}/index-issues/{file_id}")
+def department_index_issue_detail(code: str, file_id: str) -> JSONResponse:
+    try:
+        config, drives, common, names = _index_issue_context(code)
+        detail = index_issues.issue_detail(_firestore_client(common["GCP_PROJECT_ID"]), names, drives, file_id)
+        if not detail.get("resolved"):
+            try:
+                detail["evidence"] = _index_issue_evidence(file_id, config, common, detail)
+            except Exception:
+                detail["notices"].append("RAG 파일별 결과를 확인하지 못했습니다. 아래 상태와 관련 작업은 조회된 기록입니다.")
+        return JSONResponse(detail)
+    except FileNotFoundError:
+        raise HTTPException(404, "이 학과의 문서 상태를 찾을 수 없습니다.") from None
+    except Exception as exc:
+        return JSONResponse({"error": {"message": f"문서 상태 조회 실패: {str(exc)[:300]}"}}, status_code=503)
+
+
+@app.post("/api/v1/departments/{code}/index-issues/{file_id}/reprocess")
+async def reprocess_index_issue(code: str, file_id: str, request: Request) -> JSONResponse:
+    _require_local_session(request)
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "재처리 요청 형식이 올바르지 않습니다.")
+    try:
+        run = await asyncio.to_thread(
+            _start_manual_sync, code, "reprocess", file_id=file_id,
+            request_id=str(payload.get("requestId") or ""),
+        )
+        return JSONResponse({"run": run}, status_code=202)
+    except FileNotFoundError:
+        raise HTTPException(404, "이 학과의 재처리 대상 문서를 찾을 수 없습니다.") from None
+    except FileExistsError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except Exception as exc:
+        return JSONResponse({"error": {"message": str(exc)[:400]}}, status_code=503)
+
+
+@app.get("/api/v1/departments/{code}/index-issues/{file_id}/reprocess")
+def index_issue_reprocess_history(code: str, file_id: str) -> JSONResponse:
+    try:
+        config, drives, common, names = _index_issue_context(code)
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", file_id):
+            raise FileNotFoundError(file_id)
+        snap = _firestore_client(common["GCP_PROJECT_ID"]).collection(names["docState"]).document(file_id).get(timeout=20)
+        data = snap.to_dict() or {}
+        if not snap.exists or data.get("driveId") not in drives:
+            raise FileNotFoundError(file_id)
+        # Scoped server query, FULL view includes arguments/result. Polling this
+        # endpoint survives browser reload without reissuing a mutation.
+        project = common["GCP_PROJECT_ID"]
+        region = common.get("GCP_REGION") or "asia-northeast3"
+        history_filter = quote(f'labels."department":"{code}" AND labels."mode":"reprocess"', safe='')
+        url = (f"https://workflowexecutions.googleapis.com/v1/projects/{quote(project, safe='')}/locations/"
+               f"{quote(region, safe='')}/workflows/{SYNC_WORKFLOW_NAME}/executions"
+               f"?view=FULL&pageSize=100&orderBy=startTime%20desc&filter={history_filter}")
+        status, body, _ = _http_json(url, _sync_access_token(), timeout=20)
+        if status != 200:
+            raise RuntimeError("재처리 이력을 확인하지 못했습니다. 실행 이력에서 상태를 확인해 주세요.")
+        rows = []
+        for row in body.get("executions") or []:
+            target = _execution_arguments(row).get("reprocessFile") or {}
+            if target.get("fileId") == file_id and target.get("driveId") in drives:
+                record = _sync_execution_record(row, {code: config}, {d: code for d in drives})
+                record["result"] = _json_mapping(row.get("result"))
+                rows.append(record)
+        return JSONResponse({"runs": rows[:3], "limited": bool(body.get("nextPageToken")),
+                             "document": index_issues.issue_item(file_id, data)})
+    except FileNotFoundError:
+        raise HTTPException(404, "이 학과의 문서를 찾을 수 없습니다.") from None
+    except Exception as exc:
+        return JSONResponse({"error": {"message": str(exc)[:400]}}, status_code=503)
 
 
 @app.get("/api/v1/cloud-mcp-services")
@@ -6659,6 +6863,10 @@ def environment() -> dict[str, Any]:
         "commonExists": common_exists,
         "commonValid": common_valid,
         "commonError": common_error,
+        "docaiConfigured": {
+            kind: bool(common.get(keys[1]) and common.get(keys[2]))
+            for kind, keys in docai_setup.KINDS.items()
+        },
         "unifiedMcp": _unified_mcp_enabled(common),
     }
 
@@ -7664,6 +7872,49 @@ def sync_runs(limit: int = 20) -> JSONResponse:
     )
 
 
+def _sync_run_file_review(project, database, token, run):
+    """Historical review is separate from immutable Workflow execution state."""
+    if run.get("state") != "FAILED":
+        return None
+    base = (f"https://firestore.googleapis.com/v1/projects/{quote(project, safe='')}/"
+            f"databases/{quote(database, safe='')}/documents/")
+    status, body, _ = _http_json(
+        base + "sync_run_reviews/" + quote(run["executionId"], safe=""), token, timeout=10)
+    if status == 404:
+        from shared.index_results import classify_files, summary
+
+        match = re.search(r"jobId=([a-f0-9]{32})", run.get("error") or "")
+        if not match:
+            return None
+        job_id = match.group(1)
+        def read_document(path):
+            code, data, _ = _http_json(base + path, token, timeout=10)
+            if code != 200:
+                return {}
+            return {key: _firestore_value(value) for key, value in (data.get("fields") or {}).items()}
+        job = read_document("sync_jobs/" + job_id)
+        if job.get("driveId") not in run.get("driveIds", []):
+            return None
+        parts = {pid: read_document(f"sync_jobs/{job_id}/parts/{quote(pid, safe='')}")
+                 for pid in job.get("expectedParts", [])}
+        if not any(part.get("fileResults") for part in parts.values()):
+            return None
+        documents = _firestore_document_summaries(project, database, token, job.get("fileIds") or [])
+        documents = {fid: doc for fid, doc in documents.items() if doc.get("driveId") == job.get("driveId")}
+        files = classify_files(job, parts, documents, {}, version_matches={})
+        return {"reviewStatus": "REVIEWED", "files": files, "counts": summary(files),
+                "scope": "FAILED_INDEX_JOB", "source": "FILE_CHECKPOINTS", "jobId": job_id}
+    if status != 200:
+        return {"reviewStatus": "UNAVAILABLE", "reason": "문서별 재검토 결과를 불러오지 못했습니다."}
+    review = {key: _firestore_value(value) for key, value in (body.get("fields") or {}).items()}
+    if (review.get("executionId") != run["executionId"]
+            or review.get("driveId") not in run.get("driveIds", [])
+            or review.get("departmentCode") != run.get("departmentCode")):
+        return None
+    # Raw evidence is retained server-side; the screen needs only scoped rows.
+    return {key: value for key, value in review.items() if key != "evidence"}
+
+
 @app.get("/api/v1/sync-runs/{execution_id}")
 def sync_run_detail(execution_id: str) -> JSONResponse:
     if not re.fullmatch(
@@ -7698,6 +7949,7 @@ def sync_run_detail(execution_id: str) -> JSONResponse:
             else {}
         )
         run = _sync_execution_record(row, departments, drive_owners, progress)
+        file_review = _sync_run_file_review(project, database, token, run)
         log_lookup_error = ""
         try:
             events = _sync_workflow_logs(
@@ -7739,6 +7991,7 @@ def sync_run_detail(execution_id: str) -> JSONResponse:
             "items": items,
             "files": list(files.values()),
             "logLookupError": log_lookup_error,
+            "fileReview": file_review,
         }
     )
 
@@ -7751,6 +8004,8 @@ async def start_sync_run(request: Request) -> JSONResponse:
         payload = {}
     code = str(payload.get("departmentCode") or "").strip().lower()
     mode = str(payload.get("mode") or "delta").strip().lower()
+    if mode not in {"delta", "backfill"}:
+        raise HTTPException(422, "이 경로는 변경분·전체 동기화만 지원합니다.")
     if not DEPT_CODE_RE.fullmatch(code):
         return JSONResponse(
             {"error": {"code": "DEPARTMENT_REQUIRED", "message": "동기화할 학과를 선택해 주세요."}},

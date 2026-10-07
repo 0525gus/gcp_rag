@@ -11,7 +11,7 @@ const BROWSER_GLOBALS = [
   "setTimeout", "clearTimeout", "setInterval", "clearInterval", "localStorage",
   "sessionStorage", "Intl", "AbortController", "EventSource", "FormData", "Blob",
   "requestAnimationFrame", "getComputedStyle", "alert", "location", "history",
-  "URLSearchParams",
+  "URLSearchParams", "crypto",
 ];
 
 test("console app.js has no undefined references", async () => {

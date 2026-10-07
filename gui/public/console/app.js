@@ -154,6 +154,10 @@
     }
     if (view === "dashboard") refreshRuntimeEnvIfStale();
     if (view === "sync") loadSyncRuns();
+    if (view === "indexIssues") {
+      renderIndexIssueDepartments();
+      loadIndexIssues();
+    }
     if (view === "corpus") {
       renderCorpusDepartmentOptions();
       window.setTimeout(() => $("#corpusChatInput").focus(), 120);
@@ -161,7 +165,198 @@
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  const indexIssueState = { request: 0, detailRequest: 0, items: [], cursor: "", scanned: 0, loading: false, loaded: false,
+    fileId: "", code: "", posting: false, historyRequest: 0, pollTimer: null, requestId: "", detailReady: false, canRetry: false };
+
+  function renderIndexIssueDepartments(preferred = "") {
+    const select = $("#indexIssuesDepartment");
+    const current = preferred || select.value;
+    select.innerHTML = '<option value="">학과 선택</option>' + state.departments.map((dept) =>
+      `<option value="${escapeHtml(dept.code)}">${escapeHtml(dept.name)} · ${escapeHtml(dept.code)}</option>`
+    ).join("");
+    if (state.departments.some((dept) => dept.code === current)) select.value = current;
+    else if (state.departments.length === 1) select.value = state.departments[0].code;
+  }
+
+  function issueDate(value) {
+    const date = new Date(value);
+    return value && !Number.isNaN(date.getTime()) ? date.toLocaleString("ko-KR", { timeZone: "Asia/Seoul" }) : "기록 없음";
+  }
+
+  function issueTone(status) {
+    return status === "FAILED" ? "error" : ["SKIPPED", "BODY_MISSING"].includes(status) ? "held" : "waiting";
+  }
+
+  function issueMatchesFilter(item, filter) {
+    if (filter === "HELD") return issueTone(item.status) === "held";
+    if (filter === "WAITING") return issueTone(item.status) === "waiting";
+    return !filter || item.status === filter;
+  }
+
+  function setIssueFilter(filter) {
+    $("#indexIssuesFilter").value = filter;
+    renderIndexIssues();
+  }
+
+  function renderIndexIssues() {
+    const selected = $("#indexIssuesFilter").value;
+    const query = $("#indexIssuesSearch").value.trim().toLocaleLowerCase();
+    const priority = { FAILED: 0, SPLIT_QUEUED: 1, SKIPPED: 2, BODY_MISSING: 3, PARSED: 4, PENDING: 5 };
+    const rows = indexIssueState.items.filter((item) => issueMatchesFilter(item, selected)
+      && `${item.name} ${item.path} ${item.reason}`.toLocaleLowerCase().includes(query))
+      .sort((a, b) => (priority[a.status] ?? 6) - (priority[b.status] ?? 6));
+    const summary = $("#indexIssuesSummary");
+    summary.textContent = !$("#indexIssuesDepartment").value ? "학과를 선택해 주세요."
+      : indexIssueState.loading ? `조회 중… 현재 ${indexIssueState.items.length}건 확인`
+        : indexIssueState.loaded ? `${rows.length}건 표시 · 조회된 보류·오류 ${indexIssueState.items.length}건`
+          : "조회하지 못했습니다. 새로고침으로 다시 시도해 주세요.";
+    $("#indexIssuesCoverage").classList.toggle("hidden", !indexIssueState.loaded);
+    $("#indexIssuesCoverage").classList.toggle("is-partial", Boolean(indexIssueState.cursor));
+    $("#indexIssuesCoverage").textContent = `문서 상태 ${indexIssueState.scanned}건 확인${indexIssueState.cursor ? " · 일부 조회 — 아직 조회하지 않은 문서가 있습니다. ‘계속 조회’로 나머지를 확인하세요." : " · 전체 조회 완료"}`;
+    $("#refreshIndexIssues").disabled = indexIssueState.loading;
+    $("#moreIndexIssues").classList.toggle("hidden", !indexIssueState.cursor);
+    $("#moreIndexIssues").disabled = indexIssueState.loading;
+    const groups = [["", "전체", "all"], ["FAILED", "오류", "error"], ["HELD", "보류·본문 없음", "held"], ["WAITING", "대기·완료 미확인", "waiting"]];
+    $("#indexIssuesCounts").innerHTML = groups.map(([filter, label, tone]) => `<button type="button" class="issue-tab" data-tone="${tone}" data-issue-filter="${filter}" aria-pressed="${selected === filter}" ${indexIssueState.loaded ? "" : "disabled"}><span class="issue-tab-dot" aria-hidden="true"></span><span>${label}</span><strong>${indexIssueState.loaded ? indexIssueState.items.filter((item) => issueMatchesFilter(item, filter)).length : "—"}</strong></button>`).join("");
+    $("#indexIssuesList").innerHTML = rows.length ? `<div class="issue-list-heading" aria-hidden="true"><span>문서 / 처리 사유</span><span>처리 상태</span><span>마지막 처리</span><span>상세</span></div>` + rows.map((item) => `<button type="button" class="issue-row" data-index-issue="${escapeHtml(item.fileId)}" data-tone="${issueTone(item.status)}" aria-haspopup="dialog">
+      <span class="issue-document"><span class="issue-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 12h6M9 16h4"/></svg></span><span class="issue-document-copy"><b>${escapeHtml(item.name)}</b><span class="issue-row-reason">${escapeHtml(item.reason || "상세 내역에서 처리 사유를 확인하세요.")}</span></span></span>
+      <span class="issue-badge" data-tone="${issueTone(item.status)}">${escapeHtml(item.statusLabel)}</span>
+      <span class="issue-date">${escapeHtml(issueDate(item.updatedAt))}</span><span class="issue-open" aria-hidden="true">보기 <span>↗</span></span>
+    </button>`).join("") : `<div class="issue-empty"><span class="issue-empty-mark" aria-hidden="true">${indexIssueState.loading ? "…" : "≡"}</span><b>${indexIssueState.loading ? "문서 상태를 확인하고 있습니다" : !$("#indexIssuesDepartment").value ? "학과를 선택해 주세요" : indexIssueState.loaded ? "표시할 문서가 없습니다" : "문서를 불러오지 못했습니다"}</b><p>${indexIssueState.loading ? "조회된 결과부터 순서대로 보여드립니다." : !$("#indexIssuesDepartment").value ? "선택한 학과의 보류·오류 문서를 한곳에서 확인하세요." : indexIssueState.loaded ? indexIssueState.cursor ? "현재까지 조회한 범위에 조건과 일치하는 문서가 없습니다." : "조건과 일치하는 보류·오류 문서가 없습니다." : "새로고침을 눌러 다시 확인해 주세요."}</p></div>`;
+  }
+
+  async function loadIndexIssues(more = false) {
+    const code = $("#indexIssuesDepartment").value;
+    const request = ++indexIssueState.request;
+    if (!more) {
+      Object.assign(indexIssueState, { items: [], cursor: "", scanned: 0, loaded: false });
+      closeIndexIssue();
+    }
+    indexIssueState.loading = Boolean(code);
+    $("#indexIssuesError").classList.add("hidden");
+    renderIndexIssues();
+    if (!code) return;
+    try {
+      const result = await api(`/api/v1/departments/${encodeURIComponent(code)}/index-issues?cursor=${encodeURIComponent(indexIssueState.cursor)}`);
+      if (request !== indexIssueState.request) return;
+      indexIssueState.items = [...new Map([...indexIssueState.items, ...result.items].map((item) => [item.fileId, item])).values()];
+      indexIssueState.cursor = result.nextCursor;
+      indexIssueState.scanned += result.scanned;
+      indexIssueState.loaded = true;
+    } catch (error) {
+      if (request !== indexIssueState.request) return;
+      $("#indexIssuesError").textContent = error.message;
+      $("#indexIssuesError").classList.remove("hidden");
+    } finally {
+      if (request === indexIssueState.request) { indexIssueState.loading = false; renderIndexIssues(); }
+    }
+  }
+
+  async function openIndexIssue(fileId) {
+    const code = $("#indexIssuesDepartment").value;
+    const request = ++indexIssueState.detailRequest;
+    clearTimeout(indexIssueState.pollTimer);
+    Object.assign(indexIssueState, { fileId, code, detailReady: false, canRetry: false, requestId: "" });
+    $("#startIssueReprocess").disabled = true;
+    $("#issueReprocessRuns").innerHTML = "";
+    $("#issueReprocessStatus").textContent = "재처리 이력을 확인하고 있습니다…";
+    $("#issueSourceLink").href = `https://drive.google.com/file/d/${encodeURIComponent(fileId)}/view`;
+    if (!$("#indexIssueDetail").open) $("#indexIssueDetail").showModal();
+    $("#indexIssueDetailTitle").textContent = indexIssueState.items.find((item) => item.fileId === fileId)?.name || "문서 상세";
+    $("#indexIssueDetailBody").textContent = "문서 상태와 관련 작업, 파일별 결과를 조회하고 있습니다…";
+    try {
+      const data = await api(`/api/v1/departments/${encodeURIComponent(code)}/index-issues/${encodeURIComponent(fileId)}`);
+      if (request !== indexIssueState.detailRequest || code !== $("#indexIssuesDepartment").value) return;
+      if (data.resolved) {
+        $("#indexIssueDetailBody").textContent = data.message;
+        $("#issueReprocessStatus").textContent = "현재 재처리 대상이 아닙니다.";
+        return;
+      }
+      $("#indexIssueDetailBody").innerHTML = `<div class="issue-reason" data-tone="${issueTone(data.item.status)}"><span class="issue-badge" data-tone="${issueTone(data.item.status)}">${escapeHtml(data.item.statusLabel)}</span><p>${escapeHtml(data.item.reason)}</p></div>
+        <dl class="issue-properties"><div><dt>문서 위치</dt><dd>${escapeHtml(data.item.path || "기록 없음")}</dd></div><div><dt>노출 범위</dt><dd>${data.item.audience === "STUDENT" ? "학생·교직원" : "교직원"}</dd></div><div><dt>처리 경로</dt><dd>${escapeHtml(data.item.route || "기록 없음")}</dd></div><div><dt>마지막 처리</dt><dd>${escapeHtml(issueDate(data.item.updatedAt))}</dd></div></dl>`
+        + (data.queues || []).map((row) => `<article><b>${escapeHtml(row.label)}</b><p>${escapeHtml(row.reason)}</p><small>재시도 ${escapeHtml(row.retryCount)}회 · ${escapeHtml(issueDate(row.updatedAt))}</small></article>`).join("")
+        + '<h3>파일별 RAG 처리 결과</h3><p class="issue-help">관련 작업 시간대에 기록된 결과입니다. 현재 문서 상태와 기록 시점을 함께 확인하세요.</p>'
+        + ((data.evidence || []).map((row) => `<article><b>${escapeHtml(row.status)}</b><p>${escapeHtml(row.error || "이 객체의 색인이 성공했습니다.")}</p><small>${escapeHtml(row.object)} · 코퍼스 ${escapeHtml(row.corpusId)} · ${escapeHtml(issueDate(row.checkedAt))}</small></article>`).join("") || '<p>확인 가능한 파일별 처리 결과가 없습니다. 개별 실패 원인은 단정할 수 없습니다.</p>')
+        + `<h3>관련 색인 작업</h3><p class="issue-help">${escapeHtml(data.batchNotice)}</p>`
+        + ((data.jobs || []).map((job) => `<article><b>${escapeHtml(job.status)}</b> · ${escapeHtml(issueDate(job.createdAt))}<p>${escapeHtml(job.error || "작업 오류 미기록")}</p><code>${escapeHtml(job.jobId)}</code>${job.parts.map((part) => `<p>${part.audience === "student" ? "학생" : "교직원"}: ${escapeHtml(part.fileResult ? ({DONE:"이 문서 완료", FAILED:"이 문서 실패", RUNNING:"이 문서 결과 확인 필요"}[part.fileResult.status] || "이 문서 확인 필요") : `묶음 ${part.status}`)} · ${escapeHtml(part.fileResult ? (part.fileResult.error || "") : (part.error || "파일별 결과 미기록"))}</p>`).join("")}</article>`).join("") || '<p>관련 작업 기록이 없습니다.</p>')
+        + [...new Set(data.notices || [])].map((notice) => `<p class="issue-help">${escapeHtml(notice)}</p>`).join("");
+      indexIssueState.detailReady = true;
+      await refreshIssueReprocess();
+    } catch (error) {
+      if (request === indexIssueState.detailRequest) $("#indexIssueDetailBody").textContent = `상세 조회 실패: ${error.message}`;
+    }
+  }
+
+  function closeIndexIssue() {
+    ++indexIssueState.detailRequest;
+    ++indexIssueState.historyRequest;
+    clearTimeout(indexIssueState.pollTimer);
+    indexIssueState.fileId = "";
+    indexIssueState.canRetry = false;
+    if ($("#indexIssueDetail").open) $("#indexIssueDetail").close();
+  }
+
+  async function refreshIssueReprocess() {
+    const { code, fileId, detailRequest } = indexIssueState;
+    if (!fileId) return;
+    const request = ++indexIssueState.historyRequest;
+    clearTimeout(indexIssueState.pollTimer);
+    indexIssueState.canRetry = false;
+    $("#startIssueReprocess").disabled = true;
+    try {
+      const data = await api(`/api/v1/departments/${encodeURIComponent(code)}/index-issues/${encodeURIComponent(fileId)}/reprocess`);
+      if (request !== indexIssueState.historyRequest || detailRequest !== indexIssueState.detailRequest) return;
+      const active = data.runs.some((run) => ["ACTIVE", "QUEUED", "UNAVAILABLE"].includes(run.state));
+      if (data.runs.length && !active) indexIssueState.requestId = "";
+      indexIssueState.canRetry = Boolean(data.document) && !active;
+      const labels = { ACTIVE: "처리 중", QUEUED: "실행 대기", SUCCEEDED: "색인 작업 완료", FAILED: "재처리 실패", CANCELLED: "실행 취소", UNAVAILABLE: "결과 확인 중" };
+      $("#issueReprocessRuns").innerHTML = data.runs.map((run) => `<article><b>${escapeHtml(labels[run.state] || run.state)}</b><small>${escapeHtml(issueDate(run.startTime))}</small>${run.error ? `<p>${escapeHtml(run.error)}</p>` : ""}${run.result?.reason ? `<p>${escapeHtml(run.result.reason)}</p>` : ""}<button class="button secondary compact" type="button" data-reprocess-execution="${escapeHtml(run.executionId)}">실행 상세</button></article>`).join("");
+      $("#issueReprocessStatus").textContent = active ? "처리 중입니다. 10초마다 실행 상태를 확인합니다."
+        : !data.document ? "현재 보류·오류 대상이 아닙니다. 목록을 새로고침해 주세요."
+          : data.runs.length ? "최근 실행은 종료됐습니다. 현재 문서 상태와 결과를 확인해 주세요."
+            : "최근 재처리 기록이 없습니다. 이 문서 한 건만 처리합니다.";
+      if (data.limited) $("#issueReprocessStatus").textContent += " 조회 범위 이전의 이력은 동기화 메뉴에서 확인하세요.";
+      if (data.document) $("#issueReprocessStatus").textContent += ` 현재 문서 상태: ${data.document.statusLabel}.`;
+      if (active) indexIssueState.pollTimer = setTimeout(refreshIssueReprocess, 10000);
+    } catch (error) {
+      if (request !== indexIssueState.historyRequest || detailRequest !== indexIssueState.detailRequest) return;
+      $("#issueReprocessStatus").textContent = `상태 조회 실패: ${error.message}`;
+    } finally {
+      if (request === indexIssueState.historyRequest && detailRequest === indexIssueState.detailRequest) {
+        $("#startIssueReprocess").disabled = indexIssueState.posting || !indexIssueState.detailReady || !indexIssueState.canRetry;
+      }
+    }
+  }
+
+  async function startIssueReprocess() {
+    if (indexIssueState.posting || !indexIssueState.detailReady || !indexIssueState.canRetry) return;
+    const { code, fileId, detailRequest } = indexIssueState;
+    indexIssueState.posting = true;
+    indexIssueState.canRetry = false;
+    // Retain this ID after an uncertain HTTP response; repeating the request must
+    // not perform OCR twice. A later explicit attempt gets a fresh ID on reopen.
+    indexIssueState.requestId ||= crypto.randomUUID().replaceAll("-", "");
+    $("#startIssueReprocess").disabled = true;
+    $("#issueReprocessStatus").textContent = "선택한 문서의 재처리를 접수하고 있습니다…";
+    clearTimeout(indexIssueState.pollTimer);
+    try {
+      await api(`/api/v1/departments/${encodeURIComponent(code)}/index-issues/${encodeURIComponent(fileId)}/reprocess`,
+        { method: "POST", body: { requestId: indexIssueState.requestId } });
+      if (detailRequest !== indexIssueState.detailRequest) return;
+      $("#issueReprocessStatus").textContent = "재처리를 접수했습니다. 완료 상태를 확인하고 있습니다…";
+      await refreshIssueReprocess();
+    } catch (error) {
+      if (detailRequest === indexIssueState.detailRequest) {
+        $("#issueReprocessStatus").textContent = `${error.message} 상태 새로고침으로 실행 여부를 확인해 주세요.`;
+      }
+    } finally {
+      indexIssueState.posting = false;
+      if (detailRequest === indexIssueState.detailRequest) $("#startIssueReprocess").disabled = !indexIssueState.canRetry;
+    }
+  }
+
   function renderCorpusDepartmentOptions() {
+    renderIndexIssueDepartments();
     const select = $("#corpusDepartment");
     if (!select) return;
     const current = select.value;
@@ -457,7 +652,7 @@
       const initials = dept.code.slice(0, 2).toUpperCase();
       const layers = ["LOCAL", "RESOURCE", "DEPLOY", "RUNTIME", "SYNC"];
       return `<tr data-code="${escapeHtml(dept.code)}" data-cloud-only="${dept.cloudOnly ? "true" : "false"}">
-        <td><div class="department-cell"><span class="department-avatar">${escapeHtml(initials)}</span><span><b>${escapeHtml(dept.name)}</b><small>${escapeHtml(dept.code)}${dept.cloudOnly ? ' · <em class="cloud-only-mark">CLOUD</em>' : ""}</small></span></div></td>
+        <td><div class="department-cell"><span class="department-avatar">${escapeHtml(initials)}</span><span><b>${escapeHtml(dept.name)}</b><small>${escapeHtml(dept.code)}</small></span></div></td>
         <td>${badge(overall)}</td>
         ${layers.map((layer) => `<td>${badge(overall === "CHECKING" ? "CHECKING" : layerStatus(result, layer))}</td>`).join("")}
         <td class="time-cell" title="${escapeHtml(checkedAt || "")}">${overall === "CHECKING" ? "확인 중" : relativeTime(checkedAt)}</td>
@@ -660,7 +855,7 @@
     }).join("");
     const modeLabel = run.mode === "delta" && run.effectiveMode === "backfill"
       ? "초기 전체 적재로 자동 전환"
-      : run.effectiveMode === "backfill" ? "전체 다시 적재" : "변경분 동기화";
+      : run.effectiveMode === "reprocess" ? "선택 문서 재처리" : run.effectiveMode === "backfill" ? "전체 다시 적재" : "변경분 동기화";
     const drivePosition = progress.driveCount
       ? `Drive ${syncNumber(progress.driveIndex)} / ${syncNumber(progress.driveCount)}`
       : `${syncNumber(run.driveIds?.length)}개 Drive`;
@@ -717,13 +912,14 @@
       const detected = syncNumber(run.progress?.processed) || syncNumber(totals.listed);
       const processed = Math.max(0, detected - syncNumber(totals.unchanged));
       const failed = syncNumber(totals.failed) + syncNumber(totals.indexFailed);
+      const metric = (value, keys) => keys.every((key) => Number.isFinite(totals[key])) ? value.toLocaleString() : "확인 필요";
       const outcomeState = syncOutcomeState(run);
       const stateLabel = syncOutcomeLabel(outcomeState);
       return `<tr class="sync-history-row" data-sync-execution="${escapeHtml(run.executionId)}" tabindex="0" role="button" aria-label="${escapeHtml(run.departmentName || run.departmentCode || "자동 실행")} 실행 상세 로그 보기">
         <td><div class="department-cell"><span class="department-avatar">${escapeHtml((run.departmentCode || "WF").slice(0, 2).toUpperCase())}</span><span><b>${escapeHtml(run.departmentName || run.departmentCode || "자동 실행")}</b><small>${escapeHtml(run.executionId)}</small></span></div></td>
-        <td>${run.mode === "delta" && run.effectiveMode === "backfill" ? "변경분 → 전체" : run.effectiveMode === "backfill" ? "전체 적재" : "변경분"}</td>
+        <td>${run.mode === "delta" && run.effectiveMode === "backfill" ? "변경분 → 전체" : run.effectiveMode === "reprocess" ? "문서 재처리" : run.effectiveMode === "backfill" ? "전체 적재" : "변경분"}</td>
         <td><span class="sync-history-state ${escapeHtml(outcomeState.toLowerCase())}">${escapeHtml(stateLabel)}</span></td>
-        <td>${processed.toLocaleString()}</td><td>${syncNumber(totals.indexed).toLocaleString()}</td><td>${failed.toLocaleString()}</td>
+        <td>${metric(processed, ["listed", "unchanged"])}</td><td>${metric(syncNumber(totals.indexed), ["indexed"])}</td><td>${metric(failed, ["failed", "indexFailed"])}</td>
         <td>${escapeHtml(syncStartedAt(run.startTime))}</td><td>${escapeHtml(syncDuration(run.startTime, run.endTime))}</td>
       </tr>`;
     }).join("") : '<tr><td colspan="8" class="sync-history-empty">아직 동기화 실행 이력이 없습니다.</td></tr>';
@@ -772,19 +968,34 @@
     const detected = syncNumber(run.progress?.processed) || syncNumber(totals.listed);
     const processed = Math.max(0, detected - syncNumber(totals.unchanged));
     const failed = syncNumber(totals.failed) + syncNumber(totals.indexFailed);
+    const metric = (value, keys) => keys.every((key) => Number.isFinite(totals[key])) ? value.toLocaleString() : "확인 필요";
     const outcomeState = syncOutcomeState(run);
     $("#syncRunDetailTitle").textContent = run.departmentName || run.departmentCode || "자동 실행";
     $("#syncRunDetailDescription").textContent = run.executionId || "실행 ID 없음";
     $("#syncRunDetailSummary").innerHTML = `
       <div><span>실행 결과</span><b><i class="sync-history-state ${escapeHtml(outcomeState.toLowerCase())}">${escapeHtml(syncOutcomeLabel(outcomeState))}</i></b></div>
-      <div><span>실행 방식</span><b>${run.mode === "delta" && run.effectiveMode === "backfill" ? "변경분 → 전체" : run.effectiveMode === "backfill" ? "전체 적재" : "변경분"}</b></div>
+      <div><span>실행 방식</span><b>${run.mode === "delta" && run.effectiveMode === "backfill" ? "변경분 → 전체" : run.effectiveMode === "reprocess" ? "문서 재처리" : run.effectiveMode === "backfill" ? "전체 적재" : "변경분"}</b></div>
       <div><span>시작 시각</span><b>${escapeHtml(syncStartedAt(run.startTime))}</b></div>
       <div><span>소요 시간</span><b>${escapeHtml(syncDuration(run.startTime, run.endTime))}</b></div>`;
     $("#syncRunDetailMetrics").innerHTML = `
-      <div class="sync-metric"><span>변경 감지</span><b>${processed.toLocaleString()}</b></div>
-      <div class="sync-metric"><span>GCS 업로드</span><b>${syncNumber(totals.gcsUploaded).toLocaleString()}</b></div>
-      <div class="sync-metric"><span>색인</span><b>${syncNumber(totals.indexed).toLocaleString()}</b></div>
-      <div class="sync-metric fail"><span>실패</span><b>${failed.toLocaleString()}</b></div>`;
+      <div class="sync-metric"><span>변경 감지</span><b>${metric(processed, ["listed", "unchanged"])}</b></div>
+      <div class="sync-metric"><span>GCS 업로드</span><b>${metric(syncNumber(totals.gcsUploaded), ["gcsUploaded"])}</b></div>
+      <div class="sync-metric"><span>색인</span><b>${metric(syncNumber(totals.indexed), ["indexed"])}</b></div>
+      <div class="sync-metric fail"><span>실패</span><b>${metric(failed, ["failed", "indexFailed"])}</b></div>`;
+    const review = payload.fileReview;
+    const reviewedFiles = review?.reviewStatus === "REVIEWED" ? (review.files || []) : [];
+    $("#syncRunFileReview").innerHTML = review?.reviewStatus === "REVIEWED" ? `
+      <header><div><b>문서별 색인 결과</b><span>오류가 발생한 색인 묶음 ${reviewedFiles.length}개 문서 · 전체 실행의 처리 기록 수와 다릅니다. 당시 반입 결과이며 현재 상태와 다를 수 있습니다.</span></div></header>
+      ${[["FAILED", "실패 확인"], ["PARTIAL", "일부 완료 · 확인 필요"], ["UNKNOWN", "확인 필요"], ["DONE", "완료 확인"]].map(([status, label]) => {
+        const group = reviewedFiles.filter((file) => file.status === status);
+        return `<details class="sync-file-result-group"${status === "FAILED" ? " open" : ""}><summary>${label} <b>${group.length}개</b></summary><div class="sync-detail-item-list">${group.map((file) => `
+          <article class="sync-detail-item" data-status="${status === "FAILED" ? "failed" : status === "DONE" ? "indexed" : "pending"}">
+            <i>${label}</i><div><b>${escapeHtml(file.name || file.fileId)}</b><code>${escapeHtml(file.fileId)}</code>
+            ${Object.entries(file.corpora || {}).map(([corpus, result]) => `<small>${corpus === "student" ? "학생" : "교직원"}: ${escapeHtml(({DONE:"완료", FAILED:"실패", UNKNOWN:"확인 필요"})[result.status] || "확인 필요")} ${escapeHtml(result.reason || "")}</small>`).join("")}</div>
+          </article>`).join("") || '<div class="sync-detail-item-empty">해당 문서 없음</div>'}</div></details>`;
+      }).join("")}
+      ${(review.notices || []).map((notice) => `<p>${escapeHtml(notice)}</p>`).join("")}`
+      : (review ? `<p>${escapeHtml(review.reason || "문서별 결과 확인이 필요합니다.")}</p>` : "");
     const items = (payload.items || []).filter((item) => (
       item.status !== "UNCHANGED"
       && !(
@@ -792,14 +1003,23 @@
         && item.mimeType === "application/vnd.google-apps.folder"
       )
     ));
-    $("#syncRunDetailItemCount").textContent = `${items.length}건`;
+    $("#syncRunDetailItemCount").textContent = `${items.length}건의 처리 기록`;
     $("#syncRunDetailItems").innerHTML = items.length ? items.map((item) => `
       <article class="sync-detail-item" data-status="${escapeHtml(String(item.status || "").toLowerCase())}">
         <i>${escapeHtml(syncItemLabel(item))}</i>
         <div><b>${escapeHtml(item.name || item.fileId)}</b><small>${escapeHtml(item.path || item.mimeType || "경로 정보 없음")}</small><code>${escapeHtml(item.fileId)}</code></div>
         <time>${escapeHtml(syncStartedAt(item.timestamp))}</time>
-      </article>`).join("") : `<div class="sync-detail-item-empty">${processed ? "이 실행은 파일별 기록 기능 적용 전 실행입니다." : "처리된 파일이 없습니다."}</div>`;
-    const logs = payload.logs || [];
+      </article>`).join("") : `<div class="sync-detail-item-empty">${processed ? "이 실행은 파일별 기록 기능 적용 전 실행입니다." : "조회된 파일 처리 기록이 없습니다."}</div>`;
+    const logs = [...(payload.logs || [])];
+    if (run.error) {
+      logs.unshift({
+        stage: "Workflow 실행 오류", severity: "ERROR", timestamp: run.endTime,
+        message: /index tasks did not complete before deadline|index job timeout/.test(run.error)
+          ? "색인 작업이 제한 시간 안에 완료되지 않았습니다. 문서별 완료 여부는 별도 확인이 필요합니다."
+          : run.error,
+        raw: run.error,
+      });
+    }
     $("#syncRunDetailLogCount").textContent = `${logs.length}건`;
     $("#syncRunDetailLogs").innerHTML = logs.length ? logs.map((item) => {
       const files = item.files || [];
@@ -809,7 +1029,7 @@
         <p>${escapeHtml(item.message || "오류 상세 없음")}</p>${filesHtml}
         <details><summary>원본 로그 보기</summary><pre>${escapeHtml(item.raw || item.message || "")}</pre></details>
       </article>`;
-    }).join("") : `<div class="sync-detail-log-empty">${run.ok === false ? "집계상 확인이 필요하지만 Workflow 경고·오류 로그가 없습니다." : "기록된 경고·오류가 없습니다."}</div>`;
+    }).join("") : `<div class="sync-detail-log-empty">${(run.state === "FAILED" || run.ok === false) ? "실행이 정상 완료되지 않았습니다. 오류 상세를 조회하지 못했습니다." : "기록된 경고·오류가 없습니다."}</div>`;
     if (payload.logLookupError) {
       $("#syncRunDetailLogs").insertAdjacentHTML("beforeend", `<div class="sync-detail-log-warning">일부 로그를 불러오지 못했습니다: ${escapeHtml(payload.logLookupError)}</div>`);
     }
@@ -959,6 +1179,10 @@
     const cards = [
       { icon: "⌂", label: "저장소", value: env.repository, detail: `${env.departmentCount}개 학과 설정` },
       { icon: "G", label: "GCP 프로젝트", value: env.configuredProject || "미설정", detail: env.region },
+      ...Object.entries(docaiKinds).map(([kind, label]) => ({
+        icon: "AI", label, value: env.docaiConfigured?.[kind] === true ? "연결 설정 저장됨" : env.docaiConfigured?.[kind] === false ? "미설정 (선택 사항)" : "설정 확인 전",
+        detail: "공통 설정 · Document AI에서 기존 프로세서 조회·선택 또는 생성",
+      })),
       { icon: "SA", label: "Drive 확인 서비스 계정", value: env.serviceAccount || "확인 필요", detail: driveDetail, copy: env.serviceAccount, check: true, tone: driveTone },
       { icon: "›_", label: "gcloud", value: env.gcloudInstalled ? (env.gcloudAuthenticated ? "로그인됨" : "로그인 필요") : "설치되지 않음", detail: env.gcloudAccount || "활성 계정 없음", login: Boolean(env.gcloudInstalled) && !env.gcloudAuthenticated },
       { icon: "Py", label: "Python", value: env.pythonVersion, detail: "로컬 API 런타임" },
@@ -1289,6 +1513,9 @@
     docaiSetup.project = $("#commonSetupForm").elements.projectId.value;
     docaiSetup.saved = saved;
     docaiSetup.plans = {};
+    $("#docaiSetupSummary").textContent = Object.entries(docaiKinds).map(([kind, label]) =>
+      `${label}: ${saved[kind]?.processorId && saved[kind]?.location ? "연결 설정 저장됨" : "미설정"}`
+    ).join(" · ") + " — 선택 사항입니다. 리전 선택 시 기존 프로세서를 자동 조회합니다.";
     for (const kind of Object.keys(docaiKinds)) docaiSetup.requests[kind] = (docaiSetup.requests[kind] || 0) + 1;
     $("#docaiSetupOptions").innerHTML = Object.entries(docaiKinds).map(([kind, label]) => {
       const item = saved[kind] || {};
@@ -1300,7 +1527,7 @@
           <button type="button" class="button secondary compact" id="docai-${kind}-lookup">기존 프로세서 조회</button>
           <button type="button" class="button secondary compact" id="docai-${kind}-check">연결 확인</button>
           <button type="button" class="button primary compact" id="docai-${kind}-create" disabled>없으면 새로 생성</button>
-        </div><p id="docai-${kind}-status" role="status">리전을 선택하고 먼저 조회해 주세요. 서울 리전과 별개이며, 문서는 선택한 Document AI 리전으로 전송됩니다.</p>
+        </div><p id="docai-${kind}-status" role="status">${item.processorId ? "저장된 연결을 확인합니다." : "공통 연결 미설정 · 리전을 선택하면 기존 프로세서를 자동 조회합니다."} 서울 리전과 별개이며, 문서는 선택한 Document AI 리전으로 전송됩니다.</p>
         <div id="docai-${kind}-plan" class="hidden"><p id="docai-${kind}-plan-text"></p><button type="button" class="button primary compact" id="docai-${kind}-confirm">확인하고 프로세서 생성</button></div>
       </div>`;
     }).join("");
@@ -1312,6 +1539,7 @@
         docaiElement(kind, "create").disabled = true;
         docaiElement(kind, "plan").classList.add("hidden");
         docaiElement(kind, "status").textContent = "리전이 변경됐습니다. 다시 조회해 주세요.";
+        if (docaiElement(kind, "location").value && $("#commonSetupForm").elements.projectId.value) return lookupDocai(kind);
       });
       docaiElement(kind, "lookup").addEventListener("click", () => lookupDocai(kind));
       docaiElement(kind, "check").addEventListener("click", () => checkDocai(kind));
@@ -1322,6 +1550,7 @@
         docaiElement(kind, "plan").classList.remove("hidden");
       });
       docaiElement(kind, "confirm").addEventListener("click", () => createDocai(kind));
+      if (saved[kind]?.location && $("#commonSetupForm").elements.projectId.value) lookupDocai(kind);
     }
   }
 
@@ -1346,9 +1575,14 @@
       const previous = preferred || docaiElement(kind, "processor").value;
       docaiElement(kind, "processor").innerHTML = '<option value="">연결하지 않음</option>' + result.processors.map((item) => `<option value="${escapeHtml(item.id)}" ${item.state !== "ENABLED" ? "disabled" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.id)} · ${escapeHtml(item.state)}</option>`).join("");
       if (result.processors.some((item) => item.id === previous && item.state === "ENABLED")) docaiElement(kind, "processor").value = previous;
+      else if (previous) {
+        // A failed recheck must not silently clear a saved connection on the next save.
+        docaiElement(kind, "processor").innerHTML += `<option value="${escapeHtml(previous)}" selected>${escapeHtml(previous)} · 사용 가능 여부 확인 필요</option>`;
+        docaiElement(kind, "processor").value = previous;
+      }
       docaiSetup.plans[kind] = result;
       docaiElement(kind, "create").disabled = !result.canCreate;
-      docaiElement(kind, "status").textContent = `${result.processors.length}개 확인. ${result.reason}`;
+      docaiElement(kind, "status").textContent = `${location} 리전: ${result.processors.length ? `${result.processors.length}개 확인` : "해당 종류의 프로세서 없음"}. ${result.reason}`;
     } catch (error) {
       if (requestId === docaiSetup.requests[kind]) docaiElement(kind, "status").textContent = `${error.message} 조회 실패는 ‘없음’이 아니므로 생성할 수 없습니다.`;
     }
@@ -1401,7 +1635,11 @@
       $("#createCommonConfig").disabled = false;
       $("#createCommonConfig").textContent = "Document AI 설정 저장";
       $("#setupGate").classList.remove("hidden");
-    } catch (error) { toast("공통 설정을 열지 못했습니다", error.message, "fail"); }
+      return true;
+    } catch (error) {
+      toast("공통 설정을 열지 못했습니다", error.message, "fail");
+      return false;
+    }
   }
 
   function commonSetupPayload() {
@@ -1827,11 +2065,19 @@
   }
 
   function showCommonSetupShell() {
-    // gcloud 응답 전 껍데기. 여기서 보이는 값은 전부 "확인 중" 이어야 한다 —
-    // 비어 있는 채로 두면 로그인이 안 된 것처럼 읽힌다.
+    // 첫 HTML부터 보이는 확인 화면을 재시도 때도 같은 상태로 돌린다.
     const gate = $("#setupGate");
-    if (!gate.classList.contains("hidden")) return;
     gate.classList.remove("hidden");
+    gate.dataset.mode = "checking";
+    $(".app-shell").inert = true;
+    $("#commonSetupForm").classList.add("hidden");
+    $("#retryInitialSetup").classList.add("hidden");
+    $("#setupStep").classList.add("hidden");
+    $("#closeDocaiSetup").classList.add("hidden");
+    $("#setupAuth").classList.remove("hidden");
+    $("#setupEyebrow").textContent = "SETUP CHECK";
+    $("#setupTitle").textContent = "공통 셋업 확인 중";
+    $("#setupIntro").textContent = "공통 설정과 GCP 로그인 상태를 먼저 확인합니다. 확인이 끝나면 필요한 화면으로 이동합니다.";
     $("#setupAuth").dataset.status = "checking";
     $("#setupAuthTitle").textContent = "gcloud 로그인 확인 중";
     $("#setupAuthDetail").textContent = "활성 계정과 접근 가능한 프로젝트를 확인합니다.";
@@ -1847,6 +2093,7 @@
     $("#commonBootstrapFields").classList.toggle("hidden", mode === "docai");
     $("#setupAuth").classList.toggle("hidden", mode === "docai");
     $("#closeDocaiSetup").classList.toggle("hidden", mode !== "docai");
+    $("#closeDocaiSetup").textContent = "닫기";
     $("#setupStep").classList.toggle("hidden", mode === "docai");
     $("#setupGate").dataset.mode = mode;
     $("#commonSetupForm").classList.toggle("hidden", loginOnly);
@@ -1865,6 +2112,18 @@
     return Boolean(env) && (!env.commonExists || !env.gcloudAuthenticated);
   }
 
+  function needsDocaiSetup(env) {
+    return Boolean(env?.commonValid) && Object.keys(docaiKinds).some((kind) => env.docaiConfigured?.[kind] === false);
+  }
+
+  async function showPendingDocaiSetup(env) {
+    if (!needsDocaiSetup(env)) return false;
+    if (!await openDocaiSetup()) throw new Error("Document AI 공통 설정을 불러오지 못했습니다. 다시 시도해 주세요.");
+    $("#closeDocaiSetup").textContent = "나중에 설정";
+    $("#setupIntro").textContent = "Document AI 공통 연결 중 미설정 항목이 있습니다. 아래에서 기존 프로세서를 조회해 연결하거나, 없으면 생성할 수 있습니다. 선택 사항이므로 나중에 설정해도 됩니다.";
+    return true;
+  }
+
   function showCommonSetup(env) {
     applySetupMode(env?.commonExists ? "login" : "create");
     const ready = renderCommonBootstrap(env);
@@ -1880,8 +2139,10 @@
   // login 모드는 저장할 것이 없다. 로그인이 확인되면 화면을 닫고 평소 부팅의
   // 남은 절차(재연결)를 그대로 이어간다.
   async function closeLoginOnlySetup(env) {
-    $("#setupGate").classList.add("hidden");
-    applySetupMode("create");
+    if (!await showPendingDocaiSetup(env)) {
+      $("#setupGate").classList.add("hidden");
+      applySetupMode("create");
+    }
     await loadDepartments();
     if (env?.commonValid) {
       await Promise.all([reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
@@ -1957,8 +2218,13 @@
       try {
         const result = await api("/api/v1/common-config/docai", { method: "PUT", body: { docai: docaiSelections(), configRevision: docaiSetup.revision } });
         docaiSetup.revision = result.configRevision;
-        $("#docaiSetupStatus").textContent = "설정 저장 완료. 운영 환경 → 공통 런타임에서 환경변수를 반영해 주세요. 실제 문서 처리 검증은 별도입니다.";
-        toast("Document AI 설정을 저장했습니다", "공통 런타임 반영이 필요합니다", "ok");
+        if (state.environment) {
+          state.environment.docaiConfigured = Object.fromEntries(Object.entries(result.docai).map(([kind, item]) => [kind, Boolean(item.processorId && item.location)]));
+          renderEnvironment(state.environment);
+        }
+        $("#setupGate").classList.add("hidden");
+        applySetupMode("create");
+        toast("Document AI 설정을 저장했습니다", "운영 환경 → 공통 런타임에서 환경변수를 반영해 주세요", "ok");
       } catch (error) {
         $("#docaiSetupStatus").textContent = error.message;
       } finally { button.disabled = false; }
@@ -2979,9 +3245,7 @@
     }
   }
 
-  // 배포된 parser/sync env 가 현재 학과 설정과 어긋나면 조용히 망가진다 —
-  // 없어진 버킷에 업로드하다 전량 DLQ 로 간다. 서비스 관리 화면에 들어올 때마다
-  // 대조하고, 어긋나 있으면 env 만 새로 씌운다(리비전 하나, 수십 초).
+  // 탭 진입에서는 설정 차이만 알린다. 배포는 사용자의 명시적인 실행으로 시작한다.
   async function refreshRuntimeEnvIfStale() {
     if (state.runtimeEnvChecking) return;
     if (state.commonRuntimeDeployment?.status === "RUNNING") return;
@@ -2989,17 +3253,19 @@
     try {
       const report = await api("/api/v1/runtime-env");
       state.runtimeEnv = report;
-      if (report.status !== "DRIFT") return;
+      if (report.status !== "DRIFT") {
+        if (report.status === "OK") state.runtimeEnvSignature = "";
+        return;
+      }
       const signature = JSON.stringify(report.services || []);
-      // 같은 드리프트로 반복 배포하지 않는다. 실패했으면 사용자가 다시 부른다.
+      // 같은 설정 차이를 탭 이동마다 반복해서 알리지 않는다.
       if (state.runtimeEnvSignature === signature) return;
       state.runtimeEnvSignature = signature;
       const stale = (report.services || [])
         .filter((item) => item.status === "DRIFT")
         .map((item) => item.serviceName)
         .join(", ");
-      toast("런타임 설정을 새로고침합니다", `${stale}의 값이 현재 학과 설정과 달랐습니다.`, "warn");
-      await beginCommonRuntimeDeployment("", { envOnly: true });
+      toast("공통 런타임 설정 반영이 필요합니다", `${stale}의 배포된 설정이 저장된 설정과 다릅니다.`, "warn");
     } catch (error) {
       state.runtimeEnv = { status: "UNKNOWN", reason: error.message };
     } finally {
@@ -3952,6 +4218,36 @@
   }
 
   function bindEvents() {
+    $("#indexIssuesCounts").addEventListener("click", (event) => {
+      const card = event.target.closest("[data-issue-filter]");
+      if (card) setIssueFilter(card.dataset.issueFilter);
+    });
+    $("#indexIssuesDepartment").addEventListener("change", () => loadIndexIssues());
+    $("#indexIssuesFilter").addEventListener("change", renderIndexIssues);
+    $("#indexIssuesSearch").addEventListener("input", renderIndexIssues);
+    $("#refreshIndexIssues").addEventListener("click", () => loadIndexIssues());
+    $("#moreIndexIssues").addEventListener("click", () => loadIndexIssues(true));
+    $("#indexIssuesList").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-index-issue]");
+      if (button) openIndexIssue(button.dataset.indexIssue);
+    });
+    $("#closeIndexIssueDetail").addEventListener("click", closeIndexIssue);
+    $("#indexIssueDetail").addEventListener("cancel", (event) => { event.preventDefault(); closeIndexIssue(); });
+    $("#indexIssueDetail").addEventListener("click", (event) => { if (event.target === event.currentTarget) closeIndexIssue(); });
+    $("#startIssueReprocess").addEventListener("click", startIssueReprocess);
+    $("#refreshIssueReprocess").addEventListener("click", refreshIssueReprocess);
+    $("#issueReprocessRuns").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-reprocess-execution]");
+      if (button) { closeIndexIssue(); openSyncRunDetail(button.dataset.reprocessExecution); }
+    });
+    $("#drawerIndexIssues").addEventListener("click", () => {
+      const code = state.selectedCode;
+      closeDrawer();
+      renderIndexIssueDepartments(code);
+      $("#indexIssuesFilter").value = "";
+      $("#indexIssuesSearch").value = "";
+      switchView("indexIssues");
+    });
     $$(".nav-item").forEach((item) => item.addEventListener("click", () => {
       if (item.dataset.view === "create") {
         resetWizard();
@@ -3987,6 +4283,7 @@
     $("#cancelCreate").addEventListener("click", () => { resetWizard(); switchView("dashboard"); });
     $("#departmentForm").addEventListener("submit", submitDepartment);
     $("#commonSetupForm").addEventListener("submit", submitCommonSetup);
+    $("#retryInitialSetup").addEventListener("click", checkInitialSetup);
     renderDocaiSetup();
     $("#openDocaiSetup").addEventListener("click", openDocaiSetup);
     $("#closeDocaiSetup").addEventListener("click", () => { $("#setupGate").classList.add("hidden"); applySetupMode("create"); });
@@ -4221,24 +4518,36 @@
     }
   }
 
+  async function checkInitialSetup() {
+    showCommonSetupShell();
+    try {
+      const session = await api("/api/v1/session");
+      state.nonce = session.nonce;
+      const env = await loadEnvironment();
+      if (!env) throw new Error("실행 환경 조회에 실패했습니다. 연결 상태를 확인하고 다시 시도해 주세요.");
+      if (env.commonExists && !env.commonValid) throw new Error(env.commonError || "공통 설정 파일을 확인해 주세요.");
+      if (needsCommonSetup(env)) {
+        showCommonSetup(env);
+        $(".app-shell").inert = false;
+        return;
+      }
+      if (!await showPendingDocaiSetup(env)) $("#setupGate").classList.add("hidden");
+      $(".app-shell").inert = false;
+    } catch (error) {
+      $("#setupTitle").textContent = "공통 셋업을 확인하지 못했습니다";
+      $("#setupAuth").dataset.status = "required";
+      $("#setupAuthTitle").textContent = "확인 실패";
+      $("#setupAuthDetail").textContent = error.message;
+      $("#retryInitialSetup").classList.remove("hidden");
+      return;
+    }
+    await Promise.all([loadDepartments(), reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
+    refreshRuntimeEnvIfStale();
+  }
+
   async function init() {
     bindEvents();
-    try {
-      const session = await fetch("/api/v1/session").then((response) => response.json());
-      state.nonce = session.nonce;
-      // 공통 설정 화면을 띄울지는 파일 존재 하나로 정해진다. gcloud 왕복(수 초)을
-      // 기다릴 이유가 없어 먼저 띄우고, 계정·프로젝트는 뒤에서 채운다.
-      if (session.commonExists === false) showCommonSetupShell();
-      const [, env] = await Promise.all([loadDepartments(), loadEnvironment()]);
-      if (needsCommonSetup(env)) showCommonSetup(env);
-      else if (env?.commonValid) {
-        await Promise.all([reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
-        // 첫 화면이 서비스 관리다 — 진입과 같은 취급으로 런타임 설정을 대조한다.
-        refreshRuntimeEnvIfStale();
-      }
-    } catch (error) {
-      toast("콘솔을 초기화하지 못했습니다", error.message, "fail");
-    }
+    await checkInitialSetup();
   }
 
   init();

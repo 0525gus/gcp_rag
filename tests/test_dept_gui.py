@@ -4613,3 +4613,33 @@ def test_cloud_teardown_last_department_requires_confirmed_absence(isolated_conf
     else:
         with pytest.raises(ValueError):
             dept_gui._require_sync_removed()
+
+def test_sync_run_review_checks_execution_and_department_scope(monkeypatch):
+    run={"executionId":"run-id", "state":"FAILED", "departmentCode":"cs", "driveIds":["drive-cs"]}
+    fields={key:{"stringValue":value} for key,value in {"executionId":"run-id", "departmentCode":"cs", "driveId":"drive-cs", "reviewStatus":"REVIEWED"}.items()}
+    monkeypatch.setattr(dept_gui, "_http_json", lambda *a, **kw:(200,{"fields":fields},0))
+    assert dept_gui._sync_run_file_review("p","db","token",run)["reviewStatus"]=="REVIEWED"
+    fields["driveId"]={"stringValue":"drive-ee"}
+    assert dept_gui._sync_run_file_review("p","db","token",run) is None
+    monkeypatch.setattr(dept_gui, "_http_json", lambda *a, **kw:(403,{},0))
+    assert dept_gui._sync_run_file_review("p","db","token",run)["reviewStatus"]=="UNAVAILABLE"
+
+def test_sync_run_review_reads_new_file_checkpoints_when_no_historical_review(monkeypatch):
+    run={"executionId":"run-id", "state":"FAILED", "departmentCode":"cs", "driveIds":["drive-cs"], "error":"jobId="+"a"*32}
+    def encoded(data):
+        def value(item):
+            if isinstance(item,dict): return {"mapValue":{"fields":{k:value(v) for k,v in item.items()}}}
+            if isinstance(item,list): return {"arrayValue":{"values":[value(v) for v in item]}}
+            return {"stringValue":item}
+        return {"fields":{k:value(v) for k,v in data.items()}}
+    def get(url,*args,**kwargs):
+        if 'sync_run_reviews' in url: return 404,{},0
+        if '/parts/' in url:
+            return 200,encoded({"status":"RETRYING", "fileResults":{"a":{"status":"DONE"},"b":{"status":"FAILED","error":"empty"}}}),0
+        return 200,encoded({"driveId":"drive-cs", "fileIds":["a","b"], "expectedParts":["faculty"]}),0
+    monkeypatch.setattr(dept_gui,"_http_json",get)
+    monkeypatch.setattr(dept_gui,"_firestore_document_summaries",lambda *a:{})
+    review=dept_gui._sync_run_file_review("p","db","token",run)
+    assert review["counts"]["DONE"]==1
+    assert review["counts"]["FAILED"]==1
+    assert review["source"]=="FILE_CHECKPOINTS"

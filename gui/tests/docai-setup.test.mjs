@@ -74,14 +74,43 @@ test("creation requires the looked-up scope and selects the returned processor",
 
 test("changing region invalidates a previously prepared creation", async () => {
   let creations = 0;
-  const { ui, node } = screen(async (path) => {
+  const { ui, node } = screen(async (path, options) => {
     if (path.endsWith("/create")) creations++;
+    if (options.body.location === "eu") throw new Error("HTTP 403");
     return { projectId: "project-test", location: "us", processors: [], canCreate: true, planId: "plan-1" };
   });
   await ui.lookupDocai("ocr");
   node("docai-ocr-location").value = "eu";
-  node("docai-ocr-location").listeners.change();
+  await node("docai-ocr-location").listeners.change();
   await ui.createDocai("ocr");
   assert.equal(creations, 0);
   assert.equal(node("docai-ocr-create").disabled, true);
+});
+
+test("missing connections are visible before choosing a location", () => {
+  const { node } = screen(async () => { throw new Error("must not look up an unspecified region"); });
+  assert.match(node("docaiSetupSummary").textContent, /Layout Parser: 미설정/);
+  assert.match(node("docaiSetupSummary").textContent, /Enterprise Document OCR: 미설정/);
+});
+
+test("choosing a location automatically looks up that processor kind", async () => {
+  const calls = [];
+  const { node } = screen(async (path, options) => {
+    calls.push({ path, ...options.body });
+    return { processors: [], canCreate: true, reason: "ready" };
+  });
+  await node("docai-ocr-location").listeners.change();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].kind, "ocr");
+  assert.equal(calls[0].location, "us");
+  assert.match(node("docai-ocr-status").textContent, /프로세서 없음/);
+  assert.equal(node("docai-ocr-create").disabled, false);
+});
+
+test("a saved processor missing from the refreshed list is not silently cleared", async () => {
+  const { ui, node } = screen(async () => ({ processors: [], canCreate: true, reason: "ready" }));
+  node("docai-ocr-processor").value = "previous-id";
+  await ui.lookupDocai("ocr");
+  assert.equal(ui.docaiSelections().ocr.processorId, "previous-id");
+  assert.match(node("docai-ocr-processor").innerHTML, /확인 필요/);
 });

@@ -60,6 +60,22 @@ main:
               # 주석 참고. 이 값은 커밋을 막지 않는다.
               parked: 0
 
+    # Explicit selected-file mode never lists changes or advances a Drive token.
+    - selected_file_mode:
+        switch:
+          - condition: ${map.get(args, "reprocessFile") != null}
+            steps:
+              - reprocess_selected:
+                  call: reprocess_document
+                  args:
+                    sync_url: ${sync_url}
+                    parser_url: ${parser_url}
+                    target: ${args.reprocessFile}
+                    request_id: ${run_id}
+                  result: selected_result
+              - return_selected:
+                  return: ${selected_result}
+
     - for_each_drive:
         for:
           value: drive_id
@@ -911,3 +927,67 @@ main:
           totals: ${totals}
           region: ${region}
           projectId: ${project_id}
+
+# A selected document gets an independent index job. Do not retry the mutating
+# HTTP call automatically: an interrupted OCR/import request may have completed.
+reprocess_document:
+  params: [sync_url, parser_url, target, request_id]
+  steps:
+    - ingest_selected:
+        call: http.post
+        args:
+          url: ${sync_url + "/sync/reprocess-file"}
+          auth:
+            type: OIDC
+          body:
+            fileId: ${target.fileId}
+            driveId: ${target.driveId}
+            requestId: ${request_id}
+            parserUrl: ${parser_url}
+          timeout: 1800
+        result: selected
+    - initialize_poll:
+        assign:
+          - polls: 0
+    - route_selected:
+        switch:
+          - condition: ${selected.body.status == "RUNNING"}
+            next: wait_selected
+          - condition: ${selected.body.status == "INDEXED"}
+            next: selected_complete
+        next: selected_incomplete
+    - wait_selected:
+        call: sys.sleep
+        args:
+          seconds: 5
+    - poll_selected:
+        call: http.get
+        args:
+          url: ${sync_url + "/sync/index-jobs/" + selected.body.jobId}
+          auth:
+            type: OIDC
+          timeout: 60
+        result: indexed
+    - check_selected:
+        switch:
+          - condition: ${indexed.body.status == "DONE"}
+            next: selected_complete
+          - condition: ${indexed.body.status == "FAILED"}
+            raise: ${"Selected document indexing failed " + json.encode_to_string(indexed.body)}
+          - condition: ${polls >= 240}
+            raise: "Selected document indexing outcome is not confirmed; inspect the job before retrying"
+    - continue_selected:
+        assign:
+          - polls: ${polls + 1}
+        next: wait_selected
+    - selected_incomplete:
+        raise: ${"Selected document remains unresolved " + json.encode_to_string(selected.body)}
+    - selected_complete:
+        return:
+          ok: true
+          fileId: ${target.fileId}
+          jobId: ${selected.body.jobId}
+          reason: ${selected.body.reason}
+          totals:
+            listed: 1
+            indexed: 1

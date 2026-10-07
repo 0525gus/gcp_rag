@@ -187,6 +187,13 @@ class IndexGcsBody(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class ReprocessFileBody(BaseModel):
+    file_id: str = Field(alias="fileId", pattern=r"^[A-Za-z0-9_-]{1,200}$")
+    drive_id: str = Field(alias="driveId", min_length=1)
+    request_id: str = Field(alias="requestId", pattern=r"^[a-f0-9]{32}$")
+    parser_url: str = Field(default="", alias="parserUrl")
+
+
 class IndexGcsTaskBody(BaseModel):
     job_id: str = Field(..., alias="jobId")
     part_id: str = Field(..., alias="partId")
@@ -2746,35 +2753,54 @@ def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
             return {**_finalize_index_job(settings, body.job_id), "idempotent": True}
         lease.pin()
         with activate(lease):
-            if body.audience == "FACULTY":
-                outcome = _import_and_mark(
-                    store,
-                    body.gcs_uris,
-                    body.file_ids,
-                    rag=RagEngineClient(dept_settings),
-                    mark_indexed=False,
-                    mapping_settings=dept_settings,
-                    corpus_type="FACULTY",
-                )
-                if not outcome.ok:
-                    raise RuntimeError(
-                        "faculty import incomplete "
-                        f"imported={outcome.imported} failed={outcome.failed} skipped={outcome.skipped}"
+            # Reload after claiming: a previous delivery may have checkpointed
+            # files between the initial read and acquisition of the lease.
+            file_results = dict((part_ref.get().to_dict() or {}).get("fileResults") or {})
+            for fid in body.file_ids:
+                if (file_results.get(fid) or {}).get("status") == "DONE":
+                    continue
+                uris = [uri for uri in body.gcs_uris if extract_file_id(uri) == fid]
+                # If an RPC stops returning, keep an explicit unresolved attempt
+                # instead of inventing a per-file success/failure count.
+                lease.checkpoint_file(fid, {"status": "RUNNING", "error": None})
+                if body.audience == "FACULTY":
+                    outcome = _import_and_mark(
+                        store, uris, [fid], rag=RagEngineClient(dept_settings),
+                        mark_indexed=False, mapping_settings=dept_settings,
+                        corpus_type="FACULTY",
                     )
-                result = {
-                    "count": outcome.imported,
-                    "failed": outcome.failed,
-                    "skipped": outcome.skipped,
-                }
-            else:
-                student = _sync_student_corpus(body.gcs_uris, body.file_ids, dept_settings, store)
-                if not bool(student.get("ok", True)):
-                    raise RuntimeError("student corpus import incomplete")
-                result = {
-                    "count": int(student.get("imported") or 0),
-                    "failed": int(student.get("failed") or 0),
-                    "skipped": int(student.get("skipped") or 0),
-                    "result": student,
+                    ok = bool(uris) and outcome.ok
+                    item = {"count": outcome.imported, "failed": outcome.failed,
+                            "skipped": outcome.skipped}
+                else:
+                    student = _sync_student_corpus(uris, [fid], dept_settings, store)
+                    ok = bool(student.get("ok", True))
+                    item = {"count": int(student.get("imported") or 0),
+                            "failed": int(student.get("failed") or 0),
+                            "skipped": int(student.get("skipped") or 0), "result": student}
+                item["status"] = "DONE" if ok else "FAILED"
+                item["error"] = None
+                if not ok:
+                    item["error"] = f"{body.audience.lower()} import incomplete fileId={fid}"
+                lease.checkpoint_file(fid, item)
+                file_results[fid] = item
+            failed_ids = [fid for fid in body.file_ids
+                          if (file_results.get(fid) or {}).get("status") != "DONE"]
+            if failed_ids:
+                raise RuntimeError(
+                    f"{body.audience.lower()} import incomplete fileIds={','.join(failed_ids)}"
+                )
+            result = {
+                "count": sum(int(item.get("count") or 0) for item in file_results.values()),
+                "failed": sum(int(item.get("failed") or 0) for item in file_results.values()),
+                "skipped": sum(int(item.get("skipped") or 0) for item in file_results.values()),
+                "fileResults": file_results,
+            }
+            if body.audience == "STUDENT":
+                result["result"] = {
+                    "enabled": True, "ok": True, "imported": result["count"],
+                    "removed": sum(int((item.get("result") or {}).get("removed") or 0)
+                                   for item in file_results.values()),
                 }
             lease.finish({"audience": body.audience, **result})
         return _finalize_index_job(settings, body.job_id)
@@ -3414,6 +3440,85 @@ def reconcile(body: ReconcileBody) -> dict[str, Any]:
 
 
 # 하위 호환: 구 process 엔드포인트는 ingest+즉시 index (비권장)
+@app.post("/sync/reprocess-file")
+def reprocess_file(body: ReprocessFileBody) -> dict[str, Any]:
+    """Refresh exactly one in-scope document and enqueue its own index job.
+
+    The mutation lease covers validation, ingestion and enqueue. A durable request
+    receipt prevents a repeated Workflow request from repeating OCR/import work.
+    """
+    from google.cloud import firestore
+    from google.cloud.firestore_v1.base_query import FieldFilter
+
+    base = get_settings()
+    settings = _settings_for_drive(base, body.drive_id)
+    if not base.cloud_tasks_enabled:
+        raise HTTPException(409, "Cloud Tasks indexing is disabled")
+    store = DocStateStore(base)
+    _, receipt, _ = _index_job_refs(base, "reprocess-" + body.request_id)
+    with document_mutation(store, settings, [body.file_id]):
+        previous = receipt.get().to_dict() or {}
+        if previous:
+            if previous.get("fileIds") != [body.file_id] or previous.get("driveId") != body.drive_id:
+                raise HTTPException(409, "requestId already belongs to another document")
+            if previous.get("response"):
+                return previous["response"]
+            raise HTTPException(409, "Previous request outcome is uncertain; inspect its execution first")
+        state = store.get(body.file_id)
+        if not state or state.drive_id != body.drive_id:
+            raise HTTPException(404, "Document does not belong to this drive")
+        if state.status in {DocStatus.DELETED, DocStatus.EXCLUDED}:
+            raise HTTPException(409, "Document is no longer a reprocessing target")
+        if state.status == DocStatus.INDEXED and not str(state.error or "").startswith("NO_BODY_EXTRACTOR:"):
+            raise HTTPException(409, "Document is already indexed; refresh the issue list")
+        # Queued tasks may not hold a mutation lease yet. Do not replace their input.
+        jobs = list(receipt.parent.where(filter=FieldFilter(
+            "fileIds", "array_contains", body.file_id,
+        )).limit(1001).stream())
+        if len(jobs) > 1000:
+            raise HTTPException(409, "Too many related jobs to safely verify; operator review required")
+        now = datetime.now(UTC)
+        for job in jobs:
+            data = job.to_dict() or {}
+            if (data.get("kind") == "INDEX_GCS" and data.get("status") == "RUNNING"
+                    and (not data.get("deadlineAt") or data["deadlineAt"] > now)):
+                raise HTTPException(409, "Document already has an active indexing job")
+        drive = DriveClient()
+        meta = drive.get_file(body.file_id)
+        if meta.get("id") != body.file_id or meta.get("driveId") != body.drive_id or meta.get("trashed"):
+            raise HTTPException(409, "Drive document moved or was deleted; run normal synchronization")
+        if settings.sync_folder_id_list and not drive.is_in_sync_scope(body.file_id, settings.sync_folder_id_list):
+            raise HTTPException(409, "Document is outside the current synchronization folders")
+        receipt.set({"kind": "REPROCESS_FILE", "fileIds": [body.file_id],
+                     "driveId": body.drive_id, "status": "STARTED",
+                     "createdAt": firestore.SERVER_TIMESTAMP})
+        # No automatic retry after an ambiguous external call. The receipt remains
+        # STARTED if this process dies; a duplicate request is then rejected above.
+        result = _ingest_with(IngestBody(
+            fileId=body.file_id, driveId=body.drive_id,
+            name=meta.get("name", ""), mimeType=meta.get("mimeType", ""),
+            modifiedTime=meta.get("modifiedTime"), webViewLink=meta.get("webViewLink"),
+            sizeBytes=meta.get("size"), parserUrl=body.parser_url, refreshContent=True,
+        ), store=store, settings=settings, drive=drive, gcs=GcsClient(settings))
+        response = {"fileId": body.file_id, "name": meta.get("name", body.file_id),
+                    "status": result.get("status", "UNKNOWN"), "jobId": ""}
+        if result.get("status") == "GCS_READY":
+            uris = result.get("gcsUris") or ([result["gcsUri"]] if result.get("gcsUri") else [])
+            if not uris:
+                raise HTTPException(502, "Ingestion returned no indexable objects")
+            response.update(index_gcs_async(IndexGcsBody(
+                gcsUris=uris, fileIds=[body.file_id], driveId=body.drive_id,
+            )))
+        elif result.get("status") in {"UNCHANGED", "HASH_UNCHANGED"}:
+            current = store.get(body.file_id)
+            response["status"] = "INDEXED" if current and current.status == DocStatus.INDEXED else "UNCONFIRMED"
+        current = store.get(body.file_id)
+        response["reason"] = str((current.error if current else "") or result.get("reason") or "")[:2000]
+        receipt.set({"status": "DISPATCHED", "response": response,
+                     "updatedAt": firestore.SERVER_TIMESTAMP}, merge=True)
+        return response
+
+
 @app.post("/sync/process")
 def process_legacy(body: IngestBody) -> dict[str, Any]:
     if body.removed or (body.route == RouteKind.DELETE.value):

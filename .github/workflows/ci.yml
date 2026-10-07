@@ -4,8 +4,28 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
+  gui:
+    name: GUI build and regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: Install locked GUI dependencies
+        run: npm ci
+      - name: Build and GUI regression tests
+        run: npm test
+
   test:
     runs-on: ubuntu-latest
     steps:

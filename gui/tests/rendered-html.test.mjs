@@ -30,7 +30,7 @@ test("ships the finished Korean console without starter artifacts", async () => 
   ]);
 
   assert.match(html, /GCP RAG 서비스 관리/);
-  assert.match(html, /GCP RAG Console/);
+  assert.match(html, /<b>GCP RAG<\/b>/);
   assert.match(html, /서비스 현황/);
   assert.match(html, /신규 등록/);
   assert.match(html, /단일 코퍼스/);
@@ -48,18 +48,18 @@ test("ships the finished Korean console without starter artifacts", async () => 
   assert.match(js, /CLOUD METADATA/);
   assert.match(js, /editingSource/);
   assert.match(js, /Cloud 설정 배포를 시작했습니다/);
-  assert.match(css, /\.cloud-only-mark/);
+  assert.doesNotMatch(js, /class="cloud-only-mark"/);
   assert.match(js, /data-deploy-mcp/);
   assert.match(html, /id="drivePreflightStatus"/);
   assert.match(html, /id="driveConflictStatus"/);
   assert.match(html, /id="drawerMore"/);
-  assert.match(html, /관련 리소스와 설정 삭제/);
+  assert.match(html, /학과 리소스 삭제/);
   assert.match(js, /allowDuplicateDriveIds/);
   assert.match(html, /<div class="field tag-field drive-id-field">/);
   assert.match(html, /<label for="driveIds">공유드라이브 ID/);
   assert.match(js, /submitDriveIdsOnEnter/);
   assert.match(js, /driveIds\.addEventListener\("keydown", submitDriveIdsOnEnter\)/);
-  assert.match(html, /폴더 정보 확인/);
+  assert.match(html, /id="driveFolderBrowser"/);
   assert.match(js, /\/api\/v1\/departments\/folder-lookup/);
   assert.match(js, /\/api\/v1\/departments\/drive-folders/);
   assert.match(html, /id="driveFolderBrowser"/);
@@ -102,6 +102,8 @@ test("ships the finished Korean console without starter artifacts", async () => 
   assert.match(page, /redirect\("\/console\/index\.html"\)/);
   assert.match(layout, /lang="ko"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
-  assert.doesNotMatch(html + css + js, /https?:\/\//);
+  // Documentation and generated Drive links are intentional. Runtime assets
+  // must remain local; an external URL ban also rejects valid source links.
+  assert.doesNotMatch(html, /<(?:script|link)\b[^>]*(?:src|href)=["']https?:\/\//i);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
 });
