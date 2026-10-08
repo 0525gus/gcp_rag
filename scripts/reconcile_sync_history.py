@@ -243,9 +243,25 @@ def main():
     if args.apply:
         for review in reviews:
             if review.get("reviewStatus") == "REVIEWED":
-                db.collection("sync_run_reviews").document(review["executionId"]).set(
-                    review, timeout=30
-                )
+                ref = db.collection("sync_run_reviews").document(review["executionId"])
+
+                @firestore.transactional
+                def save_review(transaction, ref=ref, review=review):
+                    previous = ref.get(transaction=transaction).to_dict() or {}
+                    dismissed = previous.get("dismissedFileIds") or []
+                    files = [row for row in review["files"] if row["fileId"] not in dismissed]
+                    transaction.set(
+                        ref,
+                        {
+                            **review,
+                            "files": files,
+                            "counts": summary(files),
+                            "dismissedFileIds": dismissed,
+                            "dismissal": previous.get("dismissal"),
+                        },
+                    )
+
+                save_review(db.transaction())
         print("Saved historical reviews; original states unchanged.", flush=True)
 
 

@@ -45,3 +45,66 @@ RPC 결과가 불확실하면 기존 mutation lease 보호를 유지하며 성�
   관련 테스트 124 passed / 28 skipped. GUI 빌드 및 회귀 테스트 38 passed.
 - 실제 문서 재처리·OCR·RAG 반입 호출은 이번 정리에서 수행하지 않았다.
 - 기존 GUI 8765를 유지하고 최종 GUI 서버는 8766에서도 실행했다.
+
+## 확정된 파일 실패를 분리한 실행 완료
+
+파일별 반입 결과가 실패로 확정돼도 같은 묶음의 다음 파일을 처리한다. 모든 필수
+코퍼스 처리가 끝나면 작업 자체는 DONE으로 반환하되 result.partial 및 failedFileIds로
+부분 실패를 구분한다. 실패 파일은 doc_state/{fileId}/index_failures/{jobId}에 원문
+버전·라우팅 버전·GCS URI·코퍼스별 결과를 보관하고 PARSED 상태를 유지한다.
+이 기록은 작업 완료와 같은 Firestore 트랜잭션에서 저장한다.
+
+Workflow는 성공 파일만 INDEXED 로그를 남기고 실패 파일은 INDEX_FAILED로 기록한다.
+성공 URI 수와 별도 보관된 실패 URI 수를 서버의 완료 작업 기록과 대조한 뒤에만
+토큰을 커밋하고 다음 페이지로 진행한다. 최종 반환은 totals와 ok=false를 포함하며
+GUI는 이를 ‘완료 · 일부 실패’로 표시한다. 재처리는 기존 선택 문서 재처리 또는
+미색인 복구 경로를 사용하며, 완료된 묶음의 자동 재전달로 반복 반입하지 않는다.
+네트워크 결과 불확실·작업 시간 초과·문서 버전 충돌은 이 정상적인 부분 실패
+경로와 구분하며, 기존 실행 오류 및 잠금 보호를 유지한다.
+
+검증: Python 전체 917 passed / 36 skipped / 2 xfailed, GUI 38 passed.
+Workflow revision 000011-b79로 컴파일·배포 완료.
+Cloud Build e19188ce-7522-41ba-8658-3fe8bd653c8d SUCCESS.
+Sync 이미지 sha256:23e34d247ece17ac39fa846d2e1052b1110e935caea599e463c1c59adcd0772e.
+실제 문서 반입을 유발하는 동기화는 검증 목적으로 실행하지 않았다.
+
+Sync revision rag-sync-00033-pm6 Ready / 트래픽 100%, health ok 및 배포 API 스키마 확인.
+
+## Drive 시각 표시
+
+동기화 실행 상세의 파일 처리 내역에서 Drive 생성·수정·동기화 처리 시각을
+한국 시간으로 구분한다. 생성 시각은 Drive createdTime이며 폴더 이동 시각이 아니다.
+Sync 변경분 응답에 createdTime을 추가해 이후 Workflow 파일 로그에도 보존한다.
+과거 로그에 없는 시각은 현재 값으로 추정하지 않고 ‘기록 없음’으로 표시한다.
+관련 Python 139 passed / 28 skipped, GUI 39 passed.
+Cloud Build 5f49c4c6-0a36-4ec1-9adc-51714a46a4ec SUCCESS.
+최신 로컬 GUI: http://127.0.0.1:8767.
+
+Sync revision rag-sync-00034-b6p Ready / 트래픽 100%, health HTTP 200 / ok.
+
+
+## 2026-10-07 실제 OCR·부분 실패·검색 검증
+
+- 배포된 Parser 00009-vj5의 /ocr가 404임을 실제 호출로 확인했다.
+- OCR 테스트 28개 통과 후 현재 Parser 코드를 빌드·배포했다.
+- Cloud Build c4b52c54-56a7-4e20-bc58-31dfe1fb0626 SUCCESS.
+- Parser revision rag-parser-00010-cn5, 트래픽 100%.
+- 이미지 digest sha256:9207bf172d53b494edc8c1a1c571b46e19f8460c9e27af85f458304afb89d212.
+- 고유 접두사 smokec5ba51e4e7344d1a 합성 자료만 사용했다.
+- PNG를 GCS에 업로드하고 배포된 /ocr 호출: HTTP 200, IMAGE_DOCAI.
+- 실제 OCR 본문에서 QUARTZ ORCHID 7429, Cedar 314, cobalt lantern 확인.
+- 정상 TXT → 빈 DOCX → OCR Markdown 순서로 실제 Cloud Tasks 색인 작업을 제출했다.
+- job d5d7d242be5947798b212f4fa5466364: DONE, partial=true, count=2, failed=1.
+- 정상/OCR 문서는 INDEXED, 빈 DOCX는 PARSED 및 index_failures 영수증 1개.
+- faculty 파일 결과는 DONE/FAILED/DONE. 빈 파일 실패 후 OCR 파일 처리가 계속됐다.
+- 교직원 코퍼스 실제 검색에서 정상 문서 청크 3개와 OCR 문서 청크 1개를 확인했다.
+- OCR 검색 결과에서 Cedar 314 및 cobalt lantern 본문을 확인했다.
+- 테스트 문서는 STAFF 전용이며 학생 코퍼스 반입은 0건이었다.
+
+검증 범위: 실제 배포 OCR → GCS Markdown → Cloud Tasks 색인 → RAG 검색 및 파일별 상태 저장.
+Drive 감지·다운로드와 Workflow 전체 실행은 이번 검증에서 실행하지 않았다.
+cs 학과 enableImageOcr는 꺼져 있으며, 학과 설정은 변경하지 않았다.
+따라서 이 결과는 cs의 일반 PNG 동기화가 활성화됐다는 뜻은 아니다.
+증거: tmp/smokec5ba51e4e7344d1a/{ocr,enqueue,job,states,retrieval,cleanup}.json.
+
+정리 완료: 테스트 3개 /sync/delete 모두 HTTP 200, GCS 잔존 0건. 삭제 후 RAG 재검색에서 테스트 정상/OCR 문서 각각 0건 확인. 상태의 DELETED 기록과 검증 작업 이력은 보존했다. Parser /health HTTP 200 및 HWP/HWPX 엔진 ok 확인.

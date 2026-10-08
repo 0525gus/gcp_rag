@@ -102,6 +102,8 @@ main:
                   - drive_gcs: 0
                   - drive_uris: 0
                   - drive_indexed: 0
+                  - drive_deferred_uris: 0
+                  - index_job_id: ""
                   - drive_failed: 0
                   - drive_index_failed: 0
                   - drive_reconciled: false
@@ -667,16 +669,31 @@ main:
                           assign:
                             - drive_indexed: ${default(index_resp.body.result.count, len(pending_uris))}
                             - totals.indexed: ${totals.indexed + default(index_resp.body.result.count, len(pending_uris))}
+                      - record_index_failures:
+                          assign:
+                            - drive_deferred_uris: ${default(map.get(index_resp.body.result, "deferredUris"), 0)}
+                            - drive_index_failed: ${default(map.get(index_resp.body.result, "failed"), 0)}
+                            - totals.indexFailed: ${totals.indexFailed + drive_index_failed}
                       - log_indexed_items:
                           for:
                             value: indexed_item
                             in: ${pending_items}
                             steps:
+                              - check_failed_item:
+                                  switch:
+                                    - condition: ${map.get(indexed_item, "fileId") in default(map.get(index_resp.body.result, "failedFileIds"), [])}
+                                      next: log_failed_index_item
                               - log_indexed_item:
                                   call: sys.log
                                   args:
                                     severity: "INFO"
                                     text: ${"sync-file-result status=INDEXED " + json.encode_to_string(indexed_item)}
+                                  next: continue
+                              - log_failed_index_item:
+                                  call: sys.log
+                                  args:
+                                    severity: "WARNING"
+                                    text: ${"sync-file-result status=INDEX_FAILED " + json.encode_to_string(indexed_item)}
                   - condition: true
                     steps:
                       - no_index:
@@ -697,6 +714,8 @@ main:
                       gcsUploaded: ${drive_gcs}
                       uris: ${drive_uris}
                       indexed: ${drive_indexed}
+                      indexJobId: ${index_job_id}
+                      deferredUris: ${drive_deferred_uris}
                       failed: ${drive_failed}
                       skipped: ${drive_skipped}
                       deleted: ${drive_deleted}
@@ -725,7 +744,7 @@ main:
             # ----- 5) pageToken 커밋 (전체 처리·색인·정합성 검증 성공 시에만) -----
             - commit_token:
                 switch:
-                  - condition: ${pending_page_token != "" and drive_failed == 0 and drive_index_failed == 0 and drive_indexed == drive_uris and drive_reconciled == true}
+                  - condition: ${pending_page_token != "" and drive_failed == 0 and drive_indexed + drive_deferred_uris == drive_uris and drive_reconciled == true}
                     steps:
                       - do_commit:
                           try:
@@ -774,7 +793,7 @@ main:
             # 페이지를 무한히 다시 받는다. 남은 분량은 다음 실행이 이어받는다.
             - next_page:
                 switch:
-                  - condition: ${drive_has_more == true and pending_page_token != "" and drive_failed == 0 and drive_index_failed == 0 and drive_indexed == drive_uris and drive_reconciled == true and drive_page < max_pages}
+                  - condition: ${drive_has_more == true and pending_page_token != "" and drive_failed == 0 and drive_indexed + drive_deferred_uris == drive_uris and drive_reconciled == true and drive_page < max_pages}
                     next: sync_page
                   - condition: ${drive_has_more == true}
                     steps:
@@ -917,13 +936,12 @@ main:
     # Workflow 실행 상태도 실제 결과와 같아야 한다. return ok=false 는 콘솔에서
     # SUCCEEDED 로 보이므로 Scheduler/알림이 부분 실패를 정상으로 오인한다.
     - finalize_summary:
-        switch:
-          - condition: ${totals.failed > 0 or totals.indexFailed > 0}
-            raise: ${"sync incomplete " + json.encode_to_string(totals)}
+        assign:
+          - sync_ok: ${totals.failed == 0 and totals.indexFailed == 0}
 
     - return_summary:
         return:
-          ok: true
+          ok: ${sync_ok}
           totals: ${totals}
           region: ${region}
           projectId: ${project_id}
@@ -970,6 +988,8 @@ reprocess_document:
         result: indexed
     - check_selected:
         switch:
+          - condition: ${indexed.body.status == "DONE" and default(map.get(indexed.body.result, "partial"), false)}
+            next: selected_incomplete
           - condition: ${indexed.body.status == "DONE"}
             next: selected_complete
           - condition: ${indexed.body.status == "FAILED"}

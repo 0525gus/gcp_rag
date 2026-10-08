@@ -265,8 +265,10 @@ def test_partial_batch_checkpoints_success_and_retries_only_failed_document(monk
         return ImportOutcome(uris, 0 if bad else len(uris), 1 if bad else 0, 0)
 
     monkeypatch.setattr(sync_main, "_import_and_mark", importing)
-    with pytest.raises(RuntimeError, match="import incomplete"):
-        sync_main.index_gcs_task(body)
+    outcome = sync_main.index_gcs_task(body)
+    assert outcome["partial"] is True
+    assert outcome["failedFileIds"] == [second]
+    assert outcome["completedFileIds"] == [FILE_ID]
     assert store.get(FILE_ID).status == DocStatus.INDEXED
     assert store.get(second).status == DocStatus.PARSED
     results = job.collection("parts").document("faculty").get().to_dict()["fileResults"]
@@ -274,8 +276,9 @@ def test_partial_batch_checkpoints_success_and_retries_only_failed_document(monk
     assert results[second]["status"] == "FAILED"
     fail_second = False
     assert sync_main.index_gcs_task(body)["status"] == "DONE"
-    assert calls == [FILE_ID, second, second]
-    assert store.get(second).status == DocStatus.INDEXED
+    assert calls == [FILE_ID, second]  # redelivery never replays the finished batch
+    assert store.get(second).status == DocStatus.PARSED
+    assert store._col.document(second).collection("index_failures").document("job").get().exists
 
 
 def test_file_checkpoint_requires_both_corpora(monkeypatch):
@@ -287,24 +290,49 @@ def test_file_checkpoint_requires_both_corpora(monkeypatch):
     body.audience, body.part_id = "STUDENT", "student"
     monkeypatch.setattr(sync_main, "_sync_student_corpus",
                         lambda *a: {"ok": False, "imported": 0})
-    with pytest.raises(RuntimeError):
-        sync_main.index_gcs_task(body)
+    assert sync_main.index_gcs_task(body)["partial"] is True
     assert store.get(FILE_ID).status == DocStatus.PARSED
     monkeypatch.setattr(sync_main, "_sync_student_corpus",
                         lambda *a: {"ok": True, "imported": 1})
     assert sync_main.index_gcs_task(body)["status"] == "DONE"
-    assert store.get(FILE_ID).status == DocStatus.INDEXED
+    assert store.get(FILE_ID).status == DocStatus.PARSED
 
 def test_checkpoint_stores_document_results_separately(monkeypatch):
     store, job, body = setup_job(monkeypatch)
     monkeypatch.setattr(sync_main, "_import_and_mark",
                         lambda _store, uris, ids, **kw: ImportOutcome(uris, 0, 1, 0))
-    with pytest.raises(RuntimeError):
-        sync_main.index_gcs_task(body)
+    assert sync_main.index_gcs_task(body)["partial"] is True
     ref=store._col.document(FILE_ID).collection("index_results").document("job")
     assert ref.get().to_dict()["status"] == "FAILED"
     monkeypatch.setattr(sync_main, "_import_and_mark",
                         lambda _store, uris, ids, **kw: ImportOutcome(uris, 1, 0, 0))
     sync_main.index_gcs_task(body)
-    assert ref.get().to_dict()["status"] == "DONE"
+    assert ref.get().to_dict()["status"] == "FAILED"
     assert ref.get().to_dict()["fileVersion"] == body.file_versions[FILE_ID]
+
+def test_reconcile_accepts_only_server_persisted_deferred_files(monkeypatch):
+    store, job, body = setup_job(monkeypatch)
+    monkeypatch.setattr(sync_main, "_import_and_mark",
+                        lambda _store, uris, ids, **kw: ImportOutcome(uris, 0, 1, 0))
+    sync_main.index_gcs_task(body)
+    payload = sync_main.ReconcileBody(driveId="drive", listed=1, gcsUploaded=1,
+        uris=1, indexed=0, failed=0, skipped=0, deleted=0, indexJobId="job", deferredUris=1)
+    assert sync_main.reconcile(payload)["ok"] is True
+    payload.drive_id = "another-drive"
+    assert sync_main.reconcile(payload)["ok"] is False
+    payload.drive_id = "drive"
+    payload.index_job_id = ""
+    assert sync_main.reconcile(payload)["ok"] is False
+
+
+def test_student_success_does_not_override_failed_faculty_checkpoint(monkeypatch):
+    store, job, body = setup_job(monkeypatch, parts=("faculty", "student"))
+    monkeypatch.setattr(sync_main, "_import_and_mark",
+                        lambda _store, uris, ids, **kw: ImportOutcome(uris, 0, 1, 0))
+    assert sync_main.index_gcs_task(body)["status"] == "RUNNING"
+    body.audience, body.part_id = "STUDENT", "student"
+    monkeypatch.setattr(sync_main, "_sync_student_corpus", lambda *a: {"ok":True,"imported":1})
+    result=sync_main.index_gcs_task(body)
+    assert result["partial"] is True
+    assert store.get(FILE_ID).status == DocStatus.PARSED
+    assert store._col.document(FILE_ID).collection("index_results").document("job").get().to_dict()["status"]=="FAILED"

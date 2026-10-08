@@ -212,8 +212,8 @@ class MutationLease:
                      {"status": "DONE" if other.get("status") == "DONE" else "UNKNOWN"}))
                 if ref.path != self.part_ref.path:
                     all_done = all_done and (
-                        other.get("status") == "DONE"
-                        or (other.get("fileResults", {}).get(file_id) or {}).get("status") == "DONE"
+                        (other.get("fileResults", {}).get(file_id) or {}).get("status") == "DONE"
+                        or (other.get("status") == "DONE" and not other.get("fileResults"))
                     )
             txn.set(self.part_ref, {"fileResults": results}, merge=True)
             states = [row.get("status") for row in corpus_results.values()]

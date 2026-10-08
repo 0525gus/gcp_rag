@@ -577,6 +577,20 @@ def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) 
     elif enable_image_ocr and not all(common.get(k) for k in ("DOCAI_OCR_PROCESSOR_ID", "DOCAI_OCR_LOCATION")):
         _field_error(errors, "enableImageOcr", "공통 설정의 OCR 프로세서 ID와 리전을 먼저 설정해 주세요.")
 
+    audience_options = {}
+    for base, required in (("enableDocaiFallback", ("DOCAI_PROCESSOR_ID", "DOCAI_LOCATION")),
+                           ("enableImageOcr", ("DOCAI_OCR_PROCESSOR_ID", "DOCAI_OCR_LOCATION"))):
+        for audience in ("Staff", "Student"):
+            key = base + audience
+            if key not in payload:
+                continue
+            value = payload[key]
+            if not isinstance(value, bool):
+                _field_error(errors, key, "켜기 또는 끄기를 선택해 주세요.")
+            elif value and not all(common.get(k) for k in required):
+                _field_error(errors, key, "공통 설정의 프로세서 ID와 리전을 먼저 설정해 주세요.")
+            audience_options[key] = value
+
     candidate: dict[str, Any] = {
         "name": name,
         "corpora": {"staff": staff_corpus},
@@ -586,6 +600,7 @@ def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) 
             "syncFolderIds": sync_ids,
         },
         "minInstances": min_instances,
+        **audience_options,
         "enableDocaiFallback": enable_docai_fallback,
         "enableImageOcr": enable_image_ocr,
     }
@@ -625,6 +640,9 @@ def _render_yaml(
         "enableDocaiFallback": body.get("enableDocaiFallback", False),
         "enableImageOcr": body.get("enableImageOcr", False),
     }
+    for key in ('enableDocaiFallbackStaff', 'enableDocaiFallbackStudent', 'enableImageOcrStaff', 'enableImageOcrStudent'):
+        if key in body:
+            ordered[key] = body[key]
     return yaml.safe_dump(ordered, allow_unicode=True, sort_keys=False, width=1000)
 
 
@@ -780,6 +798,10 @@ def cloud_department_public_config(code: str) -> dict[str, Any]:
         "drive": copy.deepcopy(config.get("drive") or {}),
         "minInstances": copy.deepcopy(config.get("minInstances") or {}),
         "enableDocaiFallback": config.get("enableDocaiFallback", False),
+        "enableDocaiFallbackStaff": config.get("enableDocaiFallbackStaff", config.get("enableDocaiFallback", False)),
+        "enableDocaiFallbackStudent": config.get("enableDocaiFallbackStudent", config.get("enableDocaiFallback", False)),
+        "enableImageOcrStaff": config.get("enableImageOcrStaff", config.get("enableImageOcr", False)),
+        "enableImageOcrStudent": config.get("enableImageOcrStudent", config.get("enableImageOcr", False)),
         "enableImageOcr": config.get("enableImageOcr", False),
         "corpusMode": "split" if (config.get("corpora") or {}).get("student") else "single",
         "configRevision": revision,
@@ -5867,6 +5889,7 @@ def _sync_file_item(text: str, timestamp: str) -> dict[str, Any] | None:
         "name": str(payload.get("name") or ""),
         "mimeType": str(payload.get("mimeType") or ""),
         "modifiedTime": str(payload.get("modifiedTime") or ""),
+        "createdTime": str(payload.get("createdTime") or ""),
         "route": str(payload.get("route") or ""),
     }
 
@@ -7728,7 +7751,7 @@ async def update(code: str, request: Request) -> JSONResponse:
         if cloud_revision != current["configRevision"]:
             raise RuntimeError("Cloud 설정이 변경되었습니다. 다시 열어 주세요.")
         merged = copy.deepcopy(existing)
-        for key in ("name", "corpora", "buckets", "drive", "minInstances", "enableDocaiFallback", "enableImageOcr"):
+        for key in ("name", "corpora", "buckets", "drive", "minInstances", "enableDocaiFallback", "enableImageOcr", "enableDocaiFallbackStaff", "enableDocaiFallbackStudent", "enableImageOcrStaff", "enableImageOcrStudent"):
             merged[key] = copy.deepcopy(candidate[key])
         run = start_mcp_deployment(code, cloud_config=merged)
     except FileExistsError as exc:
@@ -7780,13 +7803,16 @@ async def _update_parser_options(
     """상세 패널의 파서 옵션만 변경하고 나머지 Cloud 설정은 보존한다."""
     _require_local_session(request)
     payload = await request.json()
+    audience_keys = {"enableDocaiFallbackStaff", "enableDocaiFallbackStudent", "enableImageOcrStaff", "enableImageOcrStudent"}
+    scoped_keys = {key for key in audience_keys if not option or key.startswith(option)}
+    scoped_request = isinstance(payload, dict) and bool(set(payload) & scoped_keys) and set(payload) <= scoped_keys | {"configRevision"}
     allowed_keys = ({option, "configRevision"},) if option else (
         {"enableDocaiFallback", "configRevision"},
         {"enableDocaiFallback", "enableImageOcr", "configRevision"},
     )
     if (
         not isinstance(payload, dict)
-        or set(payload) not in allowed_keys
+        or (set(payload) not in allowed_keys and not scoped_request)
         or any(not isinstance(payload[key], bool) for key in payload if key != "configRevision")
         or not isinstance(payload.get("configRevision"), str)
         or not payload["configRevision"]
@@ -7803,6 +7829,11 @@ async def _update_parser_options(
                 status_code=409,
             )
         merged = copy.deepcopy(existing)
+        for key in scoped_keys & set(payload):
+            required = ("DOCAI_PROCESSOR_ID", "DOCAI_LOCATION") if "DocaiFallback" in key else ("DOCAI_OCR_PROCESSOR_ID", "DOCAI_OCR_LOCATION")
+            if payload[key] and not all(_common().get(k) for k in required):
+                raise ValueError("공통 설정의 프로세서 ID와 리전을 먼저 설정해 주세요.")
+            merged[key] = payload[key]
         if "enableDocaiFallback" in payload:
             if payload["enableDocaiFallback"] and not all(
                 _common().get(k) for k in ("DOCAI_PROCESSOR_ID", "DOCAI_LOCATION")

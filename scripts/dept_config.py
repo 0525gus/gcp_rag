@@ -339,6 +339,13 @@ def departments_map_from_configs(
         if not isinstance(image_ocr, bool):
             raise SystemExit(f"{code}: enableImageOcr 은 boolean 이어야 한다")
         entry["enableImageOcr"] = image_ocr
+        for option in ("enableDocaiFallback", "enableImageOcr"):
+            for audience in ("Staff", "Student"):
+                key = option + audience
+                if key in configs[code]:
+                    if not isinstance(configs[code][key], bool):
+                        raise SystemExit(f"{code}: {key} 은 boolean 이어야 한다")
+                    entry[key] = configs[code][key]
         for field, env_key, is_list in _MAP_FIELDS:
             raw = env.get(env_key, "")
             if not raw:

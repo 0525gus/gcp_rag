@@ -63,7 +63,11 @@ class Department:
     student_folder_ids: tuple[str, ...] = ()
     sync_folder_ids: tuple[str, ...] = ()
     enable_docai_fallback: bool = False
+    enable_docai_fallback_staff: bool | None = None
+    enable_docai_fallback_student: bool | None = None
     enable_image_ocr: bool = False
+    enable_image_ocr_staff: bool | None = None
+    enable_image_ocr_student: bool | None = None
 
 
 def _departments_from_json(raw: str) -> tuple[Department, ...]:
@@ -113,6 +117,14 @@ def _departments_from_json(raw: str) -> tuple[Department, ...]:
             raise ValueError(f"DEPARTMENTS_JSON department {code}: enableDocaiFallback must be boolean")
         if not isinstance(d.get("enableImageOcr", False), bool):
             raise ValueError(f"DEPARTMENTS_JSON department {code}: enableImageOcr must be boolean")
+        if "enableDocaiFallbackStaff" in d and not isinstance(d["enableDocaiFallbackStaff"], bool):
+            raise ValueError("DEPARTMENTS_JSON enableDocaiFallbackStaff must be boolean")
+        if "enableDocaiFallbackStudent" in d and not isinstance(d["enableDocaiFallbackStudent"], bool):
+            raise ValueError("DEPARTMENTS_JSON enableDocaiFallbackStudent must be boolean")
+        if "enableImageOcrStaff" in d and not isinstance(d["enableImageOcrStaff"], bool):
+            raise ValueError("DEPARTMENTS_JSON enableImageOcrStaff must be boolean")
+        if "enableImageOcrStudent" in d and not isinstance(d["enableImageOcrStudent"], bool):
+            raise ValueError("DEPARTMENTS_JSON enableImageOcrStudent must be boolean")
         out.append(
             Department(
                 code=str(code),
@@ -124,7 +136,11 @@ def _departments_from_json(raw: str) -> tuple[Department, ...]:
                 student_folder_ids=_tuple(d.get("studentFolderIds")),
                 sync_folder_ids=_tuple(d.get("syncFolderIds")),
                 enable_docai_fallback=d.get("enableDocaiFallback", False),
+                enable_docai_fallback_staff=d.get("enableDocaiFallbackStaff", d.get("enableDocaiFallback", False)),
+                enable_docai_fallback_student=d.get("enableDocaiFallbackStudent", d.get("enableDocaiFallback", False)),
                 enable_image_ocr=d.get("enableImageOcr", False),
+                enable_image_ocr_staff=d.get("enableImageOcrStaff", d.get("enableImageOcr", False)),
+                enable_image_ocr_student=d.get("enableImageOcrStudent", d.get("enableImageOcr", False)),
             )
         )
     result = tuple(out)
@@ -185,6 +201,8 @@ class Settings:
     docai_ocr_processor_id: str = ""
     docai_ocr_location: str = ""
     enable_image_ocr: bool = False
+    enable_image_ocr_staff: bool | None = None
+    enable_image_ocr_student: bool | None = None
     drive_ids: str = ""
 
     # 공유 드라이브 내부에서 RAG/GCS 대상 폴더만. 배포는 필수(비우면 거부).
@@ -326,6 +344,8 @@ class Settings:
     # 그 동시성이나 메모리도 같이 봐야 한다.
     max_gcs_bytes: int = 150 * 1024 * 1024
     enable_docai_fallback: bool = False
+    enable_docai_fallback_staff: bool | None = None
+    enable_docai_fallback_student: bool | None = None
     dlq_collection: str = "doc_dlq"
     split_queue_collection: str = "doc_split_queue"
     # 장시간 작업 진행률.
@@ -398,8 +418,18 @@ class Settings:
             student_folder_ids=",".join(dept.student_folder_ids),
             sync_folder_ids=",".join(dept.sync_folder_ids),
             enable_docai_fallback=dept.enable_docai_fallback,
-            enable_image_ocr=dept.enable_image_ocr,
+            enable_docai_fallback_staff=dept.enable_docai_fallback_staff,
+            enable_docai_fallback_student=dept.enable_docai_fallback_student,
+            enable_image_ocr=any(v if v is not None else dept.enable_image_ocr for v in (dept.enable_image_ocr_staff, dept.enable_image_ocr_student)),
+            enable_image_ocr_staff=dept.enable_image_ocr_staff,
+            enable_image_ocr_student=dept.enable_image_ocr_student,
         )
+
+    def parser_option_for(self, option: str, audience: object) -> bool:
+        # Unknown audience follows the conservative staff classification.
+        suffix = "student" if str(getattr(audience, "value", audience)).upper() == "STUDENT" else "staff"
+        explicit = getattr(self, f"{option}_{suffix}")
+        return explicit if explicit is not None else getattr(self, option)
 
     @classmethod
     def from_env(cls) -> Settings:

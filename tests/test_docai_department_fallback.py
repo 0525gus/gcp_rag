@@ -129,3 +129,38 @@ def test_conversion_timeout_is_a_fallback_error(tmp_path, monkeypatch):
     monkeypatch.setattr(fallback_docai.subprocess, "run", timeout)
     with pytest.raises(fallback_docai.FallbackParseError, match="LibreOffice convert failed"):
         fallback_docai.hwp_to_pdf(tmp_path / "input.hwp", tmp_path)
+
+
+@pytest.mark.parametrize("audience,expected", [("STAFF",False),("STUDENT",True),("unknown",False)])
+def test_scoped_fallback_reaches_parser(audience,expected,monkeypatch):
+    settings = Settings(gcp_project_id="p", enable_docai_fallback=True,
+                        enable_docai_fallback_staff=False, enable_docai_fallback_student=True)
+    monkeypatch.setattr(sync,"_resolve_path_ctx",lambda *a:build_path_context([],"doc.hwp"))
+    monkeypatch.setattr(sync,"_resolve_audience",lambda *a:audience)
+    monkeypatch.setattr(sync,"_cloud_run_auth_headers",lambda *a:{})
+    client=MagicMock(); client.__enter__.return_value=client
+    client.post.return_value.status_code=422
+    client.post.return_value.headers={"content-type":"application/json"}
+    client.post.return_value.json.return_value={"detail":{"error":"QUALITY_GATE"}}
+    monkeypatch.setattr(sync.httpx,"Client",lambda **kw:client)
+    gcs,drive=MagicMock(),MagicMock();gcs.upload_hwp_original.return_value="gs://raw/doc.hwp"
+    drive.download_file.return_value=b"source"
+    sync._ingest_hwp(sync.IngestBody(fileId="doc",driveId="cs",name="doc.hwp",mimeType="application/x-hwp",parserUrl="https://parser"),MagicMock(),gcs,drive,settings)
+    assert client.post.call_args.kwargs["json"]["enableDocaiFallback"] is expected
+
+
+def test_audience_overrides_survive_mapping_and_do_not_leak_between_departments(tmp_path,monkeypatch):
+    (tmp_path/"common.yaml").write_text("GCP_PROJECT_ID: p\n")
+    monkeypatch.setattr(dept_config,"CONFIG_DIR",tmp_path)
+    configs={code:{"corpora":{"staff":code},"keys":{"staff":code*32},"buckets":{"hwpOriginal":"raw","source":"source"},"drive":{"driveIds":[code],"syncFolderIds":[code]}} for code in ["cs","ee"]}
+    configs["cs"].update(enableDocaiFallbackStaff=False,enableDocaiFallbackStudent=True,enableImageOcrStaff=False,enableImageOcrStudent=True)
+    mapping=dept_config.departments_map_from_configs(configs)
+    cs=Settings(gcp_project_id="p",departments=_departments_from_json(json.dumps(mapping))).for_drive("cs")
+    assert cs.enable_image_ocr  # changes/backfill must include possible student images
+    for option in ["enable_docai_fallback","enable_image_ocr"]:
+        assert not cs.parser_option_for(option,"STAFF")
+        assert cs.parser_option_for(option,"STUDENT")
+        assert not cs.for_drive("ee").parser_option_for(option,"STUDENT")
+    mapping["cs"]["enableImageOcrStaff"]="false"
+    with pytest.raises(ValueError,match="enableImageOcrStaff"):
+        _departments_from_json(json.dumps(mapping))

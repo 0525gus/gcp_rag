@@ -2466,6 +2466,7 @@ def test_sync_workflow_logs_parses_file_result_event(
             "name": "안내.xlsx",
             "mimeType": "application/vnd.test",
             "modifiedTime": "",
+            "createdTime": "",
             "route": "FILE_COPY",
         }
     ]
@@ -4643,3 +4644,10 @@ def test_sync_run_review_reads_new_file_checkpoints_when_no_historical_review(mo
     assert review["counts"]["DONE"]==1
     assert review["counts"]["FAILED"]==1
     assert review["source"]=="FILE_CHECKPOINTS"
+
+
+def test_sync_file_item_keeps_drive_timestamps_separate_from_log_time():
+    result = dept_gui._sync_file_item('sync-file-result status=INDEXED {"fileId":"file", "createdTime":"2026-01-01T00:00:00Z", "modifiedTime":"2026-02-01T00:00:00Z"}', "2026-03-01T00:00:00Z")
+    assert result["createdTime"] == "2026-01-01T00:00:00Z"
+    assert result["modifiedTime"] == "2026-02-01T00:00:00Z"
+    assert result["timestamp"] == "2026-03-01T00:00:00Z"

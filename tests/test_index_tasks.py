@@ -236,8 +236,10 @@ def test_task_partial_failure_stays_retryable(monkeypatch):
         "_import_and_mark",
         lambda *_a, **_kw: ImportOutcome(body.gcs_uris, imported=0, failed=1, skipped=0),
     )
-    with pytest.raises(RuntimeError, match="faculty import incomplete"):
-        sync_main.index_gcs_task(body)
-    assert job.collection("parts").document("faculty").get().to_dict()["status"] == "RETRYING"
+    result = sync_main.index_gcs_task(body)
+    assert result["partial"] is True
+    assert result["failedFileIds"] == [FILE_ID]
+    assert store._col.document(FILE_ID).collection("index_failures").document("job").get().exists
+    assert job.collection("parts").document("faculty").get().to_dict()["status"] == "DONE"
     assert not store._tokens.document(f"__mutation__{FILE_ID}").get().exists
     assert store.get(FILE_ID).status == DocStatus.PARSED

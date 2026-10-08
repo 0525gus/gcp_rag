@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 const source = await readFile(new URL("../public/console/app.js", import.meta.url), "utf8");
-const block = source.slice(source.indexOf("  function renderSyncHistory()"), source.indexOf("  async function openSyncRunDetail("));
+const block = source.slice(source.indexOf("  function syncFileTime("), source.indexOf("  async function openSyncRunDetail("));
 function render(run, items = [], fileReview = null) {
   const nodes = new Map();
   const $ = (id) => { if (!nodes.has(id)) nodes.set(id, { innerHTML: "", textContent: "", insertAdjacentHTML(_, html) { this.innerHTML += html; } }); return nodes.get(id); };
@@ -45,4 +45,11 @@ test("historical file review groups documents without replacing original executi
  assert.match($("#syncRunFileReview").innerHTML,/실패 확인/);
  assert.match($("#syncRunFileReview").innerHTML,/일부 완료/);
  assert.doesNotMatch($("#syncRunFileReview").innerHTML,/<unsafe>/);
+});
+
+test("file dates distinguish Drive timestamps from processing time and missing history", () => {
+ const $ = render({state:"SUCCEEDED"}, [{fileId:"dated",status:"INDEXED",createdTime:"2026-01-01T00:00:00Z",modifiedTime:"2026-02-02T00:00:00Z",timestamp:"2026-03-03T00:00:00Z"}, {fileId:"old",status:"DELETED"}]);
+ const html=$("#syncRunDetailItems").innerHTML;
+ assert.match(html,/Drive 생성/); assert.match(html,/Drive 수정/); assert.match(html,/동기화 처리/);
+ assert.match(html,/2026/); assert.match(html,/기록 없음/);
 });

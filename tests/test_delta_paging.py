@@ -345,7 +345,7 @@ def test_next_page_only_loops_when_token_was_committed() -> None:
     for clause in (
         'pending_page_token != ""',
         "drive_failed == 0",
-        "drive_indexed == drive_uris",
+        "drive_indexed + drive_deferred_uris == drive_uris",
         "drive_reconciled == true",
     ):
         assert clause in commit_cond

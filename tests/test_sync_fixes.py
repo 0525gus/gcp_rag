@@ -444,7 +444,7 @@ def test_workflow_yaml_parses_and_uses_uris_gate() -> None:
     assert "main" in data
     # 색인 실패는 failed 와 분리해 세지만(이중 집계 방지) 커밋은 똑같이 막아야 한다.
     assert (
-        "drive_failed == 0 and drive_index_failed == 0 and drive_indexed == drive_uris"
+        "drive_failed == 0 and drive_indexed + drive_deferred_uris == drive_uris"
         in txt
     )
     assert "drive_reconciled == true" in txt

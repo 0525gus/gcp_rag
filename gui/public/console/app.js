@@ -142,10 +142,17 @@
     window.setTimeout(() => item.remove(), 4300);
   }
 
-  function switchView(view) {
+  function switchView(view, historyMode = "push") {
+    if (state.currentView === "dashboard" && view !== "dashboard") state.dashboardScroll = window.scrollY;
+    if (view !== "department") state.selectedCode = null;
+    const hash = view === "department" ? `#departments/${encodeURIComponent(state.selectedCode)}` : `#${view}`;
+    if (historyMode !== "none" && window.location.hash !== hash) {
+      window.history[historyMode === "replace" ? "replaceState" : "pushState"]({}, "", hash);
+    }
     state.currentView = view;
+    document.title = view === "department" ? `${state.departments.find((item) => item.code === state.selectedCode)?.name || "학과 상세"} · GCP RAG` : "GCP RAG · 운영 콘솔";
     $$(".view").forEach((item) => item.classList.toggle("active", item.id === `${view}View`));
-    $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === view));
+    $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === (view === "department" ? "dashboard" : view)));
     document.body.classList.remove("menu-open");
     if (view === "environment") {
       loadEnvironment();
@@ -162,10 +169,10 @@
       renderCorpusDepartmentOptions();
       window.setTimeout(() => $("#corpusChatInput").focus(), 120);
     }
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.scrollTo({ top: view === "dashboard" ? (state.dashboardScroll || 0) : 0, behavior: "instant" });
   }
 
-  const indexIssueState = { request: 0, detailRequest: 0, items: [], cursor: "", scanned: 0, loading: false, loaded: false,
+  const indexIssueState = { request: 0, detailRequest: 0, items: [], cursor: "", scanned: 0, visible: 25, loading: false, loaded: false,
     fileId: "", code: "", posting: false, historyRequest: 0, pollTimer: null, requestId: "", detailReady: false, canRetry: false };
 
   function renderIndexIssueDepartments(preferred = "") {
@@ -195,6 +202,7 @@
 
   function setIssueFilter(filter) {
     $("#indexIssuesFilter").value = filter;
+    indexIssueState.visible = 25;
     renderIndexIssues();
   }
 
@@ -202,23 +210,28 @@
     const selected = $("#indexIssuesFilter").value;
     const query = $("#indexIssuesSearch").value.trim().toLocaleLowerCase();
     const priority = { FAILED: 0, SPLIT_QUEUED: 1, SKIPPED: 2, BODY_MISSING: 3, PARSED: 4, PENDING: 5 };
-    const rows = indexIssueState.items.filter((item) => issueMatchesFilter(item, selected)
+    const audience = $("#indexIssuesAudience").value;
+    const audienceItems = indexIssueState.items.filter((item) => !audience || (item.audience || "STAFF") === audience);
+    const rows = audienceItems.filter((item) => issueMatchesFilter(item, selected)
       && `${item.name} ${item.path} ${item.reason}`.toLocaleLowerCase().includes(query))
       .sort((a, b) => (priority[a.status] ?? 6) - (priority[b.status] ?? 6));
     const summary = $("#indexIssuesSummary");
     summary.textContent = !$("#indexIssuesDepartment").value ? "학과를 선택해 주세요."
       : indexIssueState.loading ? `조회 중… 현재 ${indexIssueState.items.length}건 확인`
-        : indexIssueState.loaded ? `${rows.length}건 표시 · 조회된 보류·오류 ${indexIssueState.items.length}건`
+        : indexIssueState.loaded ? `${Math.min(rows.length, indexIssueState.visible)} / 검색 결과 ${rows.length}건 표시 · 선택 대상 보류·오류 ${audienceItems.length}건`
           : "조회하지 못했습니다. 새로고침으로 다시 시도해 주세요.";
     $("#indexIssuesCoverage").classList.toggle("hidden", !indexIssueState.loaded);
     $("#indexIssuesCoverage").classList.toggle("is-partial", Boolean(indexIssueState.cursor));
-    $("#indexIssuesCoverage").textContent = `문서 상태 ${indexIssueState.scanned}건 확인${indexIssueState.cursor ? " · 일부 조회 — 아직 조회하지 않은 문서가 있습니다. ‘계속 조회’로 나머지를 확인하세요." : " · 전체 조회 완료"}`;
+    $("#indexIssuesCoverage").textContent = indexIssueState.loaded
+      ? `문서 상태 ${indexIssueState.scanned}건 확인 · 전체 집계 완료`
+      : `문서 상태 ${indexIssueState.scanned}건 확인 · ${indexIssueState.loading ? "전체 집계 중" : "집계 미완료 — 새로고침해 주세요"}`;
+    $("#indexIssuesCoverage").classList.toggle("hidden", !$("#indexIssuesDepartment").value);
     $("#refreshIndexIssues").disabled = indexIssueState.loading;
-    $("#moreIndexIssues").classList.toggle("hidden", !indexIssueState.cursor);
+    $("#moreIndexIssues").classList.toggle("hidden", rows.length <= indexIssueState.visible);
     $("#moreIndexIssues").disabled = indexIssueState.loading;
     const groups = [["", "전체", "all"], ["FAILED", "오류", "error"], ["HELD", "보류·본문 없음", "held"], ["WAITING", "대기·완료 미확인", "waiting"]];
-    $("#indexIssuesCounts").innerHTML = groups.map(([filter, label, tone]) => `<button type="button" class="issue-tab" data-tone="${tone}" data-issue-filter="${filter}" aria-pressed="${selected === filter}" ${indexIssueState.loaded ? "" : "disabled"}><span class="issue-tab-dot" aria-hidden="true"></span><span>${label}</span><strong>${indexIssueState.loaded ? indexIssueState.items.filter((item) => issueMatchesFilter(item, filter)).length : "—"}</strong></button>`).join("");
-    $("#indexIssuesList").innerHTML = rows.length ? `<div class="issue-list-heading" aria-hidden="true"><span>문서 / 처리 사유</span><span>처리 상태</span><span>마지막 처리</span><span>상세</span></div>` + rows.map((item) => `<button type="button" class="issue-row" data-index-issue="${escapeHtml(item.fileId)}" data-tone="${issueTone(item.status)}" aria-haspopup="dialog">
+    $("#indexIssuesCounts").innerHTML = groups.map(([filter, label, tone]) => `<button type="button" class="issue-tab" data-tone="${tone}" data-issue-filter="${filter}" aria-pressed="${selected === filter}" ${indexIssueState.loaded ? "" : "disabled"}><span class="issue-tab-dot" aria-hidden="true"></span><span>${label}</span><strong>${indexIssueState.loaded ? audienceItems.filter((item) => issueMatchesFilter(item, filter)).length : "—"}</strong></button>`).join("");
+    $("#indexIssuesList").innerHTML = rows.length ? `<div class="issue-list-heading" aria-hidden="true"><span>문서 / 처리 사유</span><span>처리 상태</span><span>마지막 처리</span><span>상세</span></div>` + rows.slice(0, indexIssueState.visible).map((item) => `<button type="button" class="issue-row" data-index-issue="${escapeHtml(item.fileId)}" data-tone="${issueTone(item.status)}" aria-haspopup="dialog">
       <span class="issue-document"><span class="issue-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 12h6M9 16h4"/></svg></span><span class="issue-document-copy"><b>${escapeHtml(item.name)}</b><span class="issue-row-reason">${escapeHtml(item.reason || "상세 내역에서 처리 사유를 확인하세요.")}</span></span></span>
       <span class="issue-badge" data-tone="${issueTone(item.status)}">${escapeHtml(item.statusLabel)}</span>
       <span class="issue-date">${escapeHtml(issueDate(item.updatedAt))}</span><span class="issue-open" aria-hidden="true">보기 <span>↗</span></span>
@@ -226,10 +239,11 @@
   }
 
   async function loadIndexIssues(more = false) {
+    if (more) { indexIssueState.visible += 25; renderIndexIssues(); return; }
     const code = $("#indexIssuesDepartment").value;
     const request = ++indexIssueState.request;
     if (!more) {
-      Object.assign(indexIssueState, { items: [], cursor: "", scanned: 0, loaded: false });
+      Object.assign(indexIssueState, { items: [], cursor: "", scanned: 0, visible: 25, loaded: false });
       closeIndexIssue();
     }
     indexIssueState.loading = Boolean(code);
@@ -237,11 +251,18 @@
     renderIndexIssues();
     if (!code) return;
     try {
-      const result = await api(`/api/v1/departments/${encodeURIComponent(code)}/index-issues?cursor=${encodeURIComponent(indexIssueState.cursor)}`);
-      if (request !== indexIssueState.request) return;
-      indexIssueState.items = [...new Map([...indexIssueState.items, ...result.items].map((item) => [item.fileId, item])).values()];
-      indexIssueState.cursor = result.nextCursor;
-      indexIssueState.scanned += result.scanned;
+      const visited = new Set();
+      do {
+        const cursor = indexIssueState.cursor;
+        if (visited.has(cursor)) throw new Error("조회 위치가 반복됩니다. 새로고침해 주세요.");
+        visited.add(cursor);
+        const result = await api(`/api/v1/departments/${encodeURIComponent(code)}/index-issues?cursor=${encodeURIComponent(cursor)}`);
+        if (request !== indexIssueState.request) return;
+        indexIssueState.items = [...new Map([...indexIssueState.items, ...result.items].map((item) => [item.fileId, item])).values()];
+        indexIssueState.cursor = result.nextCursor || "";
+        indexIssueState.scanned += result.scanned;
+        renderIndexIssues();
+      } while (indexIssueState.cursor);
       indexIssueState.loaded = true;
     } catch (error) {
       if (request !== indexIssueState.request) return;
@@ -546,6 +567,30 @@
     await navigator.clipboard.writeText(value);
   }
 
+  function gcpConsoleUrl(kind, name, project = "", region = "") {
+    if (!name || name === "—") return "";
+    const enc = encodeURIComponent;
+    if (kind === "corpus") {
+      const match = String(name).match(/^projects\/([^/]+)\/locations\/([^/]+)\/ragCorpora\/([^/]+)$/);
+      if (!match) return "";
+      return `https://console.cloud.google.com/agent-platform/rag/corpus?project=${enc(match[1])}&region=${enc(match[2])}`;
+    }
+    if (kind === "bucket") return `https://console.cloud.google.com/storage/browser/${enc(String(name).replace(/^gs:\/\//, "").replace(/\/$/, ""))}${project ? `?project=${enc(project)}` : ""}`;
+    if (!project || !region) return "";
+    const paths = {
+      cloudRun: `run/detail/${enc(region)}/${enc(name)}/metrics`,
+      workflow: `workflows/workflow/${enc(region)}/${enc(name)}/executions`,
+      scheduler: "cloudscheduler",
+    };
+    return paths[kind] ? `https://console.cloud.google.com/${paths[kind]}?project=${enc(project)}` : "";
+  }
+
+  function consoleLink(kind, name, project, region) {
+    const url = gcpConsoleUrl(kind, name, project, region);
+    const label = kind === "corpus" ? "RAG 목록에서 보기" : kind === "scheduler" ? "Scheduler 목록에서 보기" : "GCP에서 보기";
+    return url ? `<a class="gcp-console-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" aria-label="${escapeHtml(name)} · ${label} (새 탭)">${label} <span aria-hidden="true">↗</span></a>` : "";
+  }
+
   function renderDrawerMcpServers(code, data = null, error = "") {
     const root = $("#drawerMcpServers");
     if (error) {
@@ -571,7 +616,7 @@
           <div class="mcp-server-main">
             <div class="mcp-server-title"><span class="mcp-ready-dot" title="${escapeHtml(statusLabel)}"></span><b>${escapeHtml(data.unifiedMcp ? `${server.label} · ${statusLabel}` : server.serviceName)}</b></div>
             ${urlElement}
-            <div class="mcp-server-actions"><button type="button" class="mcp-url-copy" data-copy-mcp-url="${escapeHtml(url === "URL 없음" ? "" : url)}" ${url === "URL 없음" ? "disabled" : ""}>MCP URL 복사</button><button type="button" class="mcp-url-copy mcp-key-copy" data-copy-mcp-key="${escapeHtml(server.audience)}" data-department-code="${escapeHtml(code)}" ${server.status === "DISABLED" ? "disabled" : ""}>키 복사</button></div>
+            <div class="mcp-server-actions">${consoleLink("cloudRun", server.serviceName, data.projectId, data.region)}<button type="button" class="mcp-url-copy" data-copy-mcp-url="${escapeHtml(url === "URL 없음" ? "" : url)}" ${url === "URL 없음" ? "disabled" : ""}>MCP URL 복사</button><button type="button" class="mcp-url-copy mcp-key-copy" data-copy-mcp-key="${escapeHtml(server.audience)}" data-department-code="${escapeHtml(code)}" ${server.status === "DISABLED" ? "disabled" : ""}>키 복사</button></div>
           </div>
         </article>`;
       }).join("")}</div>`;
@@ -876,9 +921,9 @@
       <span class="sync-run-state">실행 중</span>
     </div>
     <div class="sync-progress-stages">${stageHtml}</div>
-    <div class="sync-progress-copy"><div><b>${escapeHtml(syncPhaseLabel(run))}</b><span>${hasMeasuredProgress ? `${processed.toLocaleString()} / ${listed.toLocaleString()}개 처리 · ${escapeHtml(speedLabel)} · ${escapeHtml(etaLabel)}` : "진행 상태를 확인하고 있습니다."}</span></div><strong>${hasMeasuredProgress ? `${percent}%` : "LIVE"}</strong></div>
-    <div class="sync-progress-track${hasMeasuredProgress ? "" : " indeterminate"}" role="progressbar" aria-label="동기화 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${hasMeasuredProgress ? percent : 0}"><div class="sync-progress-value" style="width:${hasMeasuredProgress ? percent : 34}%"><span></span><i></i></div></div>
-    <div class="sync-progress-meta"><span>0%</span><b>5초마다 자동 갱신</b><span>100%</span></div>
+    <div class="sync-progress-copy"><div><b>${escapeHtml(syncPhaseLabel(run))}</b><span>${hasMeasuredProgress ? `${processed.toLocaleString()} / ${listed.toLocaleString()}개 처리 · ${escapeHtml(speedLabel)} · ${escapeHtml(etaLabel)}` : "진행 상태를 확인하고 있습니다."}</span></div><strong>${hasMeasuredProgress ? `${percent}%` : "진행 중"}</strong></div>
+    ${hasMeasuredProgress ? `<div class="sync-progress-track" role="progressbar" aria-label="동기화 진행률" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}"><div class="sync-progress-value" style="width:${percent}%"><span></span><i></i></div></div>
+    <div class="sync-progress-meta"><span>0%</span><b>5초마다 자동 갱신</b><span>100%</span></div>` : '<div class="sync-progress-pending" role="status">전체 처리량이 확정되지 않아 진행률을 표시하지 않습니다. · 5초마다 자동 갱신</div>'}
     <section class="sync-live-detail">
       <header><b>현재 실행 위치</b><span>${escapeHtml(progressUpdated)}</span></header>
       <div class="sync-live-detail-grid">
@@ -897,6 +942,14 @@
       <div class="sync-metric fail"><span>실패</span><b>${failures.toLocaleString()}</b></div>
     </div>
     <div class="sync-run-foot"><code>${escapeHtml(run.executionId || run.runId)}</code><span>경과 ${escapeHtml(syncDuration(run.startTime))}</span></div>`;
+  }
+
+  function syncFileTime(value) {
+    if (!value) return "기록 없음";
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return "기록 없음";
+    return date.toLocaleString("ko-KR", { timeZone: "Asia/Seoul", year: "numeric",
+      month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   }
 
   function renderSyncHistory() {
@@ -933,7 +986,7 @@
     return ({
       ACTIVE: "진행 중",
       SUCCEEDED: "완료",
-      ATTENTION: "완료 · 확인 필요",
+      ATTENTION: "완료 · 일부 실패",
       FAILED: "실행 오류",
       CANCELLED: "취소",
     })[outcomeState] || outcomeState;
@@ -1008,7 +1061,7 @@
       <article class="sync-detail-item" data-status="${escapeHtml(String(item.status || "").toLowerCase())}">
         <i>${escapeHtml(syncItemLabel(item))}</i>
         <div><b>${escapeHtml(item.name || item.fileId)}</b><small>${escapeHtml(item.path || item.mimeType || "경로 정보 없음")}</small><code>${escapeHtml(item.fileId)}</code></div>
-        <time>${escapeHtml(syncStartedAt(item.timestamp))}</time>
+        <div class="sync-file-times"><span>Drive 생성 <time>${escapeHtml(syncFileTime(item.createdTime))}</time></span><span>Drive 수정 <time>${escapeHtml(syncFileTime(item.modifiedTime))}</time></span><span>동기화 처리 <time>${escapeHtml(syncFileTime(item.timestamp))}</time></span></div>
       </article>`).join("") : `<div class="sync-detail-item-empty">${processed ? "이 실행은 파일별 기록 기능 적용 전 실행입니다." : "조회된 파일 처리 기록이 없습니다."}</div>`;
     const logs = [...(payload.logs || [])];
     if (run.error) {
@@ -1071,7 +1124,9 @@
     const refresh = $("#refreshSyncRuns");
     if (!quiet) {
       refresh.disabled = true;
-      refresh.textContent = "조회 중…";
+      refresh.classList.add("is-loading");
+      refresh.setAttribute("aria-busy", "true");
+      refresh.innerHTML = '<span class="loader-ring" aria-hidden="true"></span><span>동기화 이력 조회 중…</span>';
     }
     try {
       const data = await api("/api/v1/sync-runs?limit=20");
@@ -1096,8 +1151,10 @@
       $("#syncHistoryRows").innerHTML = `<tr><td colspan="8" class="sync-history-empty">${escapeHtml(error.message)}</td></tr>`;
       if (!quiet) toast("동기화 이력을 불러오지 못했습니다", error.message, "fail");
     } finally {
-      if (!quiet && requestId === state.syncRequest) {
+      if (requestId === state.syncRequest) {
         refresh.disabled = false;
+        refresh.classList.remove("is-loading");
+        refresh.setAttribute("aria-busy", "false");
         refresh.textContent = "실행 이력 새로고침";
       }
     }
@@ -1164,7 +1221,6 @@
   }
 
   function renderEnvironment(env) {
-    const projectMatch = env.gcloudProject && env.gcloudProject === env.configuredProject;
     const driveStatus = state.driveSaStatus;
     const driveDetail = state.driveSaChecking
       ? "서비스 계정 연결 상태 확인 중…"
@@ -1185,9 +1241,6 @@
       })),
       { icon: "SA", label: "Drive 확인 서비스 계정", value: env.serviceAccount || "확인 필요", detail: driveDetail, copy: env.serviceAccount, check: true, tone: driveTone },
       { icon: "›_", label: "gcloud", value: env.gcloudInstalled ? (env.gcloudAuthenticated ? "로그인됨" : "로그인 필요") : "설치되지 않음", detail: env.gcloudAccount || "활성 계정 없음", login: Boolean(env.gcloudInstalled) && !env.gcloudAuthenticated },
-      { icon: "Py", label: "Python", value: env.pythonVersion, detail: "로컬 API 런타임" },
-      { icon: "↔", label: "프로젝트 일치", value: projectMatch ? "일치" : "확인 필요", detail: env.gcloudProject || "gcloud 프로젝트 없음" },
-      { icon: "●", label: "서버 경계", value: "127.0.0.1", detail: "외부 네트워크 비공개" },
     ];
     $("#environmentGrid").innerHTML = cards.map((card) => `
       <article class="environment-card${card.tone ? ` status-${escapeHtml(card.tone)}` : ""}">
@@ -1250,6 +1303,7 @@
           ${extra ? `<div class="runtime-extra"><span>${service.pendingRevision ? "대기 리비전" : service.revision ? "리비전" : "실행 일정"}</span><code>${escapeHtml(service.pendingRevision || extra)}</code></div>` : ""}
         </div>
         <footer>
+          ${consoleLink(service.kind, service.name, runtime.projectId, runtime.region)}
           ${service.url ? `<button type="button" class="copy-value-button" data-copy-value="${escapeHtml(service.url)}">URL 복사</button>` : "<span></span>"}
           ${deletable ? `<button type="button" class="button danger compact" data-runtime-delete="${escapeHtml(service.key)}" aria-label="${escapeHtml(service.displayName || service.name)} 삭제">삭제</button>` : ""}
         </footer>
@@ -2328,7 +2382,6 @@
       updateCheckAllButton();
       state.checkingCodes.clear();
       $("#runStrip").classList.add("hidden");
-      $("#lastChecked").textContent = `마지막 확인 ${new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}`;
       renderDepartments();
       if (state.selectedCode) openDrawer(state.selectedCode, false);
       toast(
@@ -2382,16 +2435,16 @@
     }
   }
 
-  function openDrawer(code, announce = true) {
+  function openDrawer(code, announce = true, historyMode = "push") {
     const dept = state.departments.find((item) => item.code === code);
     if (!dept) return;
     const changed = state.selectedCode !== code;
     state.selectedCode = code;
     if (changed || announce) loadDrawerDocai(code);
     $("#drawerTitle").textContent = dept.name;
-    $("#drawerPath").textContent = dept.path;
+    $("#drawerPath").textContent = "문서 처리와 검색 서비스를 관리합니다.";
     const overall = effectiveStatus(dept);
-    $("#drawerSummary").innerHTML = `${badge(overall)}<span class="status-badge status-UNKNOWN">${escapeHtml(code)}</span>`;
+    $("#drawerSummary").innerHTML = `${badge(overall)}<span class="status-badge status-UNKNOWN">${escapeHtml(code)}</span><span class="department-checked">최근 상태 확인 · ${escapeHtml(relativeTime(dept.lastResult?.checkedAt))}</span>`;
     const cachedMcp = state.mcpServers.get(code);
     renderDrawerMcpServers(code, cachedMcp || null);
     if (!cachedMcp) {
@@ -2402,15 +2455,15 @@
     const result = dept.lastResult;
     const metadata = dept.metadata || {};
     const metadataRows = dept.cloudOnly ? [
-      ["교직원 코퍼스", metadata.corpora?.staff || "—"],
-      ["학생 코퍼스", metadata.corpora?.student || "—"],
-      ["HWP 버킷", metadata.buckets?.hwpOriginal || "—"],
-      ["Source 버킷", metadata.buckets?.source || "—"],
+      ["교직원 코퍼스", metadata.corpora?.staff || "—", "corpus"],
+      ["학생 코퍼스", metadata.corpora?.student || "—", "corpus"],
+      ["HWP 버킷", metadata.buckets?.hwpOriginal || "—", "bucket"],
+      ["Source 버킷", metadata.buckets?.source || "—", "bucket"],
       ["공유드라이브", (metadata.drive?.driveIds || []).join(", ") || "—"],
       ["동기화 폴더", (metadata.drive?.syncFolderIds || []).join(", ") || "—"],
       ["학생 폴더", (metadata.drive?.studentFolderIds || []).join(", ") || "—"],
     ] : [];
-    const metadataHtml = metadataRows.length ? `<section class="check-layer cloud-metadata-layer"><h3>CLOUD METADATA</h3><div class="cloud-metadata-grid">${metadataRows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><code>${escapeHtml(value)}</code></div>`).join("")}</div></section>` : "";
+    const metadataHtml = metadataRows.length ? `<section class="check-layer cloud-metadata-layer"><h3>연결된 리소스</h3><div class="cloud-metadata-grid">${metadataRows.map(([label, value, kind]) => `<div><span>${escapeHtml(label)}</span><div class="resource-reference"><code>${escapeHtml(value)}</code>${kind ? consoleLink(kind, value, state.environment?.configuredProject, state.environment?.region) : ""}</div></div>`).join("")}</div></section>` : "";
     if (overall === "CHECKING") {
       $("#drawerContent").innerHTML = metadataHtml + '<div class="empty-state"><h3>상태 확인 중</h3><p>로컬 설정부터 GCP 리소스, 배포, 런타임, 동기화 상태까지 다시 확인하고 있습니다.</p></div>';
     } else if (!result?.checks?.length) {
@@ -2437,21 +2490,40 @@
     $("#drawerDelete").dataset.code = code;
     if (changed || announce) $("#drawerMore").removeAttribute("open");
     $("#drawerDeleteSection").classList.toggle("hidden", !dept.cloudOnly);
-    const drawer = $("#detailDrawer");
-    drawer.classList.add("open");
-    drawer.setAttribute("aria-hidden", "false");
-    if (announce) window.setTimeout(() => $(".drawer-panel .icon-button").focus(), 230);
+    if (announce || state.currentView !== "department") {
+      switchView("department", historyMode);
+      if (announce) $("#drawerTitle").focus({ preventScroll: true });
+    }
   }
 
   function closeDrawer() {
+    if (state.currentView === "department") switchView("dashboard");
     state.selectedCode = null;
-    $("#detailDrawer").classList.remove("open");
-    $("#detailDrawer").setAttribute("aria-hidden", "true");
+    state.drawerDocaiRequest += 1;
+  }
+
+  function restorePageRoute() {
+    const route = window.location.hash.slice(1);
+    if (route.startsWith("departments/")) {
+      let code;
+      try { code = decodeURIComponent(route.slice(12)); } catch (_) { code = ""; }
+      if (state.departments.some((item) => item.code === code)) {
+        openDrawer(code, true, "none");
+        return;
+      }
+      toast("학과를 찾을 수 없습니다.", "서비스 현황에서 학과를 다시 선택해 주세요.", "fail");
+      switchView("dashboard", "replace");
+      return;
+    }
+    const view = ["dashboard", "create", "sync", "indexIssues", "corpus", "environment"].includes(route) ? route : "dashboard";
+    switchView(view, "none");
   }
 
   const drawerParserOptions = [
-    { key: "enableDocaiFallback", select: "#drawerDocaiFallback", button: "#saveDrawerDocai", status: "#drawerDocaiStatus", endpoint: "docai-fallback", label: "HWP/HWPX fallback" },
-    { key: "enableImageOcr", select: "#drawerImageOcr", button: "#saveDrawerImageOcr", status: "#drawerImageOcrStatus", endpoint: "image-ocr", label: "이미지 OCR" },
+    { key: "enableDocaiFallbackStaff", select: "#drawerDocaiFallbackStaff", button: "#saveDrawerDocaiStaff", status: "#drawerDocaiStatusStaff", endpoint: "docai-fallback", label: "교직원 Layout Parser · HWP/HWPX fallback" },
+    { key: "enableDocaiFallbackStudent", select: "#drawerDocaiFallbackStudent", button: "#saveDrawerDocaiStudent", status: "#drawerDocaiStatusStudent", endpoint: "docai-fallback", label: "학생 Layout Parser · HWP/HWPX fallback" },
+    { key: "enableImageOcrStaff", select: "#drawerImageOcrStaff", button: "#saveDrawerImageOcrStaff", status: "#drawerImageOcrStatusStaff", endpoint: "image-ocr", label: "교직원 이미지 OCR · PNG/JPG" },
+    { key: "enableImageOcrStudent", select: "#drawerImageOcrStudent", button: "#saveDrawerImageOcrStudent", status: "#drawerImageOcrStatusStudent", endpoint: "image-ocr", label: "학생 이미지 OCR · PNG/JPG" },
   ];
 
   async function loadDrawerDocai(code) {
@@ -2488,9 +2560,10 @@
       const changed = ($(option.select).value === "true") !== (config[option.key] === true);
       $(option.button).disabled = !changed;
       $(option.status).dataset.error = "false";
+      $(option.status).dataset.changed = String(changed);
       $(option.status).textContent = changed
-        ? "저장하면 이 항목만 학과 설정에 반영됩니다."
-        : `저장된 설정: ${config[option.key] ? "켜기" : "끄기"}`;
+        ? "변경됨 · 저장 필요"
+        : `저장됨 · ${config[option.key] ? "켜짐" : "꺼짐"}`;
     }
   }
 
@@ -2510,7 +2583,6 @@
         method: "PUT",
         body: { [option.key]: enabled, configRevision: config.configRevision },
       });
-      if (state.selectedCode === code) closeDrawer();
       state.mcpDeploymentCode = code;
       renderMcpDeployment(result.deployment);
       showMcpDeploymentModal();
@@ -3060,6 +3132,8 @@
       state.mcpServers.delete(run.code);
       await loadDepartments();
       if (state.selectedCode === run.code) {
+        loadDrawerDocai(run.code);
+        openDrawer(run.code, false);
         loadDepartmentMcpServers(run.code).then((data) => renderDrawerMcpServers(run.code, data)).catch(() => {});
       }
       toast(run.status === "COMPLETED" ? "MCP 배포를 완료했습니다" : "MCP 배포를 완료하지 못했습니다", run.status === "COMPLETED" ? `${run.serviceNames.length}개 서비스가 준비되었습니다.` : run.error, run.status === "COMPLETED" ? "ok" : "fail");
@@ -3694,8 +3768,10 @@
       code: value("code").toLowerCase(),
       name: value("name"),
       corpusMode: state.corpusMode,
-      enableDocaiFallback: value("enableDocaiFallback") === "true",
-      enableImageOcr: value("enableImageOcr") === "true",
+      enableDocaiFallbackStaff: value("enableDocaiFallbackStaff") === "true",
+      enableDocaiFallbackStudent: value("enableDocaiFallbackStudent") === "true",
+      enableImageOcrStaff: value("enableImageOcrStaff") === "true",
+      enableImageOcrStudent: value("enableImageOcrStudent") === "true",
       corpora: { staff: value("staffCorpus"), student: state.corpusMode === "split" ? value("studentCorpus") : "" },
       buckets: { hwpOriginal: value("hwpBucket"), source: value("sourceBucket") },
       drive: {
@@ -3826,8 +3902,10 @@
     syncFolderIds: "drive.syncFolderIds",
     studentFolderIds: "drive.studentFolderIds",
     staffMin: "minInstances.staff",
-    enableDocaiFallback: "enableDocaiFallback",
-    enableImageOcr: "enableImageOcr",
+    enableDocaiFallbackStaff: "enableDocaiFallbackStaff",
+    enableDocaiFallbackStudent: "enableDocaiFallbackStudent",
+    enableImageOcrStaff: "enableImageOcrStaff",
+    enableImageOcrStudent: "enableImageOcrStudent",
     studentMin: "minInstances.student",
   };
 
@@ -3886,8 +3964,10 @@
       ...(state.corpusMode === "split" ? [["학생 코퍼스", selectedText("studentCorpus", payload.corpora.student)]] : []),
       ["버킷", `${payload.buckets.hwpOriginal} / ${payload.buckets.source}`],
       ["Drive 범위", `${payload.drive.driveIds.length}개 drive · ${payload.drive.syncFolderIds.length}개 folder`],
-      ["HWP/HWPX 품질 보완 (DocAI fallback)", payload.enableDocaiFallback ? "켜기" : "끄기"],
-      ["이미지 텍스트 추출 (PNG/JPG OCR)", payload.enableImageOcr ? "켜기" : "끄기"],
+      ["교직원 Layout Parser · HWP/HWPX fallback", payload.enableDocaiFallbackStaff ? "켜기" : "끄기"],
+      ["학생 Layout Parser · HWP/HWPX fallback", payload.enableDocaiFallbackStudent ? "켜기" : "끄기"],
+      ["교직원 이미지 OCR · PNG/JPG", payload.enableImageOcrStaff ? "켜기" : "끄기"],
+      ["학생 이미지 OCR · PNG/JPG", payload.enableImageOcrStudent ? "켜기" : "끄기"],
       ["MCP", state.corpusMode === "single" ? "기본 서버 1개 · 키 자동 관리" : "교직원·학생 서버 2개 · 키 자동 관리"],
     ];
     $("#reviewSummary").innerHTML = rows.map(([label, value]) => `<div class="review-item"><span>${escapeHtml(label)}</span><b>${escapeHtml(value)}</b></div>`).join("");
@@ -4052,8 +4132,10 @@
       form.elements.studentFolderIds.value = (config.drive?.studentFolderIds || []).join("\n");
       form.elements.staffMin.value = config.minInstances?.staff ?? 0;
       form.elements.studentMin.value = config.minInstances?.student ?? 0;
-      form.elements.enableDocaiFallback.value = String(config.enableDocaiFallback === true);
-      form.elements.enableImageOcr.value = String(config.enableImageOcr === true);
+      form.elements.enableDocaiFallbackStaff.value = String(config.enableDocaiFallbackStaff === true);
+      form.elements.enableDocaiFallbackStudent.value = String(config.enableDocaiFallbackStudent === true);
+      form.elements.enableImageOcrStaff.value = String(config.enableImageOcrStaff === true);
+      form.elements.enableImageOcrStudent.value = String(config.enableImageOcrStudent === true);
       form.elements.staffMin.disabled = Boolean(config.unifiedMcp);
       form.elements.studentMin.disabled = Boolean(config.unifiedMcp);
       $("#minInstancesFields").classList.toggle("hidden", Boolean(config.unifiedMcp));
@@ -4223,6 +4305,10 @@
       if (card) setIssueFilter(card.dataset.issueFilter);
     });
     $("#indexIssuesDepartment").addEventListener("change", () => loadIndexIssues());
+    $("#indexIssuesAudience").addEventListener("change", () => {
+      indexIssueState.visible = 25;
+      renderIndexIssues();
+    });
     $("#indexIssuesFilter").addEventListener("change", renderIndexIssues);
     $("#indexIssuesSearch").addEventListener("input", renderIndexIssues);
     $("#refreshIndexIssues").addEventListener("click", () => loadIndexIssues());
@@ -4448,9 +4534,6 @@
       $("#drawerMore").removeAttribute("open");
       openTeardown("department", event.currentTarget.dataset.code);
     });
-    document.addEventListener("click", (event) => {
-      if (!event.target.closest("#drawerMore")) $("#drawerMore").removeAttribute("open");
-    });
     $("#commonRuntimeTeardown").addEventListener("click", () => openTeardown("commonRuntime"));
     $$('[data-close-teardown]').forEach((item) => item.addEventListener("click", closeTeardownModal));
     $("#teardownConfirmInput").addEventListener("input", syncTeardownConfirmState);
@@ -4474,7 +4557,6 @@
       else if ($("#commonRuntimeDeploymentModal").classList.contains("open")) closeCommonRuntimeDeployment();
       else if ($("#mcpDeploymentModal").classList.contains("open")) closeMcpDeployment();
       else if ($("#resourceProvisionModal").classList.contains("open")) closeResourceModal();
-      else if ($("#detailDrawer").classList.contains("open")) closeDrawer();
     });
   }
 
@@ -4547,7 +4629,9 @@
 
   async function init() {
     bindEvents();
+    window.addEventListener("popstate", restorePageRoute);
     await checkInitialSetup();
+    restorePageRoute();
   }
 
   init();

@@ -41,25 +41,35 @@ test("late results from a different department never replace current list", asyn
   assert.equal(s.ui.indexIssueState.scanned, 1);
 });
 
-test("no matches in a scanned page does not claim all documents are healthy", async () => {
-  const s = screen(async () => ({ items: [], scanned: 500, nextCursor: "more" }));
-  await s.ui.loadIndexIssues();
-  assert.match(s.$("#indexIssuesCoverage").textContent, /아직 조회하지 않은/);
-  assert.equal(s.$("#moreIndexIssues").classList.contains("hidden"), false);
-});
-
-test("next-page failure preserves prior documents and allows retry", async () => {
-  let fail = false;
+test("automatically scans every page and only expands 25 visible items at a time", async () => {
+  let reads = 0;
   const s = screen(async () => {
-    if (fail) throw new Error("permission denied");
-    return { items: [item("a")], scanned: 500, nextCursor: "more" };
+    reads++;
+    return reads === 1 ? {items: [], scanned:500, nextCursor:"more"}
+      : {items:Array.from({length:60}, (_,i) => item(`doc-${i}`)),scanned:60,nextCursor:""};
   });
   await s.ui.loadIndexIssues();
-  fail = true;
+  assert.equal(reads,2);
+  assert.equal(s.ui.indexIssueState.items.length,60);
+  assert.match(s.$("#indexIssuesCoverage").textContent,/전체 집계 완료/);
+  assert.equal((s.$("#indexIssuesList").innerHTML.match(/data-index-issue=/g)||[]).length,25);
+  assert.match(s.$("#indexIssuesCounts").innerHTML,/<strong>60<\/strong>/);
   await s.ui.loadIndexIssues(true);
-  assert.equal(s.ui.indexIssueState.items.length, 1);
-  assert.equal(s.ui.indexIssueState.cursor, "more");
-  assert.equal(s.$("#indexIssuesError").textContent, "permission denied");
+  assert.equal(reads,2);
+  assert.equal((s.$("#indexIssuesList").innerHTML.match(/data-index-issue=/g)||[]).length,50);
+});
+
+test("automatic next-page failure preserves results but never claims complete totals", async () => {
+  let reads = 0;
+  const s = screen(async () => {
+    if (++reads > 1) throw new Error("permission denied");
+    return {items:[item("a")],scanned:500,nextCursor:"more"};
+  });
+  await s.ui.loadIndexIssues();
+  assert.equal(s.ui.indexIssueState.items.length,1);
+  assert.equal(s.ui.indexIssueState.loaded,false);
+  assert.match(s.$("#indexIssuesCoverage").textContent,/집계 미완료/);
+  assert.equal(s.$("#indexIssuesError").textContent,"permission denied");
 });
 
 test("untrusted document text is escaped and detail is ignored after department switch", async () => {
@@ -164,5 +174,20 @@ test("status tabs filter locally, preserve search, and prioritize errors without
   s.ui.setIssueFilter("");
   assert.match(s.$("#indexIssuesList").innerHTML, /data-index-issue="body"/);
   assert.doesNotMatch(s.$("#indexIssuesList").innerHTML, /data-index-issue="held"/);
+  assert.equal(reads, 1);
+});
+
+test("audience selection filters the complete scan and status counts without another request", async () => {
+  let reads = 0;
+  const s = screen(async () => { reads++; return {items: [{...item("student-doc"), audience:"STUDENT"}, {...item("staff-doc"), audience:"STAFF"}], scanned:2, nextCursor:""}; });
+  await s.ui.loadIndexIssues();
+  for (const [audience, shown, hidden] of [["STUDENT", "student-doc", "staff-doc"], ["STAFF", "staff-doc", "student-doc"]]) {
+    s.$("#indexIssuesAudience").value = audience;
+    s.ui.renderIndexIssues();
+    assert.ok(s.$("#indexIssuesList").innerHTML.includes(shown));
+    assert.ok(!s.$("#indexIssuesList").innerHTML.includes(hidden));
+    assert.match(s.$("#indexIssuesSummary").textContent, /선택 대상 보류·오류 1건/);
+    assert.match(s.$("#indexIssuesCounts").innerHTML, /<strong>1<\/strong>/);
+  }
   assert.equal(reads, 1);
 });

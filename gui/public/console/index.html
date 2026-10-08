@@ -152,9 +152,6 @@
             <span class="context-divider">/</span>
             <span id="regionName">region</span>
           </div>
-          <div class="topbar-actions">
-            <span class="last-checked" id="lastChecked">아직 확인하지 않음</span>
-          </div>
         </header>
 
         <section class="view active" id="dashboardView" aria-labelledby="dashboardTitle">
@@ -347,25 +344,32 @@
                   </section>
                 </div>
                 <details class="advanced-options">
-                  <summary>고급 설정 <span>이미지 OCR · Doc AI fallback · 최소 인스턴스</span></summary>
+                  <summary>고급 설정 <span>이미지 OCR · Layout Parser · 최소 인스턴스</span></summary>
+                  <p class="issue-help">Layout Parser는 HWP/HWPX 기본 파싱 품질이 낮을 때 PDF로 변환하여 재처리합니다. 이미지 OCR과 별개이며, 학생자료 폴더 여부로 적용 범위를 구분합니다.</p>
                   <div class="form-grid">
                     <label class="field">
-                      <span>HWP/HWPX 품질 보완 (DocAI fallback)</span>
-                      <select name="enableDocaiFallback">
-                        <option value="false">끄기 (기본값)</option>
-                        <option value="true">켜기</option>
-                      </select>
-                      <small>기본 파싱 결과가 품질 기준에 미달하면 PDF 변환 후 Document AI Layout Parser로 재처리합니다. PDF 변환에 실패하면 재처리할 수 없습니다. 별도 프로세서 설정과 추가 비용이 필요합니다. PNG/JPG 이미지 OCR과 독립된 옵션입니다.</small>
-                      <span class="field-error" data-error="enableDocaiFallback"></span>
+                      <span>Layout Parser · HWP/HWPX fallback · 교직원 자료</span>
+                      <select name="enableDocaiFallbackStaff"><option value="false">끄기 (기본값)</option><option value="true">켜기</option></select>
+                      <small>학생자료 폴더 밖의 교직원 전용 자료에 적용합니다. Document AI 처리 비용이 발생할 수 있습니다.</small>
+                      <span class="field-error" data-error="enableDocaiFallbackStaff"></span>
                     </label>
                     <label class="field">
-                      <span>이미지 텍스트 추출 (PNG/JPG OCR)</span>
-                      <select name="enableImageOcr">
-                        <option value="false">끄기 (기본값)</option>
-                        <option value="true">켜기</option>
-                      </select>
-                      <small>PNG/JPG(JPEG)의 글자를 Document AI OCR 전용 프로세서로 추출해 검색에 포함합니다. HWP/HWPX fallback과 독립적으로 작동하며, 별도 프로세서 설정과 추가 비용이 필요합니다. 표 구조 복원과 스캔 PDF는 포함하지 않습니다. 기존 이미지는 전체 동기화로 수집해 주세요.</small>
-                      <span class="field-error" data-error="enableImageOcr"></span>
+                      <span>Layout Parser · HWP/HWPX fallback · 학생 자료</span>
+                      <select name="enableDocaiFallbackStudent"><option value="false">끄기 (기본값)</option><option value="true">켜기</option></select>
+                      <small>학생자료 폴더 안의 자료에 적용합니다. 처리 결과는 교직원 검색에도 공유됩니다. Document AI 처리 비용이 발생할 수 있습니다.</small>
+                      <span class="field-error" data-error="enableDocaiFallbackStudent"></span>
+                    </label>
+                    <label class="field">
+                      <span>이미지 OCR · PNG/JPG · 교직원 자료</span>
+                      <select name="enableImageOcrStaff"><option value="false">끄기 (기본값)</option><option value="true">켜기</option></select>
+                      <small>학생자료 폴더 밖의 교직원 전용 자료에 적용합니다. Document AI 처리 비용이 발생할 수 있습니다.</small>
+                      <span class="field-error" data-error="enableImageOcrStaff"></span>
+                    </label>
+                    <label class="field">
+                      <span>이미지 OCR · PNG/JPG · 학생 자료</span>
+                      <select name="enableImageOcrStudent"><option value="false">끄기 (기본값)</option><option value="true">켜기</option></select>
+                      <small>학생자료 폴더 안의 자료에 적용합니다. 처리 결과는 교직원 검색에도 공유됩니다. Document AI 처리 비용이 발생할 수 있습니다.</small>
+                      <span class="field-error" data-error="enableImageOcrStudent"></span>
                     </label>
                   </div>
                   <div class="form-grid two-columns" id="minInstancesFields">
@@ -465,7 +469,7 @@
               <h1 id="syncTitle">데이터 동기화</h1>
               <p>학과별 변경분 동기화와 전체 다시 적재를 수동으로 실행하고 진행 상태를 확인하세요.</p>
             </div>
-            <button type="button" class="button secondary" id="refreshSyncRuns">실행 이력 새로고침</button>
+            <button type="button" class="button secondary" id="refreshSyncRuns" aria-live="polite" aria-busy="false">실행 이력 새로고침</button>
           </div>
 
           <div class="sync-control-grid">
@@ -567,6 +571,7 @@
           <section class="issue-workspace" aria-label="학과별 문서 조회">
           <div class="issue-filters">
             <label class="field"><span>학과</span><select id="indexIssuesDepartment"><option value="">학과 선택</option></select></label>
+            <label class="field"><span>자료 대상</span><select id="indexIssuesAudience"><option value="">전체 자료</option><option value="STUDENT">학생 자료</option><option value="STAFF">교직원 자료</option></select></label>
             <label class="field"><span>상태</span><select id="indexIssuesFilter">
               <option value="">전체 상태</option><option value="FAILED">처리 오류</option>
               <option value="HELD">보류·본문 없음 전체</option><option value="WAITING">대기·완료 미확인 전체</option>
@@ -576,12 +581,12 @@
             </select></label>
             <label class="field"><span>검색</span><input id="indexIssuesSearch" type="search" placeholder="파일명 · 경로 · 오류 사유" /></label>
           </div>
-          <div class="issue-overview" id="indexIssuesCounts" aria-label="조회된 문서 상태 필터"></div>
+          <div class="issue-overview" id="indexIssuesCounts" aria-label="전체 문서 상태 필터"></div>
           <div class="issue-results-toolbar"><p id="indexIssuesSummary" role="status">학과를 선택해 주세요.</p><span>오류 우선 정렬</span></div>
           <p id="indexIssuesCoverage" class="issue-coverage hidden" role="status"></p>
           <div id="indexIssuesError" class="validation-banner hidden" role="alert"></div>
           <div id="indexIssuesList" class="issue-list"></div>
-          <div class="issue-pagination"><button type="button" class="button secondary hidden" id="moreIndexIssues">계속 조회</button></div>
+          <div class="issue-pagination"><button type="button" class="button secondary hidden" id="moreIndexIssues">25개 더 보기</button></div>
           </section>
           <p class="issue-help issue-status-note"><b>완료 미확인이란?</b> 파싱은 끝났지만 색인 완료 기록이 없는 상태입니다. 실행 중이거나 같은 배치의 다른 문서가 실패했을 수 있습니다.</p>
         </section>
@@ -598,10 +603,6 @@
           <div class="environment-grid" id="environmentGrid">
             <div class="skeleton-card"></div><div class="skeleton-card"></div><div class="skeleton-card"></div>
           </div>
-          <section class="panel safety-panel">
-            <span class="shield-mark">✓</span>
-            <div><h2>로컬 보안 경계</h2><p>이 콘솔은 127.0.0.1에서만 열리며 MCP 키와 GCP 토큰을 브라우저에 저장하지 않습니다.</p></div>
-          </section>
           <section class="panel runtime-panel">
             <div class="panel-toolbar">
               <div>
@@ -625,48 +626,46 @@
             <button class="button danger" id="commonRuntimeTeardown">공통 런타임 삭제</button>
           </section>
         </section>
-      </main>
-    </div>
-
-    <aside class="detail-drawer" id="detailDrawer" aria-hidden="true" aria-labelledby="drawerTitle">
-      <div class="drawer-backdrop" data-close-drawer></div>
-      <div class="drawer-panel">
-        <header>
-          <div><span class="eyebrow">DEPARTMENT DETAIL</span><h2 id="drawerTitle">학과 상세</h2><p id="drawerPath"></p></div>
+    <section class="view department-detail" id="departmentView" aria-labelledby="drawerTitle">
+      <button type="button" class="department-back" data-close-drawer aria-label="서비스 현황으로 돌아가기"><span aria-hidden="true">←</span> 서비스 현황</button>
+      <div class="department-page">
+        <header class="department-hero">
+          <div><span class="eyebrow">DEPARTMENT DETAIL</span><h2 id="drawerTitle" tabindex="-1">학과 상세</h2><p id="drawerPath"></p></div>
           <div class="drawer-header-actions">
-            <button class="icon-button" data-close-drawer aria-label="상세 닫기">×</button>
+            <button class="button secondary" id="drawerCheck">상태 새로고침</button>
+            <button class="button primary" id="drawerEdit">설정 수정</button>
           </div>
         </header>
         <div class="drawer-summary" id="drawerSummary"></div>
-        <section class="drawer-mcp-servers" id="drawerMcpServers" aria-live="polite"></section>
+          <section class="drawer-mcp-servers" id="drawerMcpServers" aria-live="polite"></section>
+
         <div class="drawer-content">
-          <button type="button" class="button secondary" id="drawerIndexIssues">이 학과의 색인 보류·오류 보기</button>
+          <section class="department-index-card" aria-labelledby="departmentIndexTitle">
+            <div class="department-index-copy">
+              <h3 id="departmentIndexTitle">문서 색인</h3>
+              <p>검색에 반영되지 않은 문서의 보류·오류 사유를 확인하고 재처리할 수 있습니다.</p>
+            </div>
+            <button type="button" class="button secondary" id="drawerIndexIssues">보류·오류 보기 <span aria-hidden="true">→</span></button>
+          </section>
           <div id="drawerContent"></div>
           <details class="department-management" id="drawerMore">
-            <summary>고급 관리 <span>이미지 OCR · Doc AI fallback · 리소스 삭제</span></summary>
-            <div class="department-management-options form-grid">
-              <label class="field" for="drawerDocaiFallback">
-                <span>HWP/HWPX 품질 보완 (DocAI fallback)</span>
-                <select id="drawerDocaiFallback" disabled>
-                  <option value="false">끄기 (기본값)</option>
-                  <option value="true">켜기</option>
-                </select>
-                <small>기본 파싱 결과가 품질 기준에 미달하면 PDF 변환 후 Document AI Layout Parser로 재처리합니다. PDF 변환에 실패하면 재처리할 수 없습니다. 별도 프로세서 설정과 추가 비용이 필요합니다. PNG/JPG 이미지 OCR과 독립된 옵션입니다.</small>
-              </label>
-              <span class="drawer-option-status" id="drawerDocaiStatus" role="status">설정을 불러오는 중…</span>
-              <button type="button" class="button primary compact" id="saveDrawerDocai" disabled>HWP/HWPX fallback만 저장</button>
-            </div>
-            <div class="department-management-options form-grid">
-              <label class="field" for="drawerImageOcr">
-                <span>이미지 텍스트 추출 (PNG/JPG OCR)</span>
-                <select id="drawerImageOcr" disabled>
-                  <option value="false">끄기 (기본값)</option>
-                  <option value="true">켜기</option>
-                </select>
-                <small>PNG/JPG(JPEG)의 글자를 Document AI OCR 전용 프로세서로 추출해 검색에 포함합니다. HWP/HWPX fallback과 독립적으로 작동하며, 별도 프로세서 설정과 추가 비용이 필요합니다. 표 구조 복원과 스캔 PDF는 포함하지 않습니다. 기존 이미지는 전체 동기화로 수집해 주세요. 끄기는 이후 OCR 처리를 중단하며 기존 색인 삭제는 별도입니다.</small>
-              </label>
-              <span class="drawer-option-status" id="drawerImageOcrStatus" role="status">설정을 불러오는 중…</span>
-              <button type="button" class="button primary compact" id="saveDrawerImageOcr" disabled>이미지 OCR만 저장</button>
+            <summary><strong>고급 관리</strong><span>문서 처리 옵션과 리소스 관리</span></summary>
+            <div class="advanced-settings-content">
+              <div class="advanced-settings-intro"><h3>문서 처리 옵션</h3><p>교직원·학생 자료에 적용할 처리 방식을 각각 선택하세요.</p></div>
+              <div class="advanced-parser-grid">
+<section class="advanced-parser-card"><header><h4>Layout Parser</h4><p>HWP/HWPX의 기본 파싱 품질이 낮을 때 PDF로 변환하여 재처리합니다.</p></header><div class="advanced-audience-option">
+    <div class="advanced-option-control"><label for="drawerDocaiFallbackStaff">교직원 자료</label><select id="drawerDocaiFallbackStaff" disabled><option value="false">끄기</option><option value="true">켜기</option></select></div>
+    <div class="advanced-option-footer"><span class="drawer-option-status" id="drawerDocaiStatusStaff" role="status">설정을 불러오는 중…</span><button type="button" class="button primary compact" id="saveDrawerDocaiStaff" aria-label="교직원 자료 Layout Parser 설정 저장" disabled>저장</button></div>
+  </div><div class="advanced-audience-option">
+    <div class="advanced-option-control"><label for="drawerDocaiFallbackStudent">학생 자료</label><select id="drawerDocaiFallbackStudent" disabled><option value="false">끄기</option><option value="true">켜기</option></select></div>
+    <div class="advanced-option-footer"><span class="drawer-option-status" id="drawerDocaiStatusStudent" role="status">설정을 불러오는 중…</span><button type="button" class="button primary compact" id="saveDrawerDocaiStudent" aria-label="학생 자료 Layout Parser 설정 저장" disabled>저장</button></div>
+  </div></section><section class="advanced-parser-card"><header><h4>이미지 OCR</h4><p>PNG/JPG 이미지에서 텍스트를 추출해 검색에 반영합니다.</p></header><div class="advanced-audience-option">
+    <div class="advanced-option-control"><label for="drawerImageOcrStaff">교직원 자료</label><select id="drawerImageOcrStaff" disabled><option value="false">끄기</option><option value="true">켜기</option></select></div>
+    <div class="advanced-option-footer"><span class="drawer-option-status" id="drawerImageOcrStatusStaff" role="status">설정을 불러오는 중…</span><button type="button" class="button primary compact" id="saveDrawerImageOcrStaff" aria-label="교직원 자료 이미지 OCR 설정 저장" disabled>저장</button></div>
+  </div><div class="advanced-audience-option">
+    <div class="advanced-option-control"><label for="drawerImageOcrStudent">학생 자료</label><select id="drawerImageOcrStudent" disabled><option value="false">끄기</option><option value="true">켜기</option></select></div>
+    <div class="advanced-option-footer"><span class="drawer-option-status" id="drawerImageOcrStatusStudent" role="status">설정을 불러오는 중…</span><button type="button" class="button primary compact" id="saveDrawerImageOcrStudent" aria-label="학생 자료 이미지 OCR 설정 저장" disabled>저장</button></div>
+  </div></section>              </div>
             </div>
             <div class="department-management-body" id="drawerDeleteSection">
               <b>학과 리소스 삭제</b>
@@ -675,12 +674,13 @@
             </div>
           </details>
         </div>
-        <footer>
-          <button class="button primary" id="drawerEdit">설정 수정</button>
-          <button class="button secondary" id="drawerCheck">이 학과 다시 확인</button>
-        </footer>
+
       </div>
-    </aside>
+    </section>
+      </main>
+    </div>
+
+
 
     <aside class="resource-modal" id="resourceProvisionModal" aria-hidden="true" aria-labelledby="resourceModalTitle">
       <div class="resource-modal-backdrop" data-close-resource-modal></div>

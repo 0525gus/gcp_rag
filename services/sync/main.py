@@ -227,6 +227,8 @@ class ReconcileBody(BaseModel):
     # 업로드된 GCS URI 총수(파일당 원본+.meta.md면 2). indexed 정합성 비교 기준.
     uris: int = 0
     indexed: int
+    index_job_id: str = Field(default="", alias="indexJobId")
+    deferred_uris: int = Field(default=0, alias="deferredUris", ge=0)
     failed: int
     skipped: int
     deleted: int
@@ -279,6 +281,7 @@ def _route_file_meta(
         "name": name,
         "mimeType": mime,
         "modifiedTime": file_meta.get("modifiedTime"),
+        "createdTime": file_meta.get("createdTime"),
         "removed": False,
         "webViewLink": file_meta.get("webViewLink"),
         "sizeBytes": parse_drive_size(file_meta.get("size")),
@@ -806,6 +809,7 @@ def list_changes(body: ChangesBody) -> dict[str, Any]:
                 else "UPDATED"
             ),
             "modifiedTime": ch.modified_time,
+            "createdTime": ch.created_time,
             "removed": ch.removed,
             "webViewLink": ch.web_view_link,
             "sizeBytes": ch.size_bytes,
@@ -1052,15 +1056,21 @@ def _ingest_locked(
             "hwpOriginalDeleted": hwp_original_deleted,
         }
 
+    image_ocr_enabled = getattr(settings, "enable_image_ocr", False)
+    image_audience = None
+    if not body.removed and (body.mime_type.lower() in IMAGE_OCR_MIME or body.route == RouteKind.IMAGE_OCR.value):
+        image_audience = _resolve_audience(drive, settings, body)
+        image_ocr_enabled = settings.parser_option_for("enable_image_ocr", image_audience)
+
     route = RouteKind(body.route) if body.route else classify_route(
         body.mime_type, body.name, removed=body.removed,
-        enable_image_ocr=getattr(settings, "enable_image_ocr", False),
+        enable_image_ocr=image_ocr_enabled,
     )
     # 과거 큐에 남은 route 값으로 OCR 허용 여부를 우회하지 않는다.
     if route != RouteKind.DELETE and not body.removed and (body.mime_type.lower() in IMAGE_OCR_MIME or route == RouteKind.IMAGE_OCR):
         route = classify_route(
             body.mime_type, body.name,
-            enable_image_ocr=getattr(settings, "enable_image_ocr", False),
+            enable_image_ocr=image_ocr_enabled,
         )
 
     if route == RouteKind.DELETE or body.removed:
@@ -1098,7 +1108,7 @@ def _ingest_locked(
 
     try:
         if route == RouteKind.IMAGE_OCR:
-            return _ingest_image_ocr(body, store, gcs, drive, settings)
+            return _ingest_image_ocr(body, store, gcs, drive, settings, audience=image_audience)
         if route == RouteKind.HWP_PARSE:
             return _ingest_hwp(body, store, gcs, drive, settings)
         if route == RouteKind.GOOGLE_EXPORT:
@@ -1350,7 +1360,7 @@ def _ingest_hwp(
                 "mimeType": body.mime_type,
                 "fileId": body.file_id,
                 "sourceBucket": settings.gcs_source_bucket,
-                "enableDocaiFallback": settings.enable_docai_fallback,
+                "enableDocaiFallback": settings.parser_option_for("enable_docai_fallback", audience),
             },
         )
         if resp.status_code == 422:
@@ -1464,9 +1474,10 @@ def _ingest_hwp(
 
 def _ingest_image_ocr(
     body: IngestBody, store: DocStateStore, gcs: GcsClient,
-    drive: DriveClient, settings: Settings,
+    drive: DriveClient, settings: Settings, *, audience: Audience | None = None,
 ) -> dict[str, Any]:
-    if not settings.enable_image_ocr:
+    audience = audience if audience is not None else _resolve_audience(drive, settings, body)
+    if not settings.parser_option_for("enable_image_ocr", audience):
         raise ValueError("IMAGE_OCR_DISABLED")
     mime = body.mime_type.lower()
     if mime not in IMAGE_OCR_MIME:
@@ -1499,7 +1510,6 @@ def _ingest_image_ocr(
     if not isinstance(text, str) or not text.strip():
         raise ValueError("OCR_EMPTY_TEXT")
     path_ctx = _resolve_path_ctx(drive, body)
-    audience = _resolve_audience(drive, settings, body)
     markdown = build_breadcrumb_markdown(
         path=path_ctx.path, bundle=path_ctx.bundle, title=body.name or body.file_id, body=text,
     )
@@ -2566,14 +2576,29 @@ def _finalize_index_job(settings: Settings, job_id: str) -> dict[str, Any]:
                 {"enabled": False},
             ),
         }
-        for fid in job["fileVersions"]:
-            txn.update(
-                store._col.document(fid),
-                {
-                    "status": "INDEXED",
-                    "lastSyncedAt": firestore.SERVER_TIMESTAMP,
-                },
-            )
+        failed_ids = [fid for fid in job["fileVersions"] if any(
+            (part.get("fileResults", {}).get(fid) or {}).get("status") == "FAILED"
+            for part in parts)]
+        completed_ids = [fid for fid in job["fileVersions"] if fid not in failed_ids]
+        deferred_uris = [uri for uri in job.get("gcsUris", []) if extract_file_id(uri) in failed_ids]
+        result.update(failedFileIds=failed_ids, completedFileIds=completed_ids,
+                      failed=len(failed_ids), deferredUris=len(deferred_uris),
+                      count=len(job.get("gcsUris", [])) - len(deferred_uris),
+                      partial=bool(failed_ids))
+        for fid in failed_ids:
+            # Durable, versioned recovery receipt is committed with job completion.
+            txn.set(store._col.document(fid).collection("index_failures").document(job_id), {
+                "fileId": fid, "driveId": job["driveId"], "jobId": job_id,
+                "status": "PENDING", "fileVersion": job["fileVersions"][fid],
+                "routingVersion": job.get("routingVersion"),
+                "gcsUris": [uri for uri in deferred_uris if extract_file_id(uri) == fid],
+                "corpora": {part.get("audience", "UNKNOWN"): (part.get("fileResults") or {}).get(fid, {}) for part in parts},
+                "createdAt": firestore.SERVER_TIMESTAMP,
+            })
+        for fid in completed_ids:
+            txn.update(store._col.document(fid), {
+                "status": "INDEXED", "lastSyncedAt": firestore.SERVER_TIMESTAMP,
+            })
         txn.set(
             job_ref,
             {
@@ -2786,15 +2811,12 @@ def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
                 file_results[fid] = item
             failed_ids = [fid for fid in body.file_ids
                           if (file_results.get(fid) or {}).get("status") != "DONE"]
-            if failed_ids:
-                raise RuntimeError(
-                    f"{body.audience.lower()} import incomplete fileIds={','.join(failed_ids)}"
-                )
             result = {
                 "count": sum(int(item.get("count") or 0) for item in file_results.values()),
                 "failed": sum(int(item.get("failed") or 0) for item in file_results.values()),
                 "skipped": sum(int(item.get("skipped") or 0) for item in file_results.values()),
                 "fileResults": file_results,
+                "failedFileIds": failed_ids,
             }
             if body.audience == "STUDENT":
                 result["result"] = {
@@ -3403,7 +3425,19 @@ def reconcile(body: ReconcileBody) -> dict[str, Any]:
     # gcs_uploaded 는 '파일 수' 라 파일당 URI가 2개(원본+.meta.md)면 어긋난다 →
     # uris(업로드된 URI 총수)와 비교. uris 미제공 시 gcs_uploaded 로 폴백.
     index_baseline = body.uris if body.uris > 0 else body.gcs_uploaded
-    index_ok = body.indexed == index_baseline
+    deferred_verified = body.deferred_uris == 0
+    if body.deferred_uris and body.index_job_id:
+        settings = get_settings()
+        _, job_ref, _ = _index_job_refs(settings, body.index_job_id)
+        job = job_ref.get().to_dict() or {}
+        result = job.get("result") or {}
+        deferred_verified = (
+            job.get("status") == "DONE" and job.get("driveId") == body.drive_id
+            and result.get("deferredUris") == body.deferred_uris
+            and result.get("count") == body.indexed
+            and len(job.get("gcsUris") or []) == index_baseline
+        )
+    index_ok = deferred_verified and body.indexed + body.deferred_uris == index_baseline
     delta = listed - accounted
     ok = delta == 0 and index_ok
     summary = {

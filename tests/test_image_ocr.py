@@ -265,3 +265,20 @@ def test_drive_download_stops_at_cap(monkeypatch):
     drive._service = MagicMock()
     with pytest.raises(ValueError, match="DOWNLOAD_SIZE_EXCEEDED"):
         drive.download_file("doc", max_bytes=10)
+
+
+@pytest.mark.parametrize("membership,allowed",[(True,True),(False,False),(RuntimeError("lookup failed"),False)])
+def test_student_only_ocr_blocks_staff_and_stale_route_before_download(ingest,membership,allowed):
+    ingest.settings=replace(ingest.settings,student_folder_ids="student-folder",
+                            enable_image_ocr_staff=False,enable_image_ocr_student=True)
+    ingest.body=ingest.body.model_copy(update={"route":"IMAGE_OCR"})
+    if isinstance(membership,Exception): ingest.drive.is_in_sync_scope.side_effect=membership
+    else: ingest.drive.is_in_sync_scope.return_value=membership
+    result=run_ingest(ingest)
+    if allowed:
+        assert result["status"]=="GCS_READY"
+        ingest.client.post.assert_called_once()
+    else:
+        assert result["status"]=="SKIPPED"
+        ingest.drive.download_file.assert_not_called()
+        ingest.client.post.assert_not_called()

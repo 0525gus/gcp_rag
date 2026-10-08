@@ -464,3 +464,37 @@ def test_deployment_registers_cloud_routes_without_building_or_deploying_departm
     assert health_calls == ["https://shared-mcp.example/health"]
     assert set(maps[0]) == ({"ee"} if disabled else {"cs", "ee"})
     assert config["keys"]["staff"] not in json.dumps(result)
+
+
+@pytest.mark.parametrize("base,endpoint",[("enableDocaiFallback","docai-fallback"),("enableImageOcr","image-ocr")])
+def test_scoped_parser_save_only_updates_selected_audience(unified,monkeypatch,base,endpoint):
+    from fastapi.testclient import TestClient
+    unified.configs["cs"][base+"Student"]=True
+    original=copy.deepcopy(unified.configs["cs"])
+    monkeypatch.setattr(dept_gui,"_http_json",lambda *a,**kw:(200,{"status":"ok"},1))
+    maps=[]
+    monkeypatch.setattr(dept_gui,"update_sync_department_map",lambda **kw:maps.append(json.loads(dept_gui.cloud_departments_json())) or "cs")
+    client=TestClient(dept_gui.app)
+    headers={"X-Local-Session":client.get("/api/v1/session").json()["nonce"],"Origin":"http://testserver"}
+    config=client.get("/api/v1/departments/cs/config").json()
+    response=client.put(f"/api/v1/departments/cs/{endpoint}",headers=headers,json={base+"Staff":False,"configRevision":config["configRevision"]})
+    assert response.status_code==202,response.text
+    dept_gui._execute_mcp_deployment(response.json()["deployment"]["runId"])
+    assert unified.configs["cs"]=={**original,base+"Staff":False}
+    assert maps[-1]["cs"][base+"Student"] is True
+    assert maps[-1]["cs"][base+"Staff"] is False
+
+
+def test_scoped_options_roundtrip_in_full_editor(unified,monkeypatch):
+    unified.configs["cs"]["drive"]["syncFolderIds"].append("student-cs")
+    monkeypatch.setattr(dept_gui,"_common",lambda:{**dept_config._load_yaml(dept_config.CONFIG_DIR/"common.yaml"),"DOCAI_OCR_PROCESSOR_ID":"ocr","DOCAI_OCR_LOCATION":"us"})
+    public=dept_gui.department_public_config_any("cs")
+    public.update(enableDocaiFallbackStaff=False,enableDocaiFallbackStudent=True,
+                  enableImageOcrStaff=False,enableImageOcrStudent=True)
+    candidate,validation=dept_gui.validate_candidate(public,check_existing=False)
+    assert validation["valid"],validation
+    for key in ["enableDocaiFallbackStaff","enableDocaiFallbackStudent","enableImageOcrStaff","enableImageOcrStudent"]:
+        assert candidate[key] is public[key]
+    public["enableImageOcrStaff"]="false"
+    _,validation=dept_gui.validate_candidate(public,check_existing=False)
+    assert "enableImageOcrStaff" in validation["fieldErrors"]
