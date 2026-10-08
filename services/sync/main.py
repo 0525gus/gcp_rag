@@ -1092,6 +1092,8 @@ def _ingest_locked(
                 status=DocStatus.SKIPPED,
                 parse_route=ParseRoute.NONE,
                 source_uri=body.web_view_link,
+                audience=image_audience or _resolve_audience(drive, settings, body),
+                error="IMAGE_OCR_DISABLED" if body.mime_type.lower() in IMAGE_OCR_MIME else "UNSUPPORTED_FORMAT",
             )
         )
         return {"fileId": body.file_id, "status": DocStatus.SKIPPED.value, "route": route.value}

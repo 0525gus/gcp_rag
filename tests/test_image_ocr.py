@@ -282,3 +282,20 @@ def test_student_only_ocr_blocks_staff_and_stale_route_before_download(ingest,me
         assert result["status"]=="SKIPPED"
         ingest.drive.download_file.assert_not_called()
         ingest.client.post.assert_not_called()
+
+
+@pytest.mark.parametrize("mime", ["image/png", "image/jpeg"])
+@pytest.mark.parametrize("membership,expected", [(True, "STUDENT"), (False, "STAFF")])
+def test_skipped_image_preserves_resolved_audience(ingest, mime, membership, expected):
+    ingest.settings = replace(ingest.settings, student_folder_ids="student-folder",
+                              enable_image_ocr=False, enable_image_ocr_staff=False,
+                              enable_image_ocr_student=False)
+    ingest.body = ingest.body.model_copy(update={"mime_type": mime})
+    ingest.drive.is_in_sync_scope.return_value = membership
+    result = run_ingest(ingest)
+    assert result["status"] == "SKIPPED"
+    saved = ingest.store.upsert.call_args.args[0]
+    assert saved.audience.value == expected
+    assert saved.error == "IMAGE_OCR_DISABLED"
+    ingest.drive.download_file.assert_not_called()
+    ingest.client.post.assert_not_called()

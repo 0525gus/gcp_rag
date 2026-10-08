@@ -9,6 +9,8 @@ from urllib.parse import quote
 
 from google.cloud.firestore_v1.base_query import FieldFilter
 
+from shared.mime_types import IMAGE_OCR_MIME, RouteKind, classify_route
+
 LABELS = {
     "PENDING": "처리 대기", "PARSED": "색인 완료 미확인", "FAILED": "처리 오류",
     "SKIPPED": "처리 보류", "SPLIT_QUEUED": "분할 대기", "BODY_MISSING": "본문 없이 색인",
@@ -34,7 +36,17 @@ def issue_item(file_id, data):
         status = "BODY_MISSING"
     if status not in LABELS:
         return None
+    # Old skipped records did not persist a reason. Describe the historical
+    # outcome without claiming that the current processor is disconnected.
+    reason_code = reason if reason in {"IMAGE_OCR_DISABLED", "UNSUPPORTED_FORMAT"} else ""
+    if status == "SKIPPED" and not reason:
+        mime = str(data.get("mimeType") or "").lower()
+        if mime in IMAGE_OCR_MIME:
+            reason_code = "IMAGE_OCR_NOT_APPLIED"
+        elif mime and classify_route(mime, str(data.get("name") or ""), enable_image_ocr=True) == RouteKind.SKIP:
+            reason_code = "UNSUPPORTED_FORMAT"
     return {
+        "reasonCode": reason_code,
         "fileId": file_id, "name": str(data.get("name") or file_id),
         "status": status, "statusLabel": LABELS[status],
         "reason": reason[:2000] or DEFAULT_REASONS.get(status, "본문 추출 없이 파일 정보만 색인했습니다."),

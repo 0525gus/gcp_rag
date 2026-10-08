@@ -190,6 +190,21 @@
     return value && !Number.isNaN(date.getTime()) ? date.toLocaleString("ko-KR", { timeZone: "Asia/Seoul" }) : "기록 없음";
   }
 
+  function issueReason(item) {
+    const reason = item.reason || "";
+    const code = item.reasonCode || reason;
+    if (code === "IMAGE_OCR_DISABLED") return "Document AI OCR 미적용 · 이 자료 대상의 이미지 OCR 옵션이 꺼져 있어 처리를 보류했습니다. 켜고 적용한 뒤 재처리하세요.";
+    if (code === "IMAGE_OCR_NOT_APPLIED" || (item.status === "SKIPPED"
+        && ["image/png", "image/jpeg"].includes(item.mimeType)
+        && (!reason || reason === "처리가 보류됐습니다. 개별 사유가 기록되지 않았습니다."))) {
+      return "Document AI OCR 미적용 · 이전 처리에서 이미지 OCR을 수행하지 않았습니다. 현재 OCR 연결·대상별 옵션을 확인한 뒤 재처리하세요.";
+    }
+    if (code === "UNSUPPORTED_FORMAT") return `지원하지 않는 파일 형식 · ${item.mimeType || "형식 미상"}. 지원 형식으로 변환한 뒤 다시 등록하세요.`;
+    if (reason.includes("OCR_EMPTY_TEXT")) return "OCR 텍스트 없음 · 이미지에서 검색에 사용할 글자를 추출하지 못해 색인하지 않았습니다. 인물 사진 등 글자가 없는 이미지인지 원본을 확인하세요.";
+    if (reason.includes("OCR_NOT_CONFIGURED")) return "Document AI OCR 연결 안 됨 · 공통 셋업에서 OCR 프로세서를 설정하고 적용한 뒤 재처리하세요.";
+    return reason || "상세 내역에서 처리 사유를 확인하세요.";
+  }
+
   function issueTone(status) {
     return status === "FAILED" ? "error" : ["SKIPPED", "BODY_MISSING"].includes(status) ? "held" : "waiting";
   }
@@ -213,7 +228,7 @@
     const audience = $("#indexIssuesAudience").value;
     const audienceItems = indexIssueState.items.filter((item) => !audience || (item.audience || "STAFF") === audience);
     const rows = audienceItems.filter((item) => issueMatchesFilter(item, selected)
-      && `${item.name} ${item.path} ${item.reason}`.toLocaleLowerCase().includes(query))
+      && `${item.name} ${item.path} ${issueReason(item)}`.toLocaleLowerCase().includes(query))
       .sort((a, b) => (priority[a.status] ?? 6) - (priority[b.status] ?? 6));
     const summary = $("#indexIssuesSummary");
     summary.textContent = !$("#indexIssuesDepartment").value ? "학과를 선택해 주세요."
@@ -232,7 +247,7 @@
     const groups = [["", "전체", "all"], ["FAILED", "오류", "error"], ["HELD", "보류·본문 없음", "held"], ["WAITING", "대기·완료 미확인", "waiting"]];
     $("#indexIssuesCounts").innerHTML = groups.map(([filter, label, tone]) => `<button type="button" class="issue-tab" data-tone="${tone}" data-issue-filter="${filter}" aria-pressed="${selected === filter}" ${indexIssueState.loaded ? "" : "disabled"}><span class="issue-tab-dot" aria-hidden="true"></span><span>${label}</span><strong>${indexIssueState.loaded ? audienceItems.filter((item) => issueMatchesFilter(item, filter)).length : "—"}</strong></button>`).join("");
     $("#indexIssuesList").innerHTML = rows.length ? `<div class="issue-list-heading" aria-hidden="true"><span>문서 / 처리 사유</span><span>처리 상태</span><span>마지막 처리</span><span>상세</span></div>` + rows.slice(0, indexIssueState.visible).map((item) => `<button type="button" class="issue-row" data-index-issue="${escapeHtml(item.fileId)}" data-tone="${issueTone(item.status)}" aria-haspopup="dialog">
-      <span class="issue-document"><span class="issue-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 12h6M9 16h4"/></svg></span><span class="issue-document-copy"><b>${escapeHtml(item.name)}</b><span class="issue-row-reason">${escapeHtml(item.reason || "상세 내역에서 처리 사유를 확인하세요.")}</span></span></span>
+      <span class="issue-document"><span class="issue-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 12h6M9 16h4"/></svg></span><span class="issue-document-copy"><b>${escapeHtml(item.name)}</b><span class="issue-row-reason">${escapeHtml(issueReason(item))}</span></span></span>
       <span class="issue-badge" data-tone="${issueTone(item.status)}">${escapeHtml(item.statusLabel)}</span>
       <span class="issue-date">${escapeHtml(issueDate(item.updatedAt))}</span><span class="issue-open" aria-hidden="true">보기 <span>↗</span></span>
     </button>`).join("") : `<div class="issue-empty"><span class="issue-empty-mark" aria-hidden="true">${indexIssueState.loading ? "…" : "≡"}</span><b>${indexIssueState.loading ? "문서 상태를 확인하고 있습니다" : !$("#indexIssuesDepartment").value ? "학과를 선택해 주세요" : indexIssueState.loaded ? "표시할 문서가 없습니다" : "문서를 불러오지 못했습니다"}</b><p>${indexIssueState.loading ? "조회된 결과부터 순서대로 보여드립니다." : !$("#indexIssuesDepartment").value ? "선택한 학과의 보류·오류 문서를 한곳에서 확인하세요." : indexIssueState.loaded ? indexIssueState.cursor ? "현재까지 조회한 범위에 조건과 일치하는 문서가 없습니다." : "조건과 일치하는 보류·오류 문서가 없습니다." : "새로고침을 눌러 다시 확인해 주세요."}</p></div>`;
@@ -293,7 +308,7 @@
         $("#issueReprocessStatus").textContent = "현재 재처리 대상이 아닙니다.";
         return;
       }
-      $("#indexIssueDetailBody").innerHTML = `<div class="issue-reason" data-tone="${issueTone(data.item.status)}"><span class="issue-badge" data-tone="${issueTone(data.item.status)}">${escapeHtml(data.item.statusLabel)}</span><p>${escapeHtml(data.item.reason)}</p></div>
+      $("#indexIssueDetailBody").innerHTML = `<div class="issue-reason" data-tone="${issueTone(data.item.status)}"><span class="issue-badge" data-tone="${issueTone(data.item.status)}">${escapeHtml(data.item.statusLabel)}</span><p>${escapeHtml(issueReason(data.item))}</p></div>
         <dl class="issue-properties"><div><dt>문서 위치</dt><dd>${escapeHtml(data.item.path || "기록 없음")}</dd></div><div><dt>노출 범위</dt><dd>${data.item.audience === "STUDENT" ? "학생·교직원" : "교직원"}</dd></div><div><dt>처리 경로</dt><dd>${escapeHtml(data.item.route || "기록 없음")}</dd></div><div><dt>마지막 처리</dt><dd>${escapeHtml(issueDate(data.item.updatedAt))}</dd></div></dl>`
         + (data.queues || []).map((row) => `<article><b>${escapeHtml(row.label)}</b><p>${escapeHtml(row.reason)}</p><small>재시도 ${escapeHtml(row.retryCount)}회 · ${escapeHtml(issueDate(row.updatedAt))}</small></article>`).join("")
         + '<h3>파일별 RAG 처리 결과</h3><p class="issue-help">관련 작업 시간대에 기록된 결과입니다. 현재 문서 상태와 기록 시점을 함께 확인하세요.</p>'

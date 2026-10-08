@@ -135,3 +135,17 @@ def test_file_evidence_filters_other_documents_and_departments(monkeypatch):
                                           {"GCP_PROJECT_ID": "p", "RAG_METADATA_BUCKET": "meta-bucket"}, detail)
     assert len(result) == 1 and result[0]["error"] == "File is empty"
     assert get.call_count == 1
+
+
+@pytest.mark.parametrize("mime,error,expected", [
+    ("image/png", "", "IMAGE_OCR_NOT_APPLIED"),
+    ("image/jpeg", "IMAGE_OCR_DISABLED", "IMAGE_OCR_DISABLED"),
+    ("image/gif", "", "UNSUPPORTED_FORMAT"),
+    ("application/pdf", "", ""),
+    ("image/png", "manual_hold", ""),
+])
+def test_skip_reasons_distinguish_legacy_images_and_unsupported_formats(mime, error, expected):
+    result = index_issues.issue_item("doc", {"status": "SKIPPED", "mimeType": mime, "error": error})
+    assert result["reasonCode"] == expected
+    if error == "manual_hold":
+        assert result["reason"] == error

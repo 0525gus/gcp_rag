@@ -191,3 +191,21 @@ test("audience selection filters the complete scan and status counts without ano
   }
   assert.equal(reads, 1);
 });
+
+test("held documents explain OCR disabled, historical omission, missing setup and unsupported type", () => {
+  const s = screen(async () => ({}));
+  s.ui.indexIssueState.items = [
+    {...item("disabled"), status:"SKIPPED", reason:"IMAGE_OCR_DISABLED"},
+    {...item("legacy"), status:"SKIPPED", mimeType:"image/png", reason:"처리가 보류됐습니다. 개별 사유가 기록되지 않았습니다."},
+    {...item("unsupported"), status:"SKIPPED", reasonCode:"UNSUPPORTED_FORMAT", mimeType:"image/gif"},
+    {...item("setup"), status:"FAILED", reason:"IMAGE_OCR_FAILED:500:OCR_NOT_CONFIGURED"},
+    {...item("photo"), status:"FAILED", reason:"IMAGE_OCR_FAILED:422:OCR_EMPTY_TEXT"},
+  ];
+  s.ui.renderIndexIssues();
+  const html=s.$("#indexIssuesList").innerHTML;
+  assert.match(html,/옵션이 꺼져/);
+  assert.match(html,/이전 처리에서 이미지 OCR/);
+  assert.match(html,/지원하지 않는 파일 형식 · image\/gif/);
+  assert.match(html,/Document AI OCR 연결 안 됨/);
+  assert.match(html,/OCR 텍스트 없음/);
+});
