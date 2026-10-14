@@ -110,7 +110,10 @@ def citation_label(source: dict[str, Any]) -> str:
     그래서 자료묶음을 앞에 붙여 `자료묶음 / 파일명` 으로 만든다. 파일명이 이미
     자료묶음을 담고 있으면 중복이라 그대로 둔다.
     """
+    post_title = (source.get("title") or "").strip()
     name = (source.get("name") or "").strip()
+    if post_title:
+        return f"{post_title} / {name}" if name and name != post_title else post_title
     bundle = (source.get("bundle") or "").strip()
     if not name:
         return bundle or str(source.get("fileId") or "") or "(이름 없음)"

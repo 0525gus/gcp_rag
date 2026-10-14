@@ -200,7 +200,7 @@
       return "Document AI OCR 미적용 · 이전 처리에서 이미지 OCR을 수행하지 않았습니다. 현재 OCR 연결·대상별 옵션을 확인한 뒤 재처리하세요.";
     }
     if (code === "UNSUPPORTED_FORMAT") return `지원하지 않는 파일 형식 · ${item.mimeType || "형식 미상"}. 지원 형식으로 변환한 뒤 다시 등록하세요.`;
-    if (reason.includes("OCR_EMPTY_TEXT")) return "OCR 텍스트 없음 · 이미지에서 검색에 사용할 글자를 추출하지 못해 색인하지 않았습니다. 인물 사진 등 글자가 없는 이미지인지 원본을 확인하세요.";
+    if (code === "OCR_EMPTY_TEXT" || reason.includes("OCR_EMPTY_TEXT")) return "처리 보류 · OCR 텍스트 없음. 자동 재시도에서 제외합니다. 원본이 바뀌거나 수동 재처리하면 다시 확인합니다.";
     if (reason.includes("OCR_NOT_CONFIGURED")) return "Document AI OCR 연결 안 됨 · 공통 셋업에서 OCR 프로세서를 설정하고 적용한 뒤 재처리하세요.";
     return reason || "상세 내역에서 처리 사유를 확인하세요.";
   }
@@ -432,11 +432,12 @@
   }
 
   function corpusContextHtml(context) {
-    const source = context.sourceDisplayName || context.sourceUri || `검색 결과 ${context.rank}`;
+    const source = context.title || context.fileName || context.sourceDisplayName || context.sourceUri || `검색 결과 ${context.rank}`;
     const score = Number.isFinite(Number(context.score)) ? Number(context.score).toFixed(4) : "—";
     return `<article class="corpus-context-card">
       <header><b title="${escapeHtml(source)}">${escapeHtml(source)}</b><span>#${escapeHtml(context.rank)} · ${escapeHtml(score)}</span></header>
       <p>${escapeHtml(context.text || "본문이 없습니다.")}</p>
+      <div class="corpus-source-links">${context.websiteUrl && /^https?:\/\//i.test(context.websiteUrl) ? `<a class="gcp-console-link" href="${escapeHtml(context.websiteUrl)}" target="_blank" rel="noopener noreferrer">게시글 원문 ↗</a>` : ""}${context.driveUri && /^https:\/\/(drive|docs)\.google\.com\//i.test(context.driveUri) ? `<a class="gcp-console-link" href="${escapeHtml(context.driveUri)}" target="_blank" rel="noopener noreferrer">원본 파일 ↗</a>` : ""}</div>
       ${context.sourceUri ? `<small title="${escapeHtml(context.sourceUri)}">${escapeHtml(context.sourceUri)}</small>` : ""}
     </article>`;
   }

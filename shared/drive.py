@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+from dataclasses import replace
 from typing import Any, Iterator
 
 from google.auth import default as google_auth_default
@@ -13,6 +14,7 @@ from googleapiclient.http import MediaIoBaseDownload
 from shared.folder_scope import is_under_folder_allowlist
 from shared.models import DriveChange
 from shared.path_context import PathContext, build_path_context
+from shared.post_metadata import METADATA_MAX_BYTES, PostMetadata, parse_post_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +177,44 @@ class DriveClient:
         self._parent_cache[file_id] = list(meta.get("parents") or [])
         return name
 
+    def list_folder_page(self, folder_id: str, page_token: str = "", page_size: int = 5) -> dict:
+        parent = folder_id.replace("\\", "\\\\").replace("'", "\\'")
+        result = self._service.files().list(
+            q=f"'{parent}' in parents and trashed=false",
+            corpora="allDrives", includeItemsFromAllDrives=True, supportsAllDrives=True,
+            pageSize=page_size, pageToken=page_token or None,
+            fields=f"nextPageToken,incompleteSearch,files({FILE_FIELDS})",
+        ).execute(num_retries=NUM_RETRIES)
+        if result.get("incompleteSearch"):
+            raise RuntimeError("folder listing incomplete")
+        return result
+
+    def read_post_metadata(self, file_id: str) -> tuple[PostMetadata, str]:
+        """Read only a single metadata.json in the document's immediate folder."""
+        parents = self.get_parents(file_id)
+        if len(parents) != 1:
+            return PostMetadata(), ""
+        parent = parents[0].replace("\\", "\\\\").replace("'", "\\'")
+        candidates = self._service.files().list(
+            q=f"'{parent}' in parents and trashed=false and name='metadata.json'",
+            corpora="allDrives", supportsAllDrives=True, includeItemsFromAllDrives=True,
+            pageSize=2, fields="files(id,mimeType,size),nextPageToken,incompleteSearch",
+        ).execute(num_retries=NUM_RETRIES)
+        if candidates.get("incompleteSearch"):
+            raise ValueError("metadata folder lookup incomplete")
+        rows = candidates.get("files", [])
+        if not rows:
+            return PostMetadata(), ""
+        if len(rows) != 1 or candidates.get("nextPageToken"):
+            raise ValueError("multiple metadata.json files in the same folder")
+        meta = rows[0]
+        if meta.get("mimeType") == "application/vnd.google-apps.folder":
+            raise ValueError("metadata.json is a folder")
+        size = parse_drive_size(meta.get("size"))
+        if size is not None and size > METADATA_MAX_BYTES:
+            raise ValueError("metadata.json exceeds 64 KiB")
+        return parse_post_metadata(self.download_file(meta["id"], max_bytes=METADATA_MAX_BYTES)), meta["id"]
+
     def resolve_path_context(
         self,
         file_id: str,
@@ -182,6 +222,7 @@ class DriveClient:
         *,
         parents: list[str] | None = None,
         max_depth: int = 32,
+        strict_metadata: bool = False,
     ) -> PathContext:
         """parents를 따라 올라가 폴더명 경로 + 직계 자료묶음(bundle) 계산."""
         folder_names_leaf_to_root: list[str] = []
@@ -213,7 +254,16 @@ class DriveClient:
             depth += 1
 
         folder_names_leaf_to_root.reverse()
-        return build_path_context(folder_names_leaf_to_root, file_name)
+        context = build_path_context(folder_names_leaf_to_root, file_name)
+        try:
+            metadata, metadata_id = self.read_post_metadata(file_id)
+        except Exception as exc:  # A malformed optional sidecar does not fail the document.
+            logger.warning("post metadata ignored file=%s: %s", file_id, exc)
+            if strict_metadata:
+                raise
+            return context
+        return replace(context, source_title=metadata.title, website_url=metadata.source_url,
+                       metadata_file_id=metadata_id)
 
     def is_in_sync_scope(
         self,

@@ -10,6 +10,7 @@ from urllib.parse import quote
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from shared.mime_types import IMAGE_OCR_MIME, RouteKind, classify_route
+from shared.ocr_status import is_empty_ocr_error
 
 LABELS = {
     "PENDING": "처리 대기", "PARSED": "색인 완료 미확인", "FAILED": "처리 오류",
@@ -38,7 +39,10 @@ def issue_item(file_id, data):
         return None
     # Old skipped records did not persist a reason. Describe the historical
     # outcome without claiming that the current processor is disconnected.
-    reason_code = reason if reason in {"IMAGE_OCR_DISABLED", "UNSUPPORTED_FORMAT"} else ""
+    reason_code = reason if reason in {"IMAGE_OCR_DISABLED", "UNSUPPORTED_FORMAT", "OCR_EMPTY_TEXT"} else ""
+    if is_empty_ocr_error(reason, str(data.get("mimeType") or "")):
+        status = "SKIPPED"
+        reason_code = "OCR_EMPTY_TEXT"
     if status == "SKIPPED" and not reason:
         mime = str(data.get("mimeType") or "").lower()
         if mime in IMAGE_OCR_MIME:
@@ -48,7 +52,7 @@ def issue_item(file_id, data):
     return {
         "reasonCode": reason_code,
         "fileId": file_id, "name": str(data.get("name") or file_id),
-        "status": status, "statusLabel": LABELS[status],
+        "status": status, "statusLabel": "처리 보류 · 텍스트 없음" if reason_code == "OCR_EMPTY_TEXT" else LABELS[status],
         "reason": reason[:2000] or DEFAULT_REASONS.get(status, "본문 추출 없이 파일 정보만 색인했습니다."),
         "path": str(data.get("path") or ""), "mimeType": str(data.get("mimeType") or ""),
         "route": str(data.get("parseRoute") or ""), "audience": str(data.get("audience") or "STAFF"),

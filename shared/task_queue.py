@@ -22,6 +22,7 @@ class IndexTaskQueue:
         queue: str,
         task_id: str,
         payload: dict[str, Any],
+        endpoint: str = "/sync/index-gcs-task",
     ) -> str:
         """Create one deterministic, OIDC-authenticated HTTP task.
 
@@ -29,6 +30,8 @@ class IndexTaskQueue:
         Tasks retains task names after completion, so ALREADY_EXISTS is treated
         as idempotent success.
         """
+        if endpoint not in {"/sync/index-gcs-task", "/sync/metadata-refresh-task"}:
+            raise ValueError("unsupported task endpoint")
         base_url = self.settings.sync_task_base_url.rstrip("/")
         if not base_url or not self.settings.task_service_account:
             raise RuntimeError(
@@ -52,7 +55,7 @@ class IndexTaskQueue:
             },
             http_request=tasks_v2.HttpRequest(
                 http_method=tasks_v2.HttpMethod.POST,
-                url=f"{base_url}/sync/index-gcs-task",
+                url=f"{base_url}{endpoint}",
                 headers={"Content-Type": "application/json"},
                 oidc_token=tasks_v2.OidcToken(
                     service_account_email=self.settings.task_service_account,

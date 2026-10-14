@@ -216,3 +216,14 @@ def test_no_failed_docs_is_a_noop(wire) -> None:
     }
     assert res["ok"] is True
     assert indexed == []
+
+
+def test_legacy_empty_ocr_is_held_without_another_ingestion_or_attempt(wire):
+    doc = DocState(file_id="photo",drive_id="d1",mime_type="image/png",status=DocStatus.FAILED,
+                   error='IMAGE_OCR_FAILED:422:{"detail":"OCR_EMPTY_TEXT: no text extracted"}')
+    store,indexed=wire([doc],{})
+    saved=[];store.upsert=saved.append
+    result=retry_failed(RetryFailedBody())
+    assert saved[0].status == DocStatus.SKIPPED and saved[0].error == "OCR_EMPTY_TEXT"
+    assert store.recorded == [] and indexed == []
+    assert store.cleared == ["photo"] and result["totals"]["held"] == 1

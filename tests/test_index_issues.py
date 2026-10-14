@@ -149,3 +149,10 @@ def test_skip_reasons_distinguish_legacy_images_and_unsupported_formats(mime, er
     assert result["reasonCode"] == expected
     if error == "manual_hold":
         assert result["reason"] == error
+
+
+@pytest.mark.parametrize("status,error",[("SKIPPED","OCR_EMPTY_TEXT"),("FAILED",'IMAGE_OCR_FAILED:422:{"detail":"OCR_EMPTY_TEXT: no text extracted"}')])
+def test_empty_ocr_is_presented_as_held_with_explicit_label(status,error):
+    result=index_issues.issue_item("photo",{"status":status,"mimeType":"image/png","error":error})
+    assert result["status"]=="SKIPPED" and result["reasonCode"]=="OCR_EMPTY_TEXT"
+    assert result["statusLabel"]=="처리 보류 · 텍스트 없음"

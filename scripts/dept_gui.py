@@ -48,6 +48,8 @@ if str(ROOT) not in sys.path:
 
 from scripts import dept_config, docai_setup, index_issues
 from shared.source_links import citation_view_uri
+from shared.search_postprocess import extract_file_id
+from shared.post_metadata import parse_post_metadata
 
 CONFIG_DIR = ROOT / "config"
 DEPLOYMENT_METADATA_ANNOTATION = "gcp-rag.dev/department-metadata"
@@ -2095,6 +2097,42 @@ def _create_firestore_database_resource(name: str, project: str, region: str) ->
     return name
 
 
+def _corpus_post_metadata(raw_contexts, config, common, audience):
+    """Enrich every retrieved chunk by its Drive file identity, within this department."""
+    buckets = set((config.get("buckets") or {}).values()) - {None, ""}
+    ids = set()
+    for context in raw_contexts:
+        uri = str(context.get("sourceUri") or "")
+        if uri.startswith("gs://") and uri[5:].split("/", 1)[0] in buckets:
+            file_id = extract_file_id("", uri)
+            if re.fullmatch(r"[A-Za-z0-9_-]{20,200}", file_id):
+                ids.add(file_id)
+    if not ids:
+        return {}
+    try:
+        db = _firestore_client(common["GCP_PROJECT_ID"])
+        collection = db.collection(_firestore_collection_names()["docState"])
+        allowed_drives = set((config.get("drive") or {}).get("driveIds") or [])
+        result = {}
+        for snap in db.get_all([collection.document(fid) for fid in ids], timeout=10):
+            data = snap.to_dict() or {}
+            if not snap.exists or data.get("driveId") not in allowed_drives:
+                continue
+            if audience == "student" and data.get("audience") != "STUDENT":
+                continue
+            try:
+                post = parse_post_metadata(json.dumps({"title": data.get("sourceTitle") or "",
+                                                       "source_url": data.get("websiteUrl") or ""}).encode())
+            except ValueError:
+                continue
+            result[snap.id] = {"title": post.title, "websiteUrl": post.source_url,
+                               "driveUri": data.get("sourceUri"), "fileName": data.get("name")}
+        return result
+    except Exception:
+        # Original contexts remain available if optional metadata cannot be read.
+        return {}
+
+
 def retrieve_department_corpus(
     code: str, audience: str, query: str, top_k: int = 5, *, generate: bool = False
 ) -> dict[str, Any]:
@@ -2139,6 +2177,7 @@ def retrieve_department_corpus(
         raise RuntimeError(f"코퍼스 조회 실패 (HTTP {status or 'timeout'}){detail}")
 
     raw_contexts = (body.get("contexts") or {}).get("contexts") or []
+    post_metadata = _corpus_post_metadata(raw_contexts[:limit], config, common, audience)
     contexts: list[dict[str, Any]] = []
     for index, item in enumerate(raw_contexts[:limit], start=1):
         if not isinstance(item, dict):
@@ -2147,6 +2186,7 @@ def retrieve_department_corpus(
         context_text = str(item.get("text") or chunk.get("text") or "")[:12000]
         contexts.append(
             {
+                **post_metadata.get(extract_file_id("", str(item.get("sourceUri") or "")), {}),
                 "rank": index,
                 "text": context_text,
                 "sourceDisplayName": str(item.get("sourceDisplayName") or ""),

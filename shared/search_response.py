@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from typing_extensions import TypedDict
+from typing_extensions import TypedDict, NotRequired
 
 
 # Current Korean civil time is UTC+09:00. A fixed offset keeps this independent
@@ -26,6 +26,8 @@ class EvidenceSource(TypedDict):
     fileId: str
     name: str
     label: str
+    title: NotRequired[str | None]
+    websiteUrl: NotRequired[str | None]
     path: str | None
     bundle: str | None
     sourceUri: str | None

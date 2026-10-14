@@ -1031,3 +1031,7 @@ button, select { cursor: pointer; }
 @media (max-width: 520px) { .advanced-settings-content { padding: 18px; } .department-page #drawerDeleteSection { margin: 0 18px 18px; } .advanced-audience-option, .advanced-parser-card > header { padding: 18px; } }
 
 @media (min-width: 721px) and (max-width: 1150px) { .issue-filters { grid-template-columns: 1fr 1fr; } .issue-filters > label:last-child { grid-column: auto; } }
+
+.corpus-source-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+
+.issue-row .issue-badge { max-width: 100%; white-space: normal; }

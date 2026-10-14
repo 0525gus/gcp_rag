@@ -12,6 +12,9 @@ class PathContext:
     path: str
     bundle: str
     segments: tuple[str, ...]
+    source_title: str = ""
+    website_url: str = ""
+    metadata_file_id: str = ""
 
     @property
     def ok(self) -> bool:
@@ -52,7 +55,7 @@ def strip_breadcrumb(markdown: str) -> str:
     i = 1 if lines and lines[0].startswith("# ") else 0
     j = i
     while j < len(lines) and (
-        not lines[j].strip() or lines[j].startswith(("자료묶음:", "경로:"))
+        not lines[j].strip() or lines[j].startswith(("자료묶음:", "경로:", "원문:", "파일:"))
     ):
         j += 1
     # 메타 줄을 실제로 하나라도 먹었을 때만 헤더로 인정한다.
@@ -69,6 +72,8 @@ def build_breadcrumb_markdown(
     bundle: str,
     title: str,
     body: str = "",
+    source_title: str = "",
+    website_url: str = "",
 ) -> str:
     """인덱스용 텍스트. 본문이 있으면 앞에 붙이고, 없으면 sidecar용 짧은 문서.
 
@@ -87,21 +92,27 @@ def build_breadcrumb_markdown(
     다만 **sidecar(본문 없는 xlsx 등)는 예전 그대로** 둔다. 그쪽은 머리말이
     유일한 내용이라 줄이면 찾을 단서 자체가 사라진다.
     """
-    title = (title or "").strip() or "untitled"
+    file_title = (title or "").strip() or "untitled"
+    title = source_title or file_title
     path = (path or "").strip() or title
     bundle = (bundle or "").strip() or (path.rsplit("/", 1)[0] if "/" in path else "")
     clean_body = strip_breadcrumb(body) if body else ""
+
+    post_header = (f"원문: {website_url}\n\n" if website_url else "")
+    if source_title and file_title != source_title:
+        post_header += f"파일: {file_title}\n\n"
 
     if clean_body.strip():
         header = f"# {title}\n\n"
         if bundle:
             header += f"자료묶음: {bundle}\n\n"
-        return header + clean_body.lstrip()
+        return header + post_header + clean_body.lstrip()
 
     return (
         f"# {title}\n\n"
         f"자료묶음: {bundle}\n"
         f"경로: {path}\n\n"
+        f"{post_header}"
         f"이 파일은 자료묶음 `{bundle}` 소속입니다. "
         "동일 경로의 관련 PDF/PPTX/HWP와 함께 참조하세요.\n"
     )

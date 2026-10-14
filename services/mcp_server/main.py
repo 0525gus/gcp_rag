@@ -182,7 +182,8 @@ def search(
     문서에서 검색된 부분입니다. 청크는 원문 전체나 연속된 구간을 보장하지 않습니다.
     citationId와 source를 사용해 인용하고, 문서 사이의 관계를 근거 없이 추론하지
     마세요. sourceUri는 일반 문서의 미리보기 링크이며 HWP/HWPX 문서에서는 다운로드
-    링크입니다. 검색 결과만으로 답할 수 없으면 확인되지 않은 부분을 밝혀 주세요.
+    링크입니다. websiteUrl이 있으면 수집한 게시글 원문 주소이며 title은 게시글 제목입니다.
+    검색 결과만으로 답할 수 없으면 확인되지 않은 부분을 밝혀 주세요.
     같은 정보를 얻기 위해 표현만 바꿔 반복 호출할 필요는 없습니다.
     최상위 currentDate는 서버가 응답 시 계산한 오늘 날짜이며 timeZone은
     Asia/Seoul입니다. 기간·마감 비교의 기준으로 사용하되 문서의 작성·개정일이나
@@ -357,7 +358,7 @@ def search(
             meta = _meta(hit.source.file_id)
             name = ((meta.name if meta else None) or hit.source.name or "")
             bundle = (meta.bundle if meta else None) or ""
-            titles.append(name)
+            titles.append(f"{(meta.source_title if meta else None) or ''} {name}".strip())
             # Strip ingestion timestamps before period extraction so path suffixes
             # such as _20260912153000 do not look like document metadata.
             temporal_metadata.append(f"{normalize_title(name)} {normalize_title(bundle)}")
@@ -465,6 +466,8 @@ def search(
             "name": display_name,
             "path": meta.path if meta else None,
             "bundle": meta.bundle if meta else None,
+            "title": meta.source_title if meta else None,
+            "websiteUrl": meta.website_url if meta else None,
             "sourceUri": citation_view_uri(
                 (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri,
                 display_name,
@@ -626,6 +629,8 @@ def retrieve_channel(
             "name": titles[index] or hit.source.file_id,
             "path": (meta.path if meta else None),
             "bundle": bundles[index] or None,
+            "title": meta.source_title if meta else None,
+            "websiteUrl": meta.website_url if meta else None,
             "sourceUri": citation_view_uri(
                 (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri,
                 titles[index],

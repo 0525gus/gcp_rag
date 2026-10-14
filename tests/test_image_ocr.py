@@ -162,11 +162,15 @@ def test_failed_or_empty_ocr_never_writes_indexable_markdown(ingest, status, tex
     ingest.client.post.return_value.status_code = status
     ingest.client.post.return_value.json.return_value = {"text": text}
     result = run_ingest(ingest)
-    assert result["status"] == "DLQ"
+    assert result["status"] == ("SKIPPED" if status == 200 else "DLQ")
     assert "gcsUris" not in result
     ingest.gcs.upload_source_md.assert_not_called()
-    ingest.store.upsert.assert_not_called()
-    ingest.store.enqueue_dlq.assert_called_once()
+    if status == 200:
+        assert ingest.store.upsert.call_args.args[0].error == "OCR_EMPTY_TEXT"
+        ingest.store.enqueue_dlq.assert_not_called()
+    else:
+        ingest.store.upsert.assert_not_called()
+        ingest.store.enqueue_dlq.assert_called_once()
 
 
 def test_disabled_ocr_ignores_stale_queue_route_without_downloading(ingest):
@@ -299,3 +303,21 @@ def test_skipped_image_preserves_resolved_audience(ingest, mime, membership, exp
     assert saved.error == "IMAGE_OCR_DISABLED"
     ingest.drive.download_file.assert_not_called()
     ingest.client.post.assert_not_called()
+
+
+def test_parser_no_text_is_held_and_unchanged_full_sync_does_not_retry(ingest):
+    ingest.body = ingest.body.model_copy(update={"modified_time":"2026-10-14T00:00:00Z"})
+    ingest.client.post.return_value.status_code = 422
+    ingest.client.post.return_value.text = '{"detail":"OCR_EMPTY_TEXT: no text extracted"}'
+    result = run_ingest(ingest)
+    assert result["status"] == "SKIPPED" and result["automaticRetry"] is False
+    state = ingest.store.upsert.call_args.args[0]
+    assert state.error == "OCR_EMPTY_TEXT" and state.status == DocStatus.SKIPPED
+    ingest.store.enqueue_dlq.assert_not_called()
+    ingest.store.get.return_value = state
+    ingest.drive.download_file.reset_mock();ingest.client.post.reset_mock()
+    assert run_ingest(ingest)["status"] == "SKIPPED"
+    ingest.drive.download_file.assert_not_called();ingest.client.post.assert_not_called()
+    ingest.body = ingest.body.model_copy(update={"refresh_content":True})
+    run_ingest(ingest)
+    ingest.client.post.assert_called_once()

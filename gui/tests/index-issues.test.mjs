@@ -208,4 +208,5 @@ test("held documents explain OCR disabled, historical omission, missing setup an
   assert.match(html,/지원하지 않는 파일 형식 · image\/gif/);
   assert.match(html,/Document AI OCR 연결 안 됨/);
   assert.match(html,/OCR 텍스트 없음/);
+  assert.match(html,/자동 재시도에서 제외/);
 });

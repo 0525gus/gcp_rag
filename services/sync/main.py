@@ -13,6 +13,7 @@ Workflows 호출 순서:
 from __future__ import annotations
 
 import io
+from dataclasses import replace
 import logging
 import os
 import re
@@ -34,7 +35,9 @@ if str(_ROOT) not in sys.path:
 
 # shared 모듈 import
 from shared.config import Settings, UnknownDriveError, get_settings  # noqa: E402
-from shared.drive import DriveClient, parse_drive_size  # noqa: E402
+from shared.drive import DriveClient, parse_drive_size
+from services.sync import metadata_refresh
+from shared.ocr_status import is_empty_ocr_error  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.gcs import GcsClient, gs_uri  # noqa: E402
 from shared.hashing import sha256_bytes, sha256_text  # noqa: E402
@@ -264,7 +267,7 @@ def _route_file_meta(
 ) -> dict[str, Any] | None:
     """Drive files.list 항목 → workflow change entry. 폴더는 None."""
     mime = file_meta.get("mimeType") or ""
-    if mime == "application/vnd.google-apps.folder":
+    if mime == "application/vnd.google-apps.folder" or file_meta.get("name") == "metadata.json":
         return None
     file_id = file_meta.get("id") or ""
     name = file_meta.get("name") or ""
@@ -768,11 +771,17 @@ def list_changes(body: ChangesBody) -> dict[str, Any]:
     )
     routed: list[dict[str, Any]] = []
     skipped_out_of_scope = 0
+    metadata_jobs = []
     for ch in changes:
+        if ch.name == "metadata.json" or ch.removed:
+            jobs = metadata_refresh.schedule_change(ch, new_token, store, settings, drive)
+            metadata_jobs.extend(jobs)
+            if ch.name == "metadata.json" or jobs:
+                continue
         # Drive changes 피드는 파일 생성/삭제 시 상위 폴더의 변경 레코드도 함께
         # 보낼 수 있다. 폴더 자체는 다운로드·색인·삭제할 대상이 아니므로 Workflow
         # 집계로 넘기지 않는다. pageToken 은 응답 전체 기준으로 계속 전진한다.
-        if ch.mime_type == "application/vnd.google-apps.folder":
+        if ch.mime_type == "application/vnd.google-apps.folder" or ch.name == "metadata.json":
             continue
         kind = classify_route(
             ch.mime_type, ch.name, removed=ch.removed,
@@ -819,6 +828,8 @@ def list_changes(body: ChangesBody) -> dict[str, Any]:
             entry["skipReason"] = skip_reason
         routed.append(entry)
 
+    if metadata_jobs:
+        logger.info("metadata refresh queued drive=%s jobs=%s", body.drive_id, metadata_jobs)
     return {
         "driveId": body.drive_id,
         "changes": routed,
@@ -828,7 +839,20 @@ def list_changes(body: ChangesBody) -> dict[str, Any]:
         "skippedOutOfScope": skipped_out_of_scope,
         "hasMore": has_more,
         "mode": "delta",
+        "metadataJobs": metadata_jobs,
     }
+
+
+class MetadataRefreshBody(BaseModel):
+    job_id: str = Field(alias="jobId", pattern=r"^metadata-[0-9a-f]{32}$")
+
+
+@app.post("/sync/metadata-refresh-task")
+def metadata_refresh_task(body: MetadataRefreshBody) -> dict[str, Any]:
+    return metadata_refresh.run_page(body.job_id, base=get_settings(),
+        settings_for_drive=_settings_for_drive, source_uris=_source_uris_for_file,
+        index=lambda uris, ids, drive_id: index_gcs(IndexGcsBody(
+            gcsUris=uris, fileIds=ids, driveId=drive_id)))
 
 
 @app.post("/sync/commit-token")
@@ -980,6 +1004,15 @@ def _ingest_locked(
     parents/name 캐시가 인스턴스 단위라 조상 폴더를 파일마다 다시 조회하게 된다
     (N × 폴더깊이 회의 files.get). 백필에서 이 비용이 지배적이다.
     """
+    if body.name == "metadata.json" and not body.removed:
+        existing = store.get(body.file_id)
+        if existing and existing.status not in {DocStatus.DELETED, DocStatus.EXCLUDED}:
+            _cleanup_out_of_scope_file(gcs, settings, body.file_id)
+        store.upsert(DocState(file_id=body.file_id, drive_id=body.drive_id,
+                              name=body.name, mime_type=body.mime_type,
+                              modified_time=body.modified_time, status=DocStatus.EXCLUDED,
+                              error="metadata_sidecar"))
+        return {"fileId": body.file_id, "status": "EXCLUDED", "reason": "metadata_sidecar"}
     folder_ids = settings.sync_folder_id_list
     # EXCLUDE 는 list_changes 가 같은 folder_ids 로 이미 판정해 붙인 라우트다.
     # 여기서 is_in_sync_scope 를 다시 부르면 Drive 조회만 한 번 더 든다.
@@ -1056,6 +1089,13 @@ def _ingest_locked(
             "hwpOriginalDeleted": hwp_original_deleted,
         }
 
+    if not body.removed and not body.refresh_content and body.mime_type.lower() in IMAGE_OCR_MIME:
+        held = store.get(body.file_id)
+        if (held and held.status == DocStatus.SKIPPED and held.error == "OCR_EMPTY_TEXT"
+                and held.modified_time == body.modified_time):
+            return {"fileId":body.file_id,"status":"SKIPPED","reason":"OCR_EMPTY_TEXT",
+                    "route":"IMAGE_OCR","automaticRetry":False}
+
     image_ocr_enabled = getattr(settings, "enable_image_ocr", False)
     image_audience = None
     if not body.removed and (body.mime_type.lower() in IMAGE_OCR_MIME or body.route == RouteKind.IMAGE_OCR.value):
@@ -1106,7 +1146,10 @@ def _ingest_locked(
             and (existing.path or "").strip()
             and existing.status == DocStatus.INDEXED
         ):
-            return {"fileId": body.file_id, "status": "UNCHANGED", "route": route.value}
+            context = _resolve_path_ctx(drive, body)
+            if (context.source_title == (existing.source_title or "")
+                    and context.website_url == (existing.website_url or "")):
+                return {"fileId": body.file_id, "status": "UNCHANGED", "route": route.value}
 
     try:
         if route == RouteKind.IMAGE_OCR:
@@ -1281,6 +1324,9 @@ def _state_fields(
         source_uri=source_uri,
         path=path_ctx.path,
         bundle=path_ctx.bundle,
+        source_title=path_ctx.source_title or None,
+        website_url=path_ctx.website_url or None,
+        metadata_file_id=path_ctx.metadata_file_id or None,
         audience=audience,
         error=error,
     )
@@ -1421,7 +1467,7 @@ def _ingest_hwp(
     md_text = build_breadcrumb_markdown(
         path=path_ctx.path,
         bundle=path_ctx.bundle,
-        title=body.name or body.file_id,
+        title=body.name or body.file_id, source_title=path_ctx.source_title, website_url=path_ctx.website_url,
         body=md_bytes.decode("utf-8", errors="replace"),
     )
     md_bytes = md_text.encode("utf-8")
@@ -1474,6 +1520,19 @@ def _ingest_hwp(
     )
 
 
+def _hold_empty_ocr(body, store, drive, settings, gcs, audience):
+    existing = store.get(body.file_id)
+    if existing and existing.status not in {DocStatus.SKIPPED, DocStatus.DELETED, DocStatus.EXCLUDED}:
+        _cleanup_out_of_scope_file(gcs, settings, body.file_id)
+    context = _resolve_path_ctx(drive, body)
+    store.upsert(_state_fields(body, content_hash=None, status=DocStatus.SKIPPED,
+        parse_route=ParseRoute.IMAGE_DOCAI, source_uri=body.web_view_link,
+        path_ctx=context, audience=audience, error="OCR_EMPTY_TEXT"))
+    store.clear_dlq(body.file_id)
+    return {"fileId":body.file_id,"status":"SKIPPED","route":"IMAGE_OCR",
+            "reason":"OCR_EMPTY_TEXT","automaticRetry":False}
+
+
 def _ingest_image_ocr(
     body: IngestBody, store: DocStateStore, gcs: GcsClient,
     drive: DriveClient, settings: Settings, *, audience: Audience | None = None,
@@ -1506,14 +1565,19 @@ def _ingest_image_ocr(
                   "enableImageOcr": True},
         )
         if response.status_code != 200:
-            raise ValueError(f"IMAGE_OCR_FAILED:{response.status_code}:{response.text[:500]}")
+            error = f"IMAGE_OCR_FAILED:{response.status_code}:{response.text[:500]}"
+            if is_empty_ocr_error(error, mime):
+                return _hold_empty_ocr(body, store, drive, settings, gcs, audience)
+            raise ValueError(error)
         result = response.json()
     text = result.get("text")
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("OCR_EMPTY_TEXT")
+    if not isinstance(text, str):
+        raise ValueError("OCR_INVALID_RESPONSE: text must be a string")
+    if not text.strip():
+        return _hold_empty_ocr(body, store, drive, settings, gcs, audience)
     path_ctx = _resolve_path_ctx(drive, body)
     markdown = build_breadcrumb_markdown(
-        path=path_ctx.path, bundle=path_ctx.bundle, title=body.name or body.file_id, body=text,
+        path=path_ctx.path, bundle=path_ctx.bundle, title=body.name or body.file_id, source_title=path_ctx.source_title, website_url=path_ctx.website_url, body=text,
     )
     gated = _size_gate(store, settings, body, len(markdown.encode("utf-8")), splittable=False, ext=".md")
     if gated:
@@ -1553,7 +1617,7 @@ def _ingest_google_export(
     sidecar = build_breadcrumb_markdown(
         path=path_ctx.path,
         bundle=path_ctx.bundle,
-        title=body.name or body.file_id,
+        title=body.name or body.file_id, source_title=path_ctx.source_title, website_url=path_ctx.website_url,
     )
     content_hash = sha256_text(f"{sha256_bytes(data)}|{path_ctx.path}|{sidecar}")
     if store.should_skip_reindex(body.file_id, content_hash):
@@ -1622,7 +1686,7 @@ def _ingest_sidecar_only(
     sidecar = build_breadcrumb_markdown(
         path=path_ctx.path,
         bundle=path_ctx.bundle,
-        title=body.name or body.file_id,
+        title=body.name or body.file_id, source_title=path_ctx.source_title, website_url=path_ctx.website_url,
         body="",
     )
     content_hash = sha256_text(f"{body.file_id}|{path_ctx.path}|{sidecar}")
@@ -1824,7 +1888,7 @@ def _ingest_direct(
         md_text = build_breadcrumb_markdown(
             path=path_ctx.path,
             bundle=path_ctx.bundle,
-            title=name,
+            title=name, source_title=path_ctx.source_title, website_url=path_ctx.website_url,
             body=body_text,
         )
         # 원본 바이트가 아니라 머리말까지 붙인 최종 산출물로 잰다.
@@ -1865,7 +1929,7 @@ def _ingest_direct(
         sidecar = build_breadcrumb_markdown(
             path=path_ctx.path,
             bundle=path_ctx.bundle,
-            title=name,
+            title=name, source_title=path_ctx.source_title, website_url=path_ctx.website_url,
         )
         content_hash = sha256_text(f"{sha256_bytes(data)}|{path_ctx.path}|{sidecar}")
         if store.should_skip_reindex(body.file_id, content_hash):
@@ -3235,6 +3299,11 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
         pending_uris, pending_ids = [], []
 
     for doc in targets:
+        if is_empty_ocr_error(getattr(doc, "error", None), doc.mime_type):
+            store.upsert(replace(doc, status=DocStatus.SKIPPED, error="OCR_EMPTY_TEXT"))
+            store.clear_dlq(doc.file_id)
+            totals["held"] = totals.get("held", 0) + 1
+            continue
         if store.get_dlq_attempts(doc.file_id) >= body.max_attempts:
             totals["exhausted"] += 1
             continue

@@ -157,6 +157,7 @@ class _Settings:
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, token: str | None, drive: Any) -> None:
+    monkeypatch.setattr(sync_main.metadata_refresh, "schedule_change", lambda *a: [])
     monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
     monkeypatch.setattr(sync_main, "DocStateStore", lambda: _Store(token))
     monkeypatch.setattr(sync_main, "DriveClient", lambda: drive)

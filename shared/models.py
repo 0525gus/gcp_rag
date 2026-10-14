@@ -106,6 +106,9 @@ class DocState:
     path: str | None = None
     # 직계 자료묶음 폴더명
     bundle: str | None = None
+    source_title: str | None = None
+    website_url: str | None = None
+    metadata_file_id: str | None = None
     # 노출 범위. 필드가 없는 구 문서는 from_firestore 가 STAFF 로 읽는다.
     audience: Audience = Audience.STAFF
 
@@ -129,6 +132,9 @@ class DocState:
             "ragFileId": self.rag_file_id,
             "path": self.path,
             "bundle": self.bundle,
+            "sourceTitle": self.source_title,
+            "websiteUrl": self.website_url,
+            "metadataFileId": self.metadata_file_id,
             "audience": (
                 self.audience.value
                 if isinstance(self.audience, Audience)
@@ -157,6 +163,9 @@ class DocState:
             rag_file_id=data.get("ragFileId") or data.get("rag_file_id"),
             path=data.get("path"),
             bundle=data.get("bundle"),
+            source_title=data.get("sourceTitle"),
+            website_url=data.get("websiteUrl"),
+            metadata_file_id=data.get("metadataFileId"),
             # 필드가 없는 구 문서(= 분리 도입 이전 1,155건)는 STAFF 로 읽힌다.
             # 학생 코퍼스는 재색인으로 명시적으로 채워야 한다 — 기본값이 조용히
             # 학생에게 문서를 여는 일은 없다.
