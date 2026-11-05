@@ -4,7 +4,15 @@
 
 ## 실행
 
-저장소 루트에서:
+Windows에서는 저장소 루트의 `run.cmd`를 실행합니다. 처음 실행하면 `.venv`를 만들고
+`requirements-gui.txt`를 설치합니다. 이후에는 이 파일이 바뀌었을 때만 다시 설치합니다.
+
+```powershell
+.\run.cmd                # 기본 포트 8765, 브라우저 자동 열림
+.\run.cmd --port 9000 --no-browser
+```
+
+직접 실행하려면 저장소 루트에서:
 
 ```powershell
 pip install -r requirements-gui.txt

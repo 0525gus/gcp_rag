@@ -2,6 +2,8 @@
 # 에디터가 CRLF 로 바꿔 두면 내용이 같은데도 전 파일이 변경으로 잡혀
 # 실제 diff 가 줄바꿈 노이즈에 묻힌다.
 * text=auto eol=lf
+# cmd.exe는 LF 배치 파일의 라벨·괄호 블록을 잘못 파싱한다.
+*.cmd text eol=crlf
 
 # 바이너리 (혹시 추가될 경우 손대지 않도록)
 *.png binary
