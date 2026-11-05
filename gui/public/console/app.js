@@ -21,6 +21,7 @@
     setupMode: "create",
     authPollTimer: null,
     authLoginPending: false,
+    gcloudInstallTimer: null,
     departmentResourceRequest: 0,
     departmentBuckets: [],
     drivePreflightSignature: "",
@@ -676,6 +677,16 @@
     $("#failCount").textContent = counts.FAIL;
     $("#checkingCount").textContent = counts.CHECKING;
     $(".checking-card").classList.toggle("is-live", counts.CHECKING > 0);
+    const filter = $("#statusFilter").value;
+    $$("[data-summary-filter]").forEach((card) => card.setAttribute("aria-pressed", String(card.dataset.summaryFilter === filter)));
+  }
+
+  function toggleSummaryFilter(event) {
+    const card = event.target.closest("[data-summary-filter]");
+    if (!card) return;
+    const select = $("#statusFilter");
+    select.value = select.value === card.dataset.summaryFilter ? "ALL" : card.dataset.summaryFilter;
+    renderDepartments();
   }
 
   function renderDepartments() {
@@ -717,7 +728,7 @@
         <td>${badge(overall)}</td>
         ${layers.map((layer) => `<td>${badge(overall === "CHECKING" ? "CHECKING" : layerStatus(result, layer))}</td>`).join("")}
         <td class="time-cell" title="${escapeHtml(checkedAt || "")}">${overall === "CHECKING" ? "확인 중" : relativeTime(checkedAt)}</td>
-        <td><div class="row-actions"><button class="row-button" data-action="check" title="다시 확인" aria-label="${escapeHtml(dept.name)} 다시 확인">↻</button><button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세">›</button></div></td>
+        <td><div class="row-actions"><button class="row-button" data-action="check" title="다시 확인" aria-label="${escapeHtml(dept.name)} 다시 확인"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4.5V11h-6.5"/></svg></button><button class="row-button" data-action="detail" title="상세" aria-label="${escapeHtml(dept.name)} 상세"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 6l6 6-6 6"/></svg></button></div></td>
       </tr>`;
     }).join("");
 
@@ -1907,7 +1918,7 @@
 
     if (!env?.gcloudInstalled) {
       $("#setupAuthTitle").textContent = "gcloud 설치 필요";
-      $("#setupAuthDetail").textContent = "Google Cloud CLI를 설치한 뒤 서버를 다시 시작해 주세요.";
+      $("#setupAuthDetail").textContent = "‘gcloud 설치’를 누르면 Google Cloud CLI를 설치하고 로그인까지 이어집니다. 서버를 다시 시작하지 않아도 됩니다.";
     } else if (!env?.gcloudAuthenticated) {
       $("#setupAuthTitle").textContent = "gcloud 로그인이 필요합니다";
       $("#setupAuthDetail").textContent = "터미널에서 gcloud auth login 실행 후 ‘다시 확인’을 눌러 주세요.";
@@ -1944,10 +1955,12 @@
     $("#setupResourceStatus").dataset.status = "";
     $("#createCommonConfig").disabled = true;
     const authButton = $("#refreshGcloudAuth");
-    authButton.disabled = !env?.gcloudInstalled;
-    authButton.textContent = state.authLoginPending
-      ? "로그인 다시 열기"
-      : (env?.gcloudAuthenticated ? "다시 확인" : "gcloud 로그인");
+    authButton.disabled = Boolean(state.gcloudInstallTimer);
+    authButton.textContent = !env?.gcloudInstalled
+      ? (state.gcloudInstallTimer ? "설치 중…" : "gcloud 설치")
+      : state.authLoginPending
+        ? "로그인 다시 열기"
+        : (env?.gcloudAuthenticated ? "다시 확인" : "gcloud 로그인");
     return ready;
   }
 
@@ -2244,9 +2257,79 @@
     state.authPollTimer = window.setTimeout(() => pollGcloudLogin(attempt + 1), 2000);
   }
 
+  function showGcloudInstallProgress(run) {
+    $("#setupAuth").dataset.status = "checking";
+    const seconds = Math.max(0, Math.round((Date.now() - new Date(run.startedAt).getTime()) / 1000));
+    const elapsed = Number.isFinite(seconds) ? ` · ${Math.floor(seconds / 60)}분 ${seconds % 60}초 경과` : "";
+    $("#setupAuthTitle").textContent = run.status === "INSTALLER_OPEN"
+      ? "설치 프로그램에서 설치를 마쳐 주세요"
+      : `Google Cloud CLI 설치 중${elapsed}`;
+    $("#setupAuthDetail").textContent = run.status === "INSTALLER_OPEN"
+      ? run.message
+      : `${run.message || "설치를 준비하고 있습니다."} 보통 3~5분 걸립니다. Windows 권한 확인 창이 뜨면 ‘예’를 눌러 주세요.`;
+    const button = $("#refreshGcloudAuth");
+    button.disabled = true;
+    button.textContent = "설치 중…";
+  }
+
+  function stopGcloudInstallPolling() {
+    window.clearTimeout(state.gcloudInstallTimer);
+    state.gcloudInstallTimer = null;
+  }
+
+  function failGcloudInstall(message) {
+    stopGcloudInstallPolling();
+    const button = $("#refreshGcloudAuth");
+    $("#setupAuth").dataset.status = "required";
+    $("#setupAuthTitle").textContent = "gcloud를 설치하지 못했습니다";
+    $("#setupAuthDetail").textContent = message;
+    button.disabled = false;
+    button.textContent = "다시 시도";
+  }
+
+  async function pollGcloudInstall(startedAt = Date.now()) {
+    let run;
+    try {
+      run = await api("/api/v1/gcloud-install");
+    } catch (error) {
+      run = { status: "RUNNING", message: "설치 상태를 다시 확인하고 있습니다." };
+    }
+    if (run.installed) {
+      stopGcloudInstallPolling();
+      toast("gcloud 설치를 확인했습니다", "이어서 Google 계정 로그인을 시작합니다.", "ok");
+      const env = await loadEnvironment();
+      if (env) renderCommonBootstrap(env);
+      await refreshGcloudSetup();
+      return;
+    }
+    if (run.status === "FAILED") return failGcloudInstall(run.message || "설치 중 오류가 발생했습니다.");
+    // 공식 설치 프로그램은 사용자가 창을 오래 열어 둘 수 있어 넉넉히 30분까지 기다린다.
+    if (Date.now() - startedAt > 30 * 60 * 1000) {
+      return failGcloudInstall("설치 완료를 확인하지 못했습니다. 설치를 마쳤다면 ‘다시 시도’를 눌러 주세요.");
+    }
+    showGcloudInstallProgress(run);
+    state.gcloudInstallTimer = window.setTimeout(() => pollGcloudInstall(startedAt), 3000);
+  }
+
+  async function startGcloudInstall() {
+    stopGcloudInstallPolling();
+    try {
+      const run = await api("/api/v1/gcloud-install", { method: "POST" });
+      state.gcloudInstallTimer = -1;
+      showGcloudInstallProgress(run);
+      await pollGcloudInstall();
+    } catch (error) {
+      failGcloudInstall(error.message);
+    }
+  }
+
   async function refreshGcloudSetup() {
     const button = $("#refreshGcloudAuth");
     window.clearTimeout(state.authPollTimer);
+    if (state.environment && !state.environment.gcloudInstalled) {
+      await startGcloudInstall();
+      return;
+    }
     button.disabled = true;
     button.textContent = "확인 중…";
     $("#setupAuth").dataset.status = "checking";
@@ -4362,6 +4445,7 @@
     $("#checkAllButton").addEventListener("click", () => startStatus());
     $("#departmentSearch").addEventListener("input", renderDepartments);
     $("#statusFilter").addEventListener("change", renderDepartments);
+    $(".summary-grid").addEventListener("click", toggleSummaryFilter);
     $("#corpusDepartment").addEventListener("change", () => updateCorpusChatTarget(true));
     $$('[data-corpus-audience]').forEach((button) => button.addEventListener("click", () => {
       state.corpusAudience = button.dataset.corpusAudience;

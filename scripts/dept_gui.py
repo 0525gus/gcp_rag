@@ -120,6 +120,9 @@ _TEARDOWN_RUNS: dict[str, dict[str, Any]] = {}
 _TEARDOWN_LOCK = threading.Lock()
 _TEARDOWN_TTL_SECONDS = 60 * 60
 _AUTH_PROCESS: subprocess.Popen[Any] | None = None
+_GCLOUD_INSTALLER_URL = "https://dl.google.com/dl/cloudsdk/channels/rapid/GoogleCloudSDKInstaller.exe"
+_GCLOUD_INSTALL_LOCK = threading.Lock()
+_GCLOUD_INSTALL: dict[str, Any] = {"status": "IDLE"}
 _SYNC_AUTH_LOCK = threading.Lock()
 _SYNC_AUTH_TOKEN = ""
 _SYNC_AUTH_TOKEN_EXPIRES = 0.0
@@ -1267,10 +1270,26 @@ def _run_command(args: list[str], timeout: int = 12) -> tuple[bool, str]:
     return result.returncode == 0, output
 
 
+def _gcloud_install_locations() -> list[Path]:
+    """Cloud SDK 설치 프로그램의 기본 경로. 설치 직후 이 서버 프로세스의 PATH는
+    갱신되지 않으므로, 콘솔에서 설치한 gcloud를 재시작 없이 찾으려면 직접 본다."""
+    if os.name != "nt":
+        return []
+    bases = [os.environ.get(name) for name in ("LOCALAPPDATA", "ProgramFiles(x86)", "ProgramFiles")]
+    return [
+        Path(base) / "Google" / "Cloud SDK" / "google-cloud-sdk" / "bin" / "gcloud.cmd"
+        for base in bases
+        if base
+    ]
+
+
 def _gcloud_executable() -> str | None:
     """Windows에서는 CreateProcess가 PATHEXT shim을 해석하지 못하므로 .cmd를 고정."""
     if os.name == "nt":
-        return shutil.which("gcloud.cmd") or shutil.which("gcloud.CMD")
+        found = shutil.which("gcloud.cmd") or shutil.which("gcloud.CMD")
+        if found:
+            return found
+        return next((str(path) for path in _gcloud_install_locations() if path.is_file()), None)
     return shutil.which("gcloud")
 
 
@@ -1485,6 +1504,77 @@ def _start_gcloud_login() -> bool:
         start_new_session=os.name != "nt",
     )
     return True
+
+
+def _set_gcloud_install(**fields: Any) -> None:
+    with _GCLOUD_INSTALL_LOCK:
+        _GCLOUD_INSTALL.update(fields)
+
+
+def _gcloud_install_view() -> dict[str, Any]:
+    with _GCLOUD_INSTALL_LOCK:
+        view = copy.deepcopy(_GCLOUD_INSTALL)
+    view["installed"] = bool(_gcloud_executable())
+    if view["installed"] and view["status"] in {"RUNNING", "INSTALLER_OPEN"}:
+        view["status"] = "DONE"
+    return view
+
+
+def _installer_signed_by_google(path: Path) -> bool:
+    """내려받은 설치 파일을 실행하기 전에 Authenticode 서명이 유효하고 Google 명의인지 확인한다."""
+    script = (
+        "$s = Get-AuthenticodeSignature -LiteralPath $env:RAG_INSTALLER;"
+        "if ($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -match 'O=Google LLC') { 'OK' }"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=60, check=False, shell=False,
+            env={**os.environ, "RAG_INSTALLER": str(path)},
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.stdout.strip() == "OK"
+
+
+def _run_gcloud_install() -> None:
+    """winget 무인 설치를 먼저 시도하고, 안 되면 Google 공식 설치 프로그램을 띄운다."""
+    flags = subprocess.CREATE_NO_WINDOW
+    winget = shutil.which("winget.exe") or shutil.which("winget")
+    if winget:
+        _set_gcloud_install(method="winget", message="winget으로 Google Cloud CLI를 설치하고 있습니다.")
+        try:
+            subprocess.run(
+                [winget, "install", "--id", "Google.CloudSDK", "--exact", "--silent",
+                 "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity"],
+                cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=20 * 60, check=False, shell=False, creationflags=flags,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        if _gcloud_executable():
+            _set_gcloud_install(status="DONE", message="설치가 끝났습니다.")
+            return
+
+    _set_gcloud_install(method="installer", message="Google 공식 설치 프로그램을 내려받고 있습니다.")
+    target = Path(tempfile.mkdtemp(prefix="gcloud-installer-")) / "GoogleCloudSDKInstaller.exe"
+    try:
+        with urllib.request.urlopen(_GCLOUD_INSTALLER_URL, timeout=60) as response, target.open("wb") as out:
+            shutil.copyfileobj(response, out)
+    except (OSError, urllib.error.URLError) as exc:
+        _set_gcloud_install(status="FAILED", message=f"설치 파일을 내려받지 못했습니다: {str(exc)[:200]}")
+        return
+    if not _installer_signed_by_google(target):
+        target.unlink(missing_ok=True)
+        _set_gcloud_install(status="FAILED", message="설치 파일 서명을 확인하지 못해 실행하지 않았습니다.")
+        return
+    try:
+        subprocess.Popen([str(target)], cwd=target.parent, shell=False)
+    except OSError as exc:
+        _set_gcloud_install(status="FAILED", message=f"설치 프로그램을 열지 못했습니다: {str(exc)[:200]}")
+        return
+    _set_gcloud_install(status="INSTALLER_OPEN", message="설치 프로그램 창에서 설치를 마쳐 주세요. 끝나면 자동으로 이어집니다.")
 
 
 def _http_json(url: str, token: str = "", timeout: int = 10) -> tuple[int, Any, int]:
@@ -7140,6 +7230,32 @@ def start_gcloud_login(request: Request) -> JSONResponse:
         {"started": started, "authenticated": False, "message": "브라우저 로그인을 기다리는 중"},
         status_code=202,
     )
+
+
+@app.get("/api/v1/gcloud-install")
+def gcloud_install_status() -> dict[str, Any]:
+    return _gcloud_install_view()
+
+
+@app.post("/api/v1/gcloud-install")
+def start_gcloud_install(request: Request) -> JSONResponse:
+    _require_local_session(request)
+    if _gcloud_executable():
+        return JSONResponse(_gcloud_install_view())
+    if os.name != "nt":
+        return JSONResponse(
+            {"error": {"code": "GCLOUD_INSTALL_UNSUPPORTED",
+                       "message": "자동 설치는 Windows에서만 지원합니다. https://cloud.google.com/sdk/docs/install 을 따라 설치해 주세요."}},
+            status_code=501,
+        )
+    with _GCLOUD_INSTALL_LOCK:
+        if _GCLOUD_INSTALL.get("status") in {"RUNNING", "INSTALLER_OPEN"}:
+            return JSONResponse(copy.deepcopy({**_GCLOUD_INSTALL, "installed": False}), status_code=202)
+        _GCLOUD_INSTALL.clear()
+        _GCLOUD_INSTALL.update(status="RUNNING", method="", message="설치를 준비하고 있습니다.",
+                               startedAt=datetime.now(UTC).isoformat())
+    threading.Thread(target=_run_gcloud_install, name="gcloud-install", daemon=True).start()
+    return JSONResponse(_gcloud_install_view(), status_code=202)
 
 
 _DOCAI_SETUP = docai_setup.ProcessorSetup(
