@@ -3,7 +3,7 @@ setlocal
 rem GCP RAG department console launcher. Usage: run.cmd [--port N] [--no-browser]
 cd /d "%~dp0"
 
-set "VENV=.venv"
+set "VENV=%~dp0.venv"
 set "PY=%VENV%\Scripts\python.exe"
 set "STAMP=%VENV%\.gui-requirements"
 
@@ -30,5 +30,7 @@ copy /y requirements-gui.txt "%STAMP%" >nul
 
 :launch
 echo [run] Starting console (default http://127.0.0.1:8765). Stop with Ctrl+C.
-"%PY%" scripts\dept_gui.py %*
-exit /b %errorlevel%
+rem "(goto) 2>nul" leaves the batch context before Python starts, so Ctrl+C exits
+rem immediately without cmd's "Terminate batch job (Y/N)?" prompt.
+rem Paths are absolute because leaving the batch also restores the caller's directory.
+(goto) 2>nul & "%PY%" "%~dp0scripts\dept_gui.py" %*
