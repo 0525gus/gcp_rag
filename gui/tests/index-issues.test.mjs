@@ -20,7 +20,7 @@ function screen(api) {
   $("#indexIssuesDepartment").value = "cs";
   const timers = [];
   const ui = vm.runInNewContext(`${block}\n({ loadIndexIssues, openIndexIssue, closeIndexIssue, renderIndexIssues, setIssueFilter, indexIssueState, refreshIssueReprocess, startIssueReprocess })`, {
-    $, api, state: { departments: [] },
+    $, api, state: { departments: [] }, setFreshness() {},
     clearTimeout() {}, setTimeout(fn) { timers.push(fn); return timers.length; },
     crypto: { randomUUID: () => "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
     escapeHtml: (v) => String(v ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;"),

@@ -31,7 +31,7 @@ from shared.config import get_settings  # noqa: E402
 from shared.gcs import GcsClient, parse_gs_uri  # noqa: E402
 from shared.hashing import sha256_text  # noqa: E402
 from shared.logging_config import setup_logging  # noqa: E402
-from shared.mime_types import IMAGE_OCR_MAX_BYTES, is_hwpx  # noqa: E402
+from shared.mime_types import is_hwpx  # noqa: E402
 from shared.models import ParseResult, ParseRoute  # noqa: E402
 
 from services.parser.cleanup import cleanup_markdown  # noqa: E402
@@ -77,7 +77,7 @@ class ImageOcrRequestBody(BaseModel):
 
 @app.post("/ocr")
 def ocr_image(req: ImageOcrRequestBody) -> JSONResponse:
-    from services.parser.image_ocr import ImageOcrError, extract_image_text
+    from services.parser.image_ocr import ImageOcrError, extract_image_text, ocr_size_limit
 
     if not req.enable_image_ocr:
         raise HTTPException(status_code=403, detail="IMAGE_OCR_DISABLED")
@@ -90,9 +90,10 @@ def ocr_image(req: ImageOcrRequestBody) -> JSONResponse:
     blob = gcs._client.bucket(bucket).get_blob(name)
     if blob is None:
         raise HTTPException(status_code=404, detail="OCR_SOURCE_NOT_FOUND")
-    if blob.size is None or blob.size > IMAGE_OCR_MAX_BYTES:
+    limit = ocr_size_limit(req.mime_type)
+    if blob.size is None or blob.size > limit:
         raise HTTPException(status_code=413, detail="OCR_SIZE_LIMIT")
-    data = blob.download_as_bytes(end=IMAGE_OCR_MAX_BYTES)
+    data = blob.download_as_bytes(end=limit)
     try:
         text = extract_image_text(data, req.mime_type, settings)
     except ImageOcrError as exc:

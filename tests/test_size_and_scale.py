@@ -116,7 +116,7 @@ class _GateDrive:
     def __init__(self, payload: bytes) -> None:
         self._payload = payload
 
-    def download_file(self, _fid: str) -> bytes:
+    def download_file(self, _fid: str, max_bytes: int | None = None) -> bytes:
         return self._payload
 
     def resolve_path_context(self, _fid: str, name: str):

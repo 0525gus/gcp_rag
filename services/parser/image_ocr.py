@@ -1,4 +1,4 @@
-"""PNG/JPEG의 텍스트만 추출한다. 이미지 설명 생성·표 복원·청킹은 하지 않는다."""
+"""PNG/JPEG와 이미지 위주 PDF의 텍스트만 추출한다. 이미지 설명 생성·표 복원·청킹은 하지 않는다."""
 
 from __future__ import annotations
 
@@ -9,14 +9,30 @@ from google.cloud import documentai
 from PIL import Image, UnidentifiedImageError
 
 from shared.config import Settings
-from shared.mime_types import IMAGE_OCR_MAX_BYTES, IMAGE_OCR_MAX_PIXELS, IMAGE_OCR_MIME
+from shared.mime_types import (
+    IMAGE_OCR_MAX_BYTES,
+    IMAGE_OCR_MAX_PIXELS,
+    IMAGE_OCR_MIME,
+    PDF_OCR_MAX_BYTES,
+)
+
+PDF_MIME = "application/pdf"
 
 
 class ImageOcrError(ValueError):
     pass
 
 
+def ocr_size_limit(mime_type: str) -> int:
+    return PDF_OCR_MAX_BYTES if mime_type == PDF_MIME else IMAGE_OCR_MAX_BYTES
+
+
 def validate_image(data: bytes, mime_type: str) -> None:
+    if mime_type == PDF_MIME:
+        # 페이지 수 한도는 Document AI가 거부한다. 여기서는 형식과 크기만 본다.
+        if not data.startswith(b"%PDF-") or len(data) > PDF_OCR_MAX_BYTES:
+            raise ImageOcrError("OCR_INVALID_PDF: PDF must be at most 20MB")
+        return
     if mime_type not in IMAGE_OCR_MIME:
         raise ImageOcrError("OCR_UNSUPPORTED_TYPE: only PNG/JPEG are enabled")
     if not data or len(data) > IMAGE_OCR_MAX_BYTES:

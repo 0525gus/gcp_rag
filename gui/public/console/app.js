@@ -143,6 +143,61 @@
     window.setTimeout(() => item.remove(), 4300);
   }
 
+  // 화면별 조회가 언제 마지막으로 성공했는지 기록한다. 각 조회 함수가 시작·성공·실패를
+  // 알리고, 화면 상단의 갱신 표시는 이 기록만 보고 그린다.
+  const REFRESH_TTL_MS = 60 * 1000;
+  const freshness = {};
+
+  function setFreshness(key, status) {
+    const entry = freshness[key] ||= { at: 0, status: "idle" };
+    entry.status = status;
+    if (status === "ok") entry.at = Date.now();
+    renderRefreshStamps(key);
+  }
+
+  function needsRefresh(key) {
+    const entry = freshness[key];
+    return !entry || (entry.status !== "loading" && Date.now() - entry.at > REFRESH_TTL_MS);
+  }
+
+  function refreshAgo(at) {
+    const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+    if (seconds < 45) return "방금";
+    if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}분 전`;
+    return `${Math.floor(seconds / 3600)}시간 전`;
+  }
+
+  function refreshStampText(entry) {
+    const clock = entry?.at ? new Date(entry.at) : null;
+    const time = clock ? [clock.getHours(), clock.getMinutes(), clock.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":") : "";
+    if (!entry || entry.status === "idle") return "조회 전";
+    if (entry.status === "loading") return time ? `갱신 중… · 마지막 ${time}` : "불러오는 중…";
+    if (entry.status === "fail") return time ? `갱신 실패 · 마지막 성공 ${time}` : "불러오지 못했습니다";
+    return `${time} 갱신 · ${refreshAgo(entry.at)}`;
+  }
+
+  function renderRefreshStamps(only = "") {
+    $$(only ? `[data-refresh-stamp="${only}"]` : "[data-refresh-stamp]").forEach((stamp) => {
+      const entry = freshness[stamp.dataset.refreshStamp];
+      stamp.textContent = refreshStampText(entry);
+      stamp.dataset.status = entry?.status || "idle";
+      stamp.title = entry?.at ? `마지막 갱신 ${new Date(entry.at).toLocaleString("ko-KR")}` : "";
+    });
+  }
+
+  // 로그인이 확인되면 바로 모든 조회 화면을 뒤에서 채워 둔다. 화면을 열 때는 이미
+  // 받아 둔 결과를 보여 주고, 오래된 것만 다시 조회한다.
+  function prefetchViews() {
+    if (needsRefresh("syncRuns")) loadSyncRuns(true);
+    if (needsRefresh("commonRuntime")) loadCommonRuntimeState(true);
+    if (needsRefresh("driveSa")) refreshDriveSaStatusInline();
+  }
+
+  function prefetchIndexIssues() {
+    renderIndexIssueDepartments();
+    if ($("#indexIssuesDepartment").value && needsRefresh("indexIssues")) loadIndexIssues(false, { background: indexIssueState.loaded });
+  }
+
   function switchView(view, historyMode = "push") {
     if (state.currentView === "dashboard" && view !== "dashboard") state.dashboardScroll = window.scrollY;
     if (view !== "department") state.selectedCode = null;
@@ -156,15 +211,20 @@
     $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === (view === "department" ? "dashboard" : view)));
     document.body.classList.remove("menu-open");
     if (view === "environment") {
-      loadEnvironment();
-      refreshDriveSaStatusInline();
-      loadCommonRuntimeState();
+      if (needsRefresh("environment")) loadEnvironment();
+      if (needsRefresh("driveSa")) refreshDriveSaStatusInline();
+      if (needsRefresh("commonRuntime")) loadCommonRuntimeState(Boolean(state.commonRuntime));
     }
-    if (view === "dashboard") refreshRuntimeEnvIfStale();
-    if (view === "sync") loadSyncRuns();
+    if (view === "dashboard") {
+      refreshRuntimeEnvIfStale();
+      if (needsRefresh("departments") && freshness.departments) loadDepartments();
+    }
+    if (view === "sync" && needsRefresh("syncRuns")) loadSyncRuns(Boolean(freshness.syncRuns?.at));
     if (view === "indexIssues") {
+      const previous = $("#indexIssuesDepartment").value;
       renderIndexIssueDepartments();
-      loadIndexIssues();
+      const changed = $("#indexIssuesDepartment").value !== previous;
+      if (changed || needsRefresh("indexIssues")) loadIndexIssues(false, { background: indexIssueState.loaded && !changed });
     }
     if (view === "corpus") {
       renderCorpusDepartmentOptions();
@@ -200,6 +260,7 @@
         && (!reason || reason === "처리가 보류됐습니다. 개별 사유가 기록되지 않았습니다."))) {
       return "Document AI OCR 미적용 · 이전 처리에서 이미지 OCR을 수행하지 않았습니다. 현재 OCR 연결·대상별 옵션을 확인한 뒤 재처리하세요.";
     }
+    if (code === "ADMIN_REVIEW_SIZE") return "관리자 확인 필요 · PDF가 100MB를 넘어 자동 처리하지 않았습니다. 파일을 줄이거나 이미지(PNG/JPG)로 바꿔 다시 올리면 자동으로 다시 판정합니다.";
     if (code === "UNSUPPORTED_FORMAT") return `지원하지 않는 파일 형식 · ${item.mimeType || "형식 미상"}. 지원 형식으로 변환한 뒤 다시 등록하세요.`;
     if (code === "OCR_EMPTY_TEXT" || reason.includes("OCR_EMPTY_TEXT")) return "처리 보류 · OCR 텍스트 없음. 자동 재시도에서 제외합니다. 원본이 바뀌거나 수동 재처리하면 다시 확인합니다.";
     if (reason.includes("OCR_NOT_CONFIGURED")) return "Document AI OCR 연결 안 됨 · 공통 셋업에서 OCR 프로세서를 설정하고 적용한 뒤 재처리하세요.";
@@ -254,34 +315,41 @@
     </button>`).join("") : `<div class="issue-empty"><span class="issue-empty-mark" aria-hidden="true">${indexIssueState.loading ? "…" : "≡"}</span><b>${indexIssueState.loading ? "문서 상태를 확인하고 있습니다" : !$("#indexIssuesDepartment").value ? "학과를 선택해 주세요" : indexIssueState.loaded ? "표시할 문서가 없습니다" : "문서를 불러오지 못했습니다"}</b><p>${indexIssueState.loading ? "조회된 결과부터 순서대로 보여드립니다." : !$("#indexIssuesDepartment").value ? "선택한 학과의 보류·오류 문서를 한곳에서 확인하세요." : indexIssueState.loaded ? indexIssueState.cursor ? "현재까지 조회한 범위에 조건과 일치하는 문서가 없습니다." : "조건과 일치하는 보류·오류 문서가 없습니다." : "새로고침을 눌러 다시 확인해 주세요."}</p></div>`;
   }
 
-  async function loadIndexIssues(more = false) {
+  // background 는 이미 보이는 목록을 지우지 않고 전체 집계가 끝났을 때 한 번에 바꾼다.
+  // 직접 새로고침·학과 변경은 지금처럼 비우고 받는 대로 보여 준다.
+  async function loadIndexIssues(more = false, { background = false } = {}) {
     if (more) { indexIssueState.visible += 25; renderIndexIssues(); return; }
     const code = $("#indexIssuesDepartment").value;
     const request = ++indexIssueState.request;
-    if (!more) {
+    if (!background) {
       Object.assign(indexIssueState, { items: [], cursor: "", scanned: 0, visible: 25, loaded: false });
       closeIndexIssue();
+      indexIssueState.loading = Boolean(code);
     }
-    indexIssueState.loading = Boolean(code);
     $("#indexIssuesError").classList.add("hidden");
     renderIndexIssues();
-    if (!code) return;
+    if (!code) { setFreshness("indexIssues", "idle"); return; }
+    setFreshness("indexIssues", "loading");
+    const scan = background ? { items: [], cursor: "", scanned: 0 } : indexIssueState;
     try {
       const visited = new Set();
       do {
-        const cursor = indexIssueState.cursor;
+        const cursor = scan.cursor;
         if (visited.has(cursor)) throw new Error("조회 위치가 반복됩니다. 새로고침해 주세요.");
         visited.add(cursor);
         const result = await api(`/api/v1/departments/${encodeURIComponent(code)}/index-issues?cursor=${encodeURIComponent(cursor)}`);
         if (request !== indexIssueState.request) return;
-        indexIssueState.items = [...new Map([...indexIssueState.items, ...result.items].map((item) => [item.fileId, item])).values()];
-        indexIssueState.cursor = result.nextCursor || "";
-        indexIssueState.scanned += result.scanned;
-        renderIndexIssues();
-      } while (indexIssueState.cursor);
+        scan.items = [...new Map([...scan.items, ...result.items].map((item) => [item.fileId, item])).values()];
+        scan.cursor = result.nextCursor || "";
+        scan.scanned += result.scanned;
+        if (!background) renderIndexIssues();
+      } while (scan.cursor);
+      if (background) Object.assign(indexIssueState, { items: scan.items, cursor: "", scanned: scan.scanned });
       indexIssueState.loaded = true;
+      setFreshness("indexIssues", "ok");
     } catch (error) {
       if (request !== indexIssueState.request) return;
+      setFreshness("indexIssues", "fail");
       $("#indexIssuesError").textContent = error.message;
       $("#indexIssuesError").classList.remove("hidden");
     } finally {
@@ -745,6 +813,7 @@
 
   async function loadDepartments() {
     state.cloudServicesLoading = true;
+    setFreshness("departments", "loading");
     renderDepartments();
     try {
       // Cloud 조회는 로컬 YAML과 동시에 시작하되, 느린 gcloud 왕복 때문에 로컬 목록
@@ -773,11 +842,13 @@
       state.cloudServicesLoading = false;
       renderDepartments();
       renderCorpusDepartmentOptions();
+      setFreshness("departments", cloudResult.ok ? "ok" : "fail");
       if (!cloudResult.ok) {
         toast("Cloud MCP 목록을 읽지 못했습니다", cloudResult.error.message, "fail");
       }
     } catch (error) {
       state.cloudServicesLoading = false;
+      setFreshness("departments", "fail");
       renderDepartments();
       toast("학과 목록을 불러오지 못했습니다", error.message, "fail");
     }
@@ -1149,6 +1220,7 @@
     window.clearTimeout(state.syncPollTimer);
     const requestId = ++state.syncRequest;
     const refresh = $("#refreshSyncRuns");
+    setFreshness("syncRuns", "loading");
     if (!quiet) {
       refresh.disabled = true;
       refresh.classList.add("is-loading");
@@ -1161,6 +1233,7 @@
       state.syncRuns = data.runs || [];
       state.syncTargets = data.departments || [];
       state.syncWorkflowStatus = data.workflowStatus || "READY";
+      setFreshness("syncRuns", "ok");
       renderSyncManagement();
       if (state.syncWorkflowStatus === "NOT_FOUND" && !quiet) {
         toast(
@@ -1174,6 +1247,7 @@
       }
     } catch (error) {
       if (requestId !== state.syncRequest) return;
+      setFreshness("syncRuns", "fail");
       $("#syncHistoryMeta").textContent = "조회 실패";
       $("#syncHistoryRows").innerHTML = `<tr><td colspan="8" class="sync-history-empty">${escapeHtml(error.message)}</td></tr>`;
       if (!quiet) toast("동기화 이력을 불러오지 못했습니다", error.message, "fail");
@@ -1267,7 +1341,7 @@
         detail: "공통 설정 · Document AI에서 기존 프로세서 조회·선택 또는 생성",
       })),
       { icon: "SA", label: "Drive 확인 서비스 계정", value: env.serviceAccount || "확인 필요", detail: driveDetail, copy: env.serviceAccount, check: true, tone: driveTone },
-      { icon: "›_", label: "gcloud", value: env.gcloudInstalled ? (env.gcloudAuthenticated ? "로그인됨" : "로그인 필요") : "설치되지 않음", detail: env.gcloudAccount || "활성 계정 없음", login: Boolean(env.gcloudInstalled) && !env.gcloudAuthenticated },
+      { icon: "›_", label: "gcloud", value: env.gcloudInstalled ? (env.gcloudAuthenticated ? "로그인됨" : "로그인 필요") : "설치되지 않음", detail: env.gcloudAccount || "활성 계정 없음", login: Boolean(env.gcloudInstalled) && !env.gcloudAuthenticated, logout: Boolean(env.gcloudInstalled && env.gcloudAuthenticated) },
     ];
     $("#environmentGrid").innerHTML = cards.map((card) => `
       <article class="environment-card${card.tone ? ` status-${escapeHtml(card.tone)}` : ""}">
@@ -1279,6 +1353,7 @@
             ${card.copy ? `<button type="button" class="copy-value-button" data-copy-value="${escapeHtml(card.copy)}" aria-label="서비스 계정 복사">복사</button>` : ""}
             ${card.check ? `<button type="button" class="copy-value-button" id="checkDriveSa" ${state.driveSaChecking ? "disabled" : ""}>${state.driveSaChecking ? "확인 중…" : (driveStatus ? "다시 확인" : "상태 확인")}</button>` : ""}
             ${card.login ? `<button type="button" class="copy-value-button" id="openGcloudLogin">로그인</button>` : ""}
+            ${card.logout ? `<button type="button" class="copy-value-button logout-button" id="gcloudLogout">로그아웃</button>` : ""}
           </div>
           <small>${escapeHtml(card.detail)}</small>
         </div>
@@ -1338,14 +1413,20 @@
     }).join("");
   }
 
-  async function loadCommonRuntimeState() {
+  async function loadCommonRuntimeState(quiet = false) {
     state.commonRuntimeLoading = true;
+    setFreshness("commonRuntime", "loading");
     renderCommonRuntime();
     try {
       state.commonRuntime = await api("/api/v1/common-runtime/status");
+      setFreshness("commonRuntime", "ok");
     } catch (error) {
-      state.commonRuntime = null;
-      toast("공통 런타임 상태를 읽지 못했습니다", error.message, "fail");
+      setFreshness("commonRuntime", "fail");
+      // 백그라운드 갱신 실패는 직전 결과를 남겨 두고 표시만 바꾼다.
+      if (!quiet) {
+        state.commonRuntime = null;
+        toast("공통 런타임 상태를 읽지 못했습니다", error.message, "fail");
+      }
     } finally {
       state.commonRuntimeLoading = false;
       renderCommonRuntime();
@@ -1356,10 +1437,13 @@
     if (state.driveSaChecking) return;
     state.driveSaChecking = true;
     if (state.environment) renderEnvironment(state.environment);
+    setFreshness("driveSa", "loading");
     try {
       state.driveSaStatus = await api("/api/v1/drive-service-account/status");
+      setFreshness("driveSa", "ok");
     } catch (error) {
       state.driveSaStatus = { status: "ERROR", detail: error.message, issues: [] };
+      setFreshness("driveSa", "fail");
     } finally {
       state.driveSaChecking = false;
       if (state.environment) renderEnvironment(state.environment);
@@ -1438,6 +1522,36 @@
             <small>${escapeHtml(plan.verification.detail || "")}</small>
           </li>
         </ul>` : ""}`;
+  }
+
+  // 첫 클릭은 확인 단계로만 바꾼다. 4초 안에 한 번 더 눌러야 실제로 로그아웃한다.
+  async function logoutGcloud(button) {
+    if (button.dataset.confirming !== "true") {
+      button.dataset.confirming = "true";
+      button.textContent = "한 번 더 눌러 로그아웃";
+      window.setTimeout(() => {
+        if (!button.isConnected || button.disabled) return;
+        button.dataset.confirming = "false";
+        button.textContent = "로그아웃";
+      }, 4000);
+      return;
+    }
+    button.disabled = true;
+    button.textContent = "로그아웃 중…";
+    try {
+      await api("/api/v1/gcloud-auth/logout", { method: "POST" });
+    } catch (error) {
+      toast("로그아웃하지 못했습니다", error.message, "fail");
+      button.disabled = false;
+      button.dataset.confirming = "false";
+      button.textContent = "로그아웃";
+      return;
+    }
+    window.clearTimeout(state.authPollTimer);
+    state.authLoginPending = false;
+    toast("gcloud에서 로그아웃했습니다", "다른 계정으로 로그인할 수 있습니다.", "ok");
+    const env = await loadEnvironment();
+    if (env) showCommonSetup(env);
   }
 
   async function checkDriveServiceAccount() {
@@ -1569,9 +1683,11 @@
   }
 
   async function loadEnvironment() {
+    setFreshness("environment", "loading");
     try {
       const env = await api("/api/v1/environment");
       state.environment = env;
+      setFreshness("environment", "ok");
       $("#projectName").textContent = env.configuredProject || "프로젝트 미설정";
       $("#regionName").textContent = env.region || "region";
       $("#formProject").textContent = env.configuredProject || "—";
@@ -1579,6 +1695,7 @@
       renderEnvironment(env);
       return env;
     } catch (error) {
+      setFreshness("environment", "fail");
       toast("실행 환경을 읽지 못했습니다", error.message, "fail");
       return null;
     }
@@ -2226,7 +2343,10 @@
       $("#setupGate").classList.add("hidden");
       applySetupMode("create");
     }
-    await loadDepartments();
+    // 다른 계정으로 바뀌었을 수 있으니 받아 둔 결과를 모두 오래된 것으로 본다.
+    Object.values(freshness).forEach((entry) => { entry.at = 0; });
+    prefetchViews();
+    await loadDepartments().then(prefetchIndexIssues);
     if (env?.commonValid) {
       await Promise.all([reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
     }
@@ -4559,9 +4679,11 @@
     $("#environmentGrid").addEventListener("click", (event) => {
       if (event.target.closest("#checkDriveSa")) return checkDriveServiceAccount();
       if (event.target.closest("#openGcloudLogin")) return showCommonSetup(state.environment);
+      const logout = event.target.closest("#gcloudLogout");
+      if (logout) return logoutGcloud(logout);
       return copyEnvironmentValue(event);
     });
-    $("#refreshCommonRuntime").addEventListener("click", loadCommonRuntimeState);
+    $("#refreshCommonRuntime").addEventListener("click", () => loadCommonRuntimeState());
     $("#commonRuntimeGrid").addEventListener("click", (event) => {
       const remove = event.target.closest("[data-runtime-delete]");
       // 공통 런타임 계획은 4종을 다 담고 있다. 카드에서 들어오면 그 한 줄만 켠다.
@@ -4723,12 +4845,15 @@
       $("#retryInitialSetup").classList.remove("hidden");
       return;
     }
-    await Promise.all([loadDepartments(), reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
+    prefetchViews();
+    await Promise.all([loadDepartments().then(prefetchIndexIssues), reconnectRun(), reconnectMcpDeployment(), reconnectCommonRuntimeDeployment()]);
     refreshRuntimeEnvIfStale();
   }
 
   async function init() {
     bindEvents();
+    renderRefreshStamps();
+    window.setInterval(() => renderRefreshStamps(), 30 * 1000);
     window.addEventListener("popstate", restorePageRoute);
     await checkInitialSetup();
     restorePageRoute();

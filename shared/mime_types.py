@@ -142,6 +142,16 @@ IMAGE_OCR_MIME = {"image/png": ".png", "image/jpeg": ".jpg"}
 IMAGE_OCR_MAX_BYTES = 10 * _MB
 IMAGE_OCR_MAX_PIXELS = 40_000_000
 
+# PDF는 이 크기까지 내려받아 서버가 텍스트/이미지 여부를 판정한다.
+# 넘는 파일은 내려받지 않고 관리자 확인 대상으로 둔다.
+PDF_REVIEW_BYTES = 100 * _MB
+# 이미지 위주 PDF OCR은 Document AI 온라인 처리 한도 안에서만 돌린다.
+# 넘으면 기존처럼 원본(텍스트가 있으면) 또는 경로 사이드카만 색인한다.
+PDF_OCR_MAX_BYTES = 20 * _MB
+PDF_OCR_MAX_PAGES = 15
+# 이 글자 수 미만인 페이지는 쪽번호·머리글뿐인 이미지 페이지로 본다.
+PDF_TEXT_PAGE_MIN_CHARS = 20
+
 
 def classify_route(
     mime_type: str, name: str = "", *, removed: bool = False, enable_image_ocr: bool = False

@@ -13,7 +13,7 @@ Workflows 호출 순서:
 from __future__ import annotations
 
 import io
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import logging
 import os
 import re
@@ -46,6 +46,10 @@ from shared.mime_types import (  # noqa: E402
     GOOGLE_EXPORT_MAP,
     IMAGE_OCR_MAX_BYTES,
     IMAGE_OCR_MIME,
+    PDF_OCR_MAX_BYTES,
+    PDF_OCR_MAX_PAGES,
+    PDF_REVIEW_BYTES,
+    PDF_TEXT_PAGE_MIN_CHARS,
     SIDECAR_ONLY_MIME,
     RouteKind,
     classify_route,
@@ -96,33 +100,53 @@ _SPREADSHEET_COPY_MIMES = frozenset(
 )
 
 
-def _pdf_has_extractable_text(data: bytes) -> tuple[bool, str | None]:
-    """Vertex 기본 파서가 받을 수 있는 텍스트 PDF인지 빠르게 판정한다.
+@dataclass(frozen=True)
+class PdfTextProfile:
+    pages: int
+    text_pages: int
+    # 원본을 Vertex로 보낼 수 없는 사유. None이면 텍스트 페이지가 하나 이상 있다.
+    reason: str | None
+
+    @property
+    def image_dominant(self) -> bool:
+        """이미지만 있거나 텍스트 페이지가 절반 미만인 PDF — OCR 대상."""
+        return self.pages > 0 and self.text_pages * 2 < self.pages
+
+
+def _pdf_text_profile(data: bytes) -> PdfTextProfile:
+    """페이지별로 텍스트가 있는지 센다.
 
     스캔 이미지뿐인 PDF는 Vertex ``import_files``가 요청 자체는 성공시킨 뒤
     파일 단위 ``INVALID_ARGUMENT``로 거부한다. 그 상태를 일시 오류처럼
-    재시도하면 같은 배치의 정상 파일까지 계속 지우고 다시 색인한다. 적어도
-    한 페이지에서 텍스트가 나오면 원본을 그대로 보내고, 전 페이지가 비었거나
-    PDF 자체를 읽지 못하면 경로 사이드카만 색인하도록 호출자에게 알린다.
+    재시도하면 같은 배치의 정상 파일까지 계속 지우고 다시 색인한다. 텍스트
+    페이지가 없거나 PDF 자체를 읽지 못하면 사유를 돌려주고, 호출자는 OCR 또는
+    경로 사이드카로 분기한다.
     """
     from pypdf import PdfReader  # noqa: PLC0415
 
     try:
         reader = PdfReader(io.BytesIO(data))
+        pages = list(reader.pages)
     except Exception as exc:  # noqa: BLE001
-        return False, f"PDF_UNREADABLE:{type(exc).__name__}:{exc}"
+        return PdfTextProfile(0, 0, f"PDF_UNREADABLE:{type(exc).__name__}:{exc}")
 
-    extraction_errors = 0
-    for page in reader.pages:
+    text_pages = extraction_errors = 0
+    any_text = False
+    for page in pages:
         try:
-            if (page.extract_text() or "").strip():
-                return True, None
+            text = (page.extract_text() or "").strip()
         except Exception:  # noqa: BLE001
             extraction_errors += 1
+            continue
+        any_text = any_text or bool(text)
+        if len(text) >= PDF_TEXT_PAGE_MIN_CHARS:
+            text_pages += 1
+    if any_text:
+        return PdfTextProfile(len(pages), text_pages, None)
     reason = "PDF_NO_EXTRACTABLE_TEXT"
     if extraction_errors:
         reason += f":extractErrors={extraction_errors}"
-    return False, reason
+    return PdfTextProfile(len(pages), 0, reason)
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
@@ -1575,17 +1599,26 @@ def _ingest_image_ocr(
         raise ValueError("OCR_INVALID_RESPONSE: text must be a string")
     if not text.strip():
         return _hold_empty_ocr(body, store, drive, settings, gcs, audience)
-    path_ctx = _resolve_path_ctx(drive, body)
+    return _index_ocr_text(
+        body, store, gcs, settings, text, audience, _resolve_path_ctx(drive, body), "IMAGE_OCR",
+    )
+
+
+def _index_ocr_text(
+    body: IngestBody, store: DocStateStore, gcs: GcsClient, settings: Settings,
+    text: str, audience: Audience, path_ctx: PathContext, route: str,
+) -> dict[str, Any]:
+    """OCR 본문을 머리말 붙은 .md 하나로 올리고 PARSED로 기록한다."""
     markdown = build_breadcrumb_markdown(
         path=path_ctx.path, bundle=path_ctx.bundle, title=body.name or body.file_id, source_title=path_ctx.source_title, website_url=path_ctx.website_url, body=text,
     )
     gated = _size_gate(store, settings, body, len(markdown.encode("utf-8")), splittable=False, ext=".md")
     if gated:
-        return {**gated, "route": RouteKind.IMAGE_OCR.value}
+        return {**gated, "route": route}
     content_hash = sha256_text(markdown)
     if store.should_skip_reindex(body.file_id, content_hash):
         store.touch_modified_time(body.file_id, body.modified_time, audience=audience)
-        return {"fileId": body.file_id, "status": "HASH_UNCHANGED", "route": "IMAGE_OCR"}
+        return {"fileId": body.file_id, "status": "HASH_UNCHANGED", "route": route}
     md_uri = gcs.upload_source_md(markdown, body.file_id)
     store.upsert(_state_fields(
         body, content_hash=content_hash, status=DocStatus.PARSED,
@@ -1593,9 +1626,74 @@ def _ingest_image_ocr(
         path_ctx=path_ctx, audience=audience,
     ))
     return _gcs_ready(
-        body=body, route="IMAGE_OCR", parse_route=ParseRoute.IMAGE_DOCAI,
+        body=body, route=route, parse_route=ParseRoute.IMAGE_DOCAI,
         uris=[md_uri], content_hash=content_hash, path_ctx=path_ctx,
     )
+
+
+def _hold_for_admin_review(
+    body: IngestBody, store: DocStateStore, gcs: GcsClient, drive: DriveClient,
+    settings: Settings, size: int | None, limit: int,
+) -> dict[str, Any]:
+    """판정 한도를 넘은 PDF. 내려받지 않고 관리자가 확인할 때까지 보류한다.
+
+    SKIPPED는 자동 재시도 대상이 아니다. 파일이 바뀌면(수정 시각 증가) 다시 판정한다.
+    이전 판본이 색인돼 있었다면 지금 판본과 다른 내용이 검색되지 않게 내린다.
+    """
+    reason = f"ADMIN_REVIEW_SIZE:{size if size is not None else 'unknown'}>{limit}(.pdf)"
+    existing = store.get(body.file_id)
+    if existing and existing.status not in {DocStatus.SKIPPED, DocStatus.DELETED, DocStatus.EXCLUDED}:
+        _cleanup_out_of_scope_file(gcs, settings, body.file_id)
+    store.upsert(_state_fields(
+        body, content_hash=None, status=DocStatus.SKIPPED, parse_route=ParseRoute.NONE,
+        source_uri=body.web_view_link, path_ctx=_resolve_path_ctx(drive, body),
+        audience=_resolve_audience(drive, settings, body), error=reason,
+    ))
+    store.clear_dlq(body.file_id)
+    logger.warning("PDF 관리자 확인 대상 %s (%s): %s", body.file_id, body.name, reason)
+    return {"fileId": body.file_id, "status": "SKIPPED", "route": "FILE_COPY",
+            "reason": reason, "automaticRetry": False}
+
+
+def _ingest_pdf_ocr(
+    body: IngestBody, store: DocStateStore, gcs: GcsClient, drive: DriveClient,
+    settings: Settings, data: bytes, audience: Audience, path_ctx: PathContext,
+) -> dict[str, Any] | None:
+    """이미지 위주 PDF를 Document AI OCR 본문으로 색인한다.
+
+    OCR이 실패하거나 글자가 없으면 None을 돌려 기존 PDF 경로(텍스트 원본 또는
+    경로 사이드카)로 넘긴다. OCR 장애 때문에 문서 자체를 잃지 않기 위해서다.
+    """
+    raw_uri = gcs.upload_bytes(
+        data, settings.gcs_hwp_original_bucket, f"{body.file_id}.pdf", "application/pdf",
+    )
+    try:
+        with httpx.Client(timeout=180.0) as client:
+            response = client.post(
+                body.parser_url.rstrip("/") + "/ocr",
+                headers=_cloud_run_auth_headers(body.parser_url),
+                json={"gcsUri": raw_uri, "fileId": body.file_id,
+                      "mimeType": "application/pdf", "enableImageOcr": True},
+            )
+        if response.status_code != 200:
+            raise ValueError(f"PDF_OCR_FAILED:{response.status_code}:{response.text[:300]}")
+        text = response.json().get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("PDF_OCR_EMPTY_TEXT")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("PDF OCR 실패 %s (%s): %s — 기존 PDF 경로로 처리한다", body.file_id, body.name, exc)
+        return None
+    result = _index_ocr_text(body, store, gcs, settings, text, audience, path_ctx, "FILE_COPY")
+    if result.get("status") == "GCS_READY":
+        # 이전 판본의 원본·분할 조각·사이드카가 남으면 재색인 때 OCR 본문과 함께 두 벌이 된다.
+        keep = f"{body.file_id}.md"
+        try:
+            for name in gcs.list_blob_names_for_file(settings.gcs_source_bucket, body.file_id):
+                if name != keep:
+                    gcs.delete(gs_uri(settings.gcs_source_bucket, name))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("PDF OCR 이전 원본 정리 실패 %s: %s", body.file_id, exc)
+    return result
 
 
 def _ingest_google_export(
@@ -1744,7 +1842,8 @@ def _ingest_direct(
     라우트 키(`FILE_COPY`)는 워크플로가 문자열로 비교하고 API 응답에도
     나가므로 그대로 두고, 함수 이름만 실제 동작에 맞춘다.
 
-        PDF          한도 초과분을 페이지 경계로 분할
+        PDF          100MB 초과는 관리자 확인. 이미지 위주면 OCR(옵션 켜진 경우),
+                     텍스트 PDF는 한도 초과분을 페이지 경계로 분할
         XLSX/XLSM    셀을 마크다운 표로 변환
         TXT/HTML/CSV 머리말을 본문 앞에 심음
         ZIP/XLS      사이드카만 (본문 추출 수단 없음, 아래 참고)
@@ -1791,32 +1890,60 @@ def _ingest_direct(
     else:
         pre_ext, pre_limit = upload_ext, None
 
-    gated = _size_gate(
-        store,
-        settings,
-        body,
-        body.size_bytes,
-        splittable=True,
-        ext=pre_ext,
-        limit=pre_limit,
-    )
-    if gated:
-        gated["route"] = "FILE_COPY"
-        return gated
+    is_pdf = ext.lower() == ".pdf"
+    # PDF는 서버가 내려받아 판정한다. 판정 한도를 넘는 파일은 분할·재시도로
+    # 돌리지 않고 관리자 확인 대상으로 둔다.
+    pdf_limit = min(settings.max_gcs_bytes, PDF_REVIEW_BYTES)
+    if is_pdf and body.size_bytes is not None and body.size_bytes > pdf_limit:
+        return _hold_for_admin_review(body, store, gcs, drive, settings, body.size_bytes, pdf_limit)
+
+    if not is_pdf:
+        gated = _size_gate(
+            store,
+            settings,
+            body,
+            body.size_bytes,
+            splittable=True,
+            ext=pre_ext,
+            limit=pre_limit,
+        )
+        if gated:
+            gated["route"] = "FILE_COPY"
+            return gated
 
     path_ctx = _resolve_path_ctx(drive, body)
     # _resolve_path_ctx 가 훑어 둔 부모 캐시를 재사용하므로 Drive 호출이 늘지 않는다.
     audience = _resolve_audience(drive, settings, body)
-    data = drive.download_file(body.file_id)
+    if is_pdf:
+        try:
+            data = drive.download_file(body.file_id, max_bytes=pdf_limit)
+        except ValueError as exc:
+            if not str(exc).startswith("DOWNLOAD_SIZE_EXCEEDED"):
+                raise
+            # Drive가 크기를 알려 주지 않은 파일. 받다가 한도를 넘으면 멈춘다.
+            return _hold_for_admin_review(body, store, gcs, drive, settings, None, pdf_limit)
+    else:
+        data = drive.download_file(body.file_id)
 
     # Vertex 기본 PDF 파서는 OCR을 하지 않는다. 이미지 스캔본을 원본 URI로
     # 보내면 파일 단위 INVALID_ARGUMENT가 나고, Cloud Tasks가 같은 배치 전체를
-    # 반복한다. 본문은 넣을 수 없어도 파일명·폴더 경로는 검색할 수 있게 원본만
-    # 제외하고 아래의 사이드카 경로를 그대로 사용한다.
+    # 반복한다. 이미지 위주 PDF는 OCR이 켜져 있으면 OCR 본문으로 색인하고,
+    # 아니면 텍스트가 있는 원본 또는 파일명·경로 사이드카만 색인한다.
     index_original = True
     skip_reason: str | None = None
-    if ext.lower() == ".pdf":
-        index_original, skip_reason = _pdf_has_extractable_text(data)
+    if is_pdf:
+        profile = _pdf_text_profile(data)
+        if (
+            profile.image_dominant
+            and body.parser_url
+            and settings.parser_option_for("enable_image_ocr", audience)
+            and len(data) <= PDF_OCR_MAX_BYTES
+            and profile.pages <= PDF_OCR_MAX_PAGES
+        ):
+            ocr_result = _ingest_pdf_ocr(body, store, gcs, drive, settings, data, audience, path_ctx)
+            if ocr_result is not None:
+                return ocr_result
+        index_original, skip_reason = profile.reason is None, profile.reason
         if not index_original:
             logger.warning(
                 "PDF 본문 추출 불가 %s (%s): %s — 사이드카만 색인한다",
@@ -1921,7 +2048,10 @@ def _ingest_direct(
         # 성공해도 그대로 SPLIT_QUEUED 로 떨어져, 1424행 분할 로직이 통째로
         # 도달 불가가 된다. (로컬 종단 검증에서 잡음: 53MB PDF 가 2파트로 쪼개진
         # 직후 이 게이트에 걸려 파트가 하나도 업로드되지 않았다.)
-        if not pdf_parts:
+        # 원본을 올리지 않는 경우(텍스트 없는 PDF·읽을 수 없는 스프레드시트)는
+        # 사이드카만 올라가므로 원본 크기로 막지 않는다. (실측: 110MB 이미지
+        # 포스터 PDF가 판정까지 끝난 뒤 여기서 SIZE_EXCEEDED로 실패했다.)
+        if not pdf_parts and index_original:
             gated = _size_gate(store, settings, body, len(data), splittable=True, ext=ext)
             if gated:
                 gated["route"] = "FILE_COPY"
@@ -1971,6 +2101,12 @@ def _ingest_direct(
                 )
             ]
         uris.append(gcs.upload_source_sidecar_md(sidecar, body.file_id))
+        if is_pdf:
+            # 예전 판본을 OCR 본문으로 색인했다면 그 .md 가 남아 두 벌이 된다.
+            try:
+                gcs.delete(gs_uri(settings.gcs_source_bucket, f"{body.file_id}.md"))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("이전 OCR 본문 정리 건너뜀 %s: %s", body.file_id, exc)
 
     store.upsert(
         _state_fields(

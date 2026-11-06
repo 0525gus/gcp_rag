@@ -1470,7 +1470,7 @@ def _gcloud_project_resources(project: str, region: str) -> dict[str, Any]:
     }
 
 
-def _start_gcloud_login() -> bool:
+def _stop_gcloud_login_process() -> None:
     global _AUTH_PROCESS
     if _AUTH_PROCESS is not None and _AUTH_PROCESS.poll() is None:
         if os.name == "nt":
@@ -1488,7 +1488,27 @@ def _start_gcloud_login() -> bool:
                 _AUTH_PROCESS.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 _AUTH_PROCESS.kill()
-        _AUTH_PROCESS = None
+    _AUTH_PROCESS = None
+
+
+def _clear_cloud_caches() -> None:
+    """계정이 바뀌면 이전 계정의 토큰·조회 결과를 쓰면 안 된다."""
+    global _SYNC_AUTH_TOKEN, _SYNC_AUTH_TOKEN_EXPIRES
+    with _SYNC_AUTH_LOCK:
+        _SYNC_AUTH_TOKEN, _SYNC_AUTH_TOKEN_EXPIRES = "", 0.0
+    for lock, cache in (
+        (_SYNC_TARGET_CACHE_LOCK, _SYNC_TARGET_CACHE),
+        (_CLOUD_DEPARTMENT_CONFIG_CACHE_LOCK, _CLOUD_DEPARTMENT_CONFIG_CACHE),
+        (_MCP_REGISTRY_READ_CACHE_LOCK, _MCP_REGISTRY_READ_CACHE),
+        (_UNIFIED_MCP_SERVICE_CACHE_LOCK, _UNIFIED_MCP_SERVICE_CACHE),
+    ):
+        with lock:
+            cache.clear()
+
+
+def _start_gcloud_login() -> bool:
+    global _AUTH_PROCESS
+    _stop_gcloud_login_process()
     gcloud = _gcloud_executable()
     if not gcloud:
         raise FileNotFoundError("gcloud를 찾을 수 없습니다.")
@@ -7230,6 +7250,28 @@ def start_gcloud_login(request: Request) -> JSONResponse:
         {"started": started, "authenticated": False, "message": "브라우저 로그인을 기다리는 중"},
         status_code=202,
     )
+
+
+@app.post("/api/v1/gcloud-auth/logout")
+def gcloud_logout(request: Request) -> JSONResponse:
+    """gcloud 계정 자격 증명을 모두 철회한다. 다른 계정으로 바꿔 로그인할 때 쓴다."""
+    _require_local_session(request)
+    gcloud = _gcloud_executable()
+    if not gcloud:
+        return JSONResponse(
+            {"error": {"code": "GCLOUD_NOT_FOUND", "message": "gcloud를 찾을 수 없습니다."}},
+            status_code=404,
+        )
+    _stop_gcloud_login_process()
+    ok, output = _run_command([gcloud, "auth", "revoke", "--all", "--quiet"], timeout=30)
+    _clear_cloud_caches()
+    # 이미 로그아웃된 상태에서 revoke 는 실패로 끝난다. 결과 상태로 판단한다.
+    if not ok and _gcloud_bootstrap_state(include_projects=False)["authenticated"]:
+        return JSONResponse(
+            {"error": {"code": "LOGOUT_FAILED", "message": output.strip()[:300] or "로그아웃하지 못했습니다."}},
+            status_code=500,
+        )
+    return JSONResponse({"authenticated": False})
 
 
 @app.get("/api/v1/gcloud-install")

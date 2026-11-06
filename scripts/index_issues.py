@@ -40,6 +40,8 @@ def issue_item(file_id, data):
     # Old skipped records did not persist a reason. Describe the historical
     # outcome without claiming that the current processor is disconnected.
     reason_code = reason if reason in {"IMAGE_OCR_DISABLED", "UNSUPPORTED_FORMAT", "OCR_EMPTY_TEXT"} else ""
+    if reason.startswith("ADMIN_REVIEW_SIZE:"):
+        reason_code = "ADMIN_REVIEW_SIZE"
     if is_empty_ocr_error(reason, str(data.get("mimeType") or "")):
         status = "SKIPPED"
         reason_code = "OCR_EMPTY_TEXT"
@@ -52,7 +54,8 @@ def issue_item(file_id, data):
     return {
         "reasonCode": reason_code,
         "fileId": file_id, "name": str(data.get("name") or file_id),
-        "status": status, "statusLabel": "처리 보류 · 텍스트 없음" if reason_code == "OCR_EMPTY_TEXT" else LABELS[status],
+        "status": status,
+        "statusLabel": {"OCR_EMPTY_TEXT": "처리 보류 · 텍스트 없음", "ADMIN_REVIEW_SIZE": "관리자 확인 필요"}.get(reason_code, LABELS[status]),
         "reason": reason[:2000] or DEFAULT_REASONS.get(status, "본문 추출 없이 파일 정보만 색인했습니다."),
         "path": str(data.get("path") or ""), "mimeType": str(data.get("mimeType") or ""),
         "route": str(data.get("parseRoute") or ""), "audience": str(data.get("audience") or "STAFF"),

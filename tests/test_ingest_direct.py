@@ -44,7 +44,9 @@ class _Drive:
     def __init__(self, payload: bytes) -> None:
         self.payload = payload
 
-    def download_file(self, file_id: str) -> bytes:
+    def download_file(self, file_id: str, max_bytes: int | None = None) -> bytes:
+        if max_bytes is not None and len(self.payload) > max_bytes:
+            raise ValueError(f"DOWNLOAD_SIZE_EXCEEDED:{max_bytes}")
         return self.payload
 
     def resolve_path_context(self, file_id: str, fallback: str) -> PathContext:
@@ -95,6 +97,12 @@ class _Store:
 
     def enqueue_dlq(self, file_id: str, reason: str, **kw: Any) -> None:
         self.dlq.append((file_id, reason))
+
+    def get(self, file_id: str) -> Any:
+        return None
+
+    def clear_dlq(self, file_id: str) -> None:
+        return None
 
 
 def _settings(**over: Any) -> Settings:
@@ -210,7 +218,7 @@ def test_text_file_keeps_breadcrumb_body_path() -> None:
 def test_binary_file_keeps_copy_plus_sidecar(monkeypatch) -> None:
     # 이 테스트의 관심사는 일반 바이너리 업로드 계약이다. PDF 텍스트 판정은
     # 아래의 실제 blank PDF 테스트에서 별도로 고정한다.
-    monkeypatch.setattr(sync_main, "_pdf_has_extractable_text", lambda _data: (True, None))
+    monkeypatch.setattr(sync_main, "_pdf_text_profile", lambda _data: sync_main.PdfTextProfile(1, 1, None))
     res, gcs, _ = _run(
         b"%PDF-1.4 fake",
         body=_body(name="문서.pdf", mime="application/pdf"),
@@ -250,7 +258,7 @@ XLSM_MIME = "application/vnd.ms-excel.sheet.macroenabled.12"
 class _NoDownloadDrive(_Drive):
     """다운로드를 시도하면 즉시 실패시킨다 — 사이드카 경로는 받을 이유가 없다."""
 
-    def download_file(self, file_id: str) -> bytes:
+    def download_file(self, file_id: str, max_bytes: int | None = None) -> bytes:
         raise AssertionError("사이드카 전용 형식은 파일을 내려받으면 안 된다")
 
 
@@ -339,7 +347,7 @@ def test_split_pdf_parts_are_not_measured_against_the_original_size(monkeypatch)
     결과물이 하나도 업로드되지 않는다 — 로컬 종단 검증에서 실제로 잡힌 결함이다.
     """
     parts = [b"%PDF-1.4 part1", b"%PDF-1.4 part2"]
-    monkeypatch.setattr(sync_main, "_pdf_has_extractable_text", lambda _data: (True, None))
+    monkeypatch.setattr(sync_main, "_pdf_text_profile", lambda _data: sync_main.PdfTextProfile(1, 1, None))
     monkeypatch.setattr(sync_main, "split_pdf", lambda data, limit: parts)
     # 분할 트리거와 사후 게이트가 함께 쓰는 한도만 낮춘다.
     # 다운로드 전 게이트는 max_gcs_bytes 를 쓰므로 영향받지 않는다.
@@ -363,7 +371,7 @@ def test_unsplittable_oversized_pdf_still_goes_to_split_queue(monkeypatch) -> No
     def _boom(data, limit):  # noqa: ANN001
         raise PdfSplitError("깨진 PDF")
 
-    monkeypatch.setattr(sync_main, "_pdf_has_extractable_text", lambda _data: (True, None))
+    monkeypatch.setattr(sync_main, "_pdf_text_profile", lambda _data: sync_main.PdfTextProfile(1, 1, None))
     monkeypatch.setattr(sync_main, "split_pdf", _boom)
     monkeypatch.setattr(sync_main, "_effective_limit", lambda settings, ext: 4)
 
@@ -375,3 +383,129 @@ def test_unsplittable_oversized_pdf_still_goes_to_split_queue(monkeypatch) -> No
     assert res["status"] == "SPLIT_QUEUED"
     assert len(store.split_queue) == 1
     assert gcs.blobs == []
+
+
+# ------------------------------------------------- PDF 판정 · 관리자 확인 · OCR 분기
+MB = 1024 * 1024
+
+
+def _blank_pdf(pages: int = 1) -> bytes:
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    for _ in range(pages):
+        writer.add_blank_page(width=100, height=100)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def _pdf_body(size: int | None = None, parser_url: str = "") -> IngestBody:
+    return IngestBody(fileId="f1", driveId="d1", name="홍보 포스터.pdf", mimeType="application/pdf",
+                      sizeBytes=size, parserUrl=parser_url)
+
+
+def test_pdf_over_100mb_is_held_for_admin_review_without_download() -> None:
+    res, gcs, store = _run_no_download(_pdf_body(size=110 * MB), settings=_settings(max_gcs_bytes=150 * MB))
+
+    assert res["status"] == "SKIPPED" and res["automaticRetry"] is False
+    assert res["reason"].startswith("ADMIN_REVIEW_SIZE:")
+    assert store.upserts[-1].status.value == "SKIPPED"
+    assert store.split_queue == [] and store.dlq == []
+    assert gcs.blobs == [] and gcs.sidecars == []
+
+
+def test_pdf_of_unknown_size_is_held_when_download_exceeds_limit() -> None:
+    gcs, store = _Gcs(), _Store()
+    res = _ingest_direct(_pdf_body(), store, gcs, _Drive(_blank_pdf()), _settings(max_gcs_bytes=10))
+
+    assert res["reason"].startswith("ADMIN_REVIEW_SIZE:unknown>10")
+    assert store.upserts[-1].status.value == "SKIPPED"
+
+
+def test_image_only_pdf_over_rag_limit_indexes_sidecar_instead_of_failing(monkeypatch) -> None:
+    """회귀 고정: 110MB 이미지 포스터가 판정 후 원본 크기 게이트에 걸려 실패했다."""
+    monkeypatch.setattr(sync_main, "_effective_limit", lambda settings, ext: 10)
+
+    res, _, store = _run(_blank_pdf(), body=_pdf_body())
+
+    assert res["status"] == "GCS_READY"
+    assert res["gcsUris"] == ["gs://nb/f1.meta.md"]
+    assert store.split_queue == [] and store.dlq == []
+    assert "PDF_NO_EXTRACTABLE_TEXT" in (store.upserts[-1].error or "")
+
+
+def test_image_dominance_counts_pages_with_meaningful_text() -> None:
+    assert sync_main.PdfTextProfile(3, 1, None).image_dominant
+    assert sync_main.PdfTextProfile(1, 0, "PDF_NO_EXTRACTABLE_TEXT").image_dominant
+    assert not sync_main.PdfTextProfile(4, 2, None).image_dominant
+    profile = sync_main._pdf_text_profile(_blank_pdf(3))
+    assert (profile.pages, profile.text_pages, profile.reason) == (3, 0, "PDF_NO_EXTRACTABLE_TEXT")
+
+
+class _OcrGcs(_Gcs):
+    def __init__(self, existing: list[str]) -> None:
+        super().__init__()
+        self.existing = existing
+
+    def list_blob_names_for_file(self, bucket: str, file_id: str) -> list[str]:
+        return [*self.existing, f"{file_id}.md"]
+
+
+class _Parser:
+    def __init__(self, status: int, payload: dict[str, Any]) -> None:
+        self.status, self.payload, self.calls = status, payload, []
+
+    def __call__(self, timeout: float):
+        parser = self
+
+        class _Client:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+            def post(self, url: str, headers: dict, json: dict):
+                parser.calls.append((url, json))
+                return type("R", (), {"status_code": parser.status, "text": "",
+                                      "json": lambda _self: parser.payload})()
+
+        return _Client()
+
+
+def _run_ocr(monkeypatch, parser: _Parser, *, ocr_enabled: bool = True, existing: list[str] | None = None):
+    monkeypatch.setattr(sync_main.httpx, "Client", parser)
+    monkeypatch.setattr(sync_main, "_cloud_run_auth_headers", lambda url: {})
+    gcs, store = _OcrGcs(existing or []), _Store()
+    settings = _settings(enable_image_ocr=ocr_enabled, gcs_hwp_original_bucket="orig")
+    res = _ingest_direct(_pdf_body(parser_url="http://parser"), store, gcs, _Drive(_blank_pdf()), settings)
+    return res, gcs, store
+
+
+def test_image_pdf_is_indexed_from_ocr_text_when_enabled(monkeypatch) -> None:
+    parser = _Parser(200, {"text": "2026 교수법 간담회 10월 30일"})
+    res, gcs, store = _run_ocr(monkeypatch, parser, existing=["f1.pdf", "f1.meta.md"])
+
+    assert parser.calls[0][1]["mimeType"] == "application/pdf"
+    assert res["status"] == "GCS_READY" and res["gcsUris"] == ["gs://nb/f1.md"]
+    assert "교수법 간담회" in gcs.md[-1][1]
+    assert gcs.blobs == ["f1.pdf"]  # 원본은 OCR 입력용으로 원본 버킷에만 둔다
+    assert sorted(gcs.deleted) == ["gs://nb/f1.meta.md", "gs://nb/f1.pdf"]
+    assert store.upserts[-1].parse_route.value == "IMAGE_DOCAI"
+
+
+def test_ocr_failure_falls_back_to_existing_pdf_path(monkeypatch) -> None:
+    res, _, store = _run_ocr(monkeypatch, _Parser(503, {}))
+
+    assert res["status"] == "GCS_READY"
+    assert res["gcsUris"] == ["gs://nb/f1.meta.md"]
+    assert store.dlq == []
+
+
+def test_image_pdf_with_ocr_disabled_never_calls_parser(monkeypatch) -> None:
+    parser = _Parser(200, {"text": "x"})
+    res, _, _ = _run_ocr(monkeypatch, parser, ocr_enabled=False)
+
+    assert parser.calls == []
+    assert res["gcsUris"] == ["gs://nb/f1.meta.md"]

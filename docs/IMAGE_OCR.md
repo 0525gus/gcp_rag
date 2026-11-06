@@ -2,10 +2,22 @@
 
 ## 구현 범위
 
-PNG/JPEG 단일 이미지에 한해 Document AI Enterprise Document OCR
+PNG/JPEG 단일 이미지와 이미지 위주 PDF에 한해 Document AI Enterprise Document OCR
 (`OCR_PROCESSOR`)로 글자를 추출한다. HWP/HWPX fallback의 Layout Parser와
-프로세서 설정을 분리했다. 이미지 설명 생성, 표 구조 복원, 스캔 PDF, TIFF,
+프로세서 설정을 분리했다. 이미지 설명 생성, 표 구조 복원, TIFF,
 애니메이션 이미지와 HWP/HWPX PDF 변환은 이 옵션에 포함하지 않는다.
+
+### PDF 판정 (Sync가 내려받아 판단)
+
+| 조건 | 처리 |
+| --- | --- |
+| 100MB 초과 (`PDF_REVIEW_BYTES`, `MAX_GCS_BYTES`가 더 작으면 그 값) | 내려받지 않고 `SKIPPED` · `ADMIN_REVIEW_SIZE`. 자동 재시도 없음, 파일이 바뀌면 다시 판정 |
+| 이미지 위주(텍스트 20자 이상 페이지가 절반 미만) · 대상별 이미지 OCR 켜짐 · 20MB·15쪽 이하 | 원본은 원본 버킷에 두고 OCR 본문 `.md`만 색인 |
+| OCR 실패·글자 없음·한도 초과 또는 옵션 꺼짐 | 텍스트가 조금이라도 있으면 원본 PDF, 없으면 파일명·경로 사이드카만 색인 |
+| 텍스트 PDF | 기존과 같음. 50MB 초과분은 페이지 경계로 분할 |
+
+20MB·15쪽은 Document AI 온라인 처리 한도에 맞춘 보수적 값이다. 판본이 OCR ↔ 원본
+경로를 오가면 이전 경로의 GCS 객체를 지워 재색인 때 두 벌이 되지 않게 한다.
 
 | 구분 | HWP/HWPX DocAI fallback | PNG/JPG 이미지 OCR |
 | --- | --- | --- |

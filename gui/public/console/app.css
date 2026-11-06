@@ -647,6 +647,18 @@ button, select { cursor: pointer; }
 .environment-value-row b { min-width: 0; flex: 1; }
 .copy-value-button { flex: none; margin-top: 4px; padding: 4px 8px; border: 1px solid #d5def3; border-radius: 7px; color: var(--primary); background: #f6f8ff; font-size: 12px; font-weight: 750; transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease, transform 160ms ease; }
 .copy-value-button:hover { background: #eaf0ff; border-color: #afc0ef; transform: translateY(-1px); }
+.refresh-stamp { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; color: var(--muted); font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.refresh-stamp::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #b5bfcd; flex: none; }
+.refresh-stamp[data-status="ok"]::before { background: var(--ok); }
+.refresh-stamp[data-status="loading"]::before { background: var(--primary); animation: stamp-pulse 1s ease-in-out infinite; }
+.refresh-stamp[data-status="fail"] { color: var(--fail); }
+.refresh-stamp[data-status="fail"]::before { background: var(--fail); }
+.toolbar-controls .refresh-stamp { margin-top: 0; }
+@keyframes stamp-pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .refresh-stamp[data-status="loading"]::before { animation: none; } }
+.logout-button { color: var(--muted); background: white; border-color: var(--line); }
+.logout-button:hover, .logout-button[data-confirming="true"] { color: var(--fail); background: var(--fail-bg); border-color: #efd5da; }
+.copy-value-button:disabled { opacity: .6; cursor: default; transform: none; }
 .copy-value-button.is-copied { color: var(--ok); background: var(--ok-bg); border-color: #b8e2d5; transform: none; }
 .skeleton-card { height: 152px; border-radius: var(--radius); background: linear-gradient(100deg, #eef1f5 20%, #f8f9fb 40%, #eef1f5 60%); background-size: 300% 100%; animation: shimmer 1.4s infinite; }
 @keyframes shimmer { to { background-position: -100% 0; } }

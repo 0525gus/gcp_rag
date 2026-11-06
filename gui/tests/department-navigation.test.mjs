@@ -3,7 +3,7 @@ import test from "node:test";
 import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 const source = await readFile(new URL("../public/console/app.js", import.meta.url), "utf8");
-const switchBlock = source.slice(source.indexOf("  function switchView("), source.indexOf("  const indexIssueState"));
+const switchBlock = source.slice(source.indexOf("  const REFRESH_TTL_MS"), source.indexOf("  const indexIssueState"));
 const routeBlock = source.slice(source.indexOf("  function restorePageRoute("), source.indexOf("  const drawerParserOptions"));
 function harness(hash = "#dashboard") {
   const state = {currentView: "dashboard", selectedCode: null, departments: [{code: "cs"}]};

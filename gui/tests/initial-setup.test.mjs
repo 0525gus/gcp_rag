@@ -29,7 +29,8 @@ function harness(environment, session = async () => ({ nonce: "local" }), docaiA
     showCommonSetupShell: () => events.push("checking"),
     needsCommonSetup: (env) => !env.commonExists || !env.gcloudAuthenticated,
     showCommonSetup: () => events.push("setup"),
-    loadDepartments: () => events.push("departments"),
+    loadDepartments: async () => events.push("departments"),
+    freshness: {}, prefetchViews: () => events.push("prefetch"), prefetchIndexIssues: () => {},
     reconnectRun: () => {}, reconnectMcpDeployment: () => {}, reconnectCommonRuntimeDeployment: () => {},
     refreshRuntimeEnvIfStale: () => events.push("runtime"),
   });

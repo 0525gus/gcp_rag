@@ -127,6 +127,12 @@ class _Store:
     def upsert(self, _s: Any) -> None:
         pass
 
+    def get(self, _fid: str) -> Any:
+        return None
+
+    def clear_dlq(self, _fid: str) -> None:
+        pass
+
 
 class _CountingDrive:
     """다운로드가 호출되면 기록한다."""
@@ -134,7 +140,7 @@ class _CountingDrive:
     def __init__(self) -> None:
         self.downloads = 0
 
-    def download_file(self, _fid: str) -> bytes:
+    def download_file(self, _fid: str, max_bytes: int | None = None) -> bytes:
         self.downloads += 1
         return b"x" * 1024
 
@@ -165,12 +171,15 @@ def test_oversized_pdf_is_rejected_without_downloading() -> None:
         driveId="d",
         name="huge.pdf",
         mimeType="application/pdf",
-        sizeBytes=80 * MB,  # PDF 한도 50MB 초과
+        sizeBytes=80 * MB,  # 판정 한도(min(MAX_GCS_BYTES, 100MB)) 초과
     )
 
     res = sync_main._ingest_direct(body, store, _Gcs(), drive, _Settings())
 
-    assert res["status"] == "SPLIT_QUEUED"
+    # 분할·재시도 큐가 아니라 관리자 확인 대상으로 보류한다.
+    assert res["status"] == "SKIPPED"
+    assert res["reason"].startswith("ADMIN_REVIEW_SIZE:")
+    assert store.split == []
     assert drive.downloads == 0, "거를 파일을 먼저 메모리에 올렸다"
 
 
