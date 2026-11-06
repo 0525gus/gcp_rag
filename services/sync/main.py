@@ -65,6 +65,7 @@ from shared.path_context import (  # noqa: E402
     build_breadcrumb_markdown,
 )
 from shared.rag_engine import (  # noqa: E402
+    MAX_IMPORT_URIS,
     ImportOutcome,
     RagEngineClient,
     RagImportThrottledError,
@@ -74,7 +75,7 @@ from shared.search_postprocess import extract_file_id  # noqa: E402
 from shared.task_queue import IndexTaskQueue  # noqa: E402
 from shared.index_guard import (  # noqa: E402
     MutationLease, MutationOwnershipLost, StaleIndexTask, activate, check_active_mutation,
-    check_versions, document_mutation, document_version, routing_version,
+    check_versions, document_mutation, document_version, mutation_lock_names, routing_version,
 )
 
 setup_logging()
@@ -2765,9 +2766,9 @@ def _finalize_index_job(settings: Settings, job_id: str) -> dict[str, Any]:
             txn.set(job_ref, {"status": "FAILED", "error": str(exc)}, merge=True)
             return {"status": "FAILED", "error": str(exc)}
         for fid in job["fileVersions"]:
-            held = store._tokens.document(f"__mutation__{fid}").get(transaction=txn)
-            if held.exists:
-                return {"status": "RUNNING"}
+            for name in mutation_lock_names(fid):
+                if store._tokens.document(name).get(transaction=txn).exists:
+                    return {"status": "RUNNING"}
         faculty = [part for part in parts if part.get("audience") == "FACULTY"]
         result = {
             "count": sum(int(part.get("count") or 0) for part in faculty),
@@ -2932,6 +2933,75 @@ def index_gcs_async(body: IndexGcsBody) -> dict[str, Any]:
     }
 
 
+def _index_file_groups(
+    file_ids: list[str], uris_by_id: dict[str, list[str]]
+) -> list[list[str]]:
+    """Vertex import 한 번(URI 25개)에 들어가도록 파일을 묶는다.
+
+    문서 한 건마다 import 를 따로 기다리면 건당 수십 초가 들어 큰 변경분이 작업
+    기한을 넘긴다. URI 가 없는 파일과 한도를 혼자 넘는 파일은 단독으로 둔다.
+    """
+    groups: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for fid in file_ids:
+        count = len(uris_by_id.get(fid) or [])
+        if count == 0 or count > MAX_IMPORT_URIS:
+            groups.append([fid])
+            continue
+        if current and size + count > MAX_IMPORT_URIS:
+            groups.append(current)
+            current, size = [], 0
+        current.append(fid)
+        size += count
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _index_group(
+    audience: str, file_ids: list[str], uris_by_id: dict[str, list[str]],
+    store: DocStateStore, dept_settings: Settings, rag: Any,
+) -> dict[str, dict[str, Any]]:
+    """파일 묶음 하나를 한 코퍼스에 반입하고 파일별 결과를 돌려준다.
+
+    묶음이 성공하면 모든 파일이 성공이다. 실패하면 묶음 전체를 실패로 돌려주고,
+    호출자가 파일별로 다시 처리해 실패한 파일을 가려낸다.
+    """
+    uris = [uri for fid in file_ids for uri in uris_by_id.get(fid) or []]
+    single = len(file_ids) == 1
+    if audience == "FACULTY":
+        outcome = _import_and_mark(
+            store, uris, file_ids, rag=rag, mark_indexed=False,
+            mapping_settings=dept_settings, corpus_type="FACULTY",
+        )
+        ok = bool(uris) and outcome.ok
+        items = {
+            fid: ({"count": outcome.imported, "failed": outcome.failed, "skipped": outcome.skipped}
+                  if single else
+                  {"count": len(uris_by_id[fid]) if ok else 0, "failed": 0, "skipped": 0})
+            for fid in file_ids
+        }
+    else:
+        student = _sync_student_corpus(uris, file_ids, dept_settings, store)
+        ok = bool(student.get("ok", True))
+        items = {}
+        for index, fid in enumerate(file_ids):
+            # 학생 코퍼스 결과는 묶음 단위로만 나온다. 합계가 맞도록 첫 파일에 싣는다.
+            share = single or index == 0
+            items[fid] = {
+                "count": int(student.get("imported") or 0) if share else 0,
+                "failed": int(student.get("failed") or 0) if share else 0,
+                "skipped": int(student.get("skipped") or 0) if share else 0,
+                "result": student if share else {"enabled": student.get("enabled"), "ok": ok,
+                                                 "imported": 0, "removed": 0},
+            }
+    for fid, item in items.items():
+        item["status"] = "DONE" if ok else "FAILED"
+        item["error"] = None if ok else f"{audience.lower()} import incomplete fileId={fid}"
+    return items
+
+
 @app.post("/sync/index-gcs-task")
 def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
     """Claim the part and document leases atomically before touching RAG."""
@@ -2983,34 +3053,29 @@ def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
             # Reload after claiming: a previous delivery may have checkpointed
             # files between the initial read and acquisition of the lease.
             file_results = dict((part_ref.get().to_dict() or {}).get("fileResults") or {})
-            for fid in body.file_ids:
-                if (file_results.get(fid) or {}).get("status") == "DONE":
-                    continue
-                uris = [uri for uri in body.gcs_uris if extract_file_id(uri) == fid]
+            uris_by_id = {
+                fid: [uri for uri in body.gcs_uris if extract_file_id(uri) == fid]
+                for fid in body.file_ids
+            }
+            pending = [fid for fid in body.file_ids
+                       if (file_results.get(fid) or {}).get("status") != "DONE"]
+            rag = RagEngineClient(dept_settings) if body.audience == "FACULTY" else None
+            for group in _index_file_groups(pending, uris_by_id):
                 # If an RPC stops returning, keep an explicit unresolved attempt
                 # instead of inventing a per-file success/failure count.
-                lease.checkpoint_file(fid, {"status": "RUNNING", "error": None})
-                if body.audience == "FACULTY":
-                    outcome = _import_and_mark(
-                        store, uris, [fid], rag=RagEngineClient(dept_settings),
-                        mark_indexed=False, mapping_settings=dept_settings,
-                        corpus_type="FACULTY",
-                    )
-                    ok = bool(uris) and outcome.ok
-                    item = {"count": outcome.imported, "failed": outcome.failed,
-                            "skipped": outcome.skipped}
-                else:
-                    student = _sync_student_corpus(uris, [fid], dept_settings, store)
-                    ok = bool(student.get("ok", True))
-                    item = {"count": int(student.get("imported") or 0),
-                            "failed": int(student.get("failed") or 0),
-                            "skipped": int(student.get("skipped") or 0), "result": student}
-                item["status"] = "DONE" if ok else "FAILED"
-                item["error"] = None
-                if not ok:
-                    item["error"] = f"{body.audience.lower()} import incomplete fileId={fid}"
-                lease.checkpoint_file(fid, item)
-                file_results[fid] = item
+                lease.checkpoint_files({fid: {"status": "RUNNING", "error": None} for fid in group})
+                items = _index_group(body.audience, group, uris_by_id, store, dept_settings, rag)
+                if len(group) > 1 and any(item["status"] != "DONE" for item in items.values()):
+                    # 묶음 응답은 어느 파일이 실패했는지 알려 주지 않는다. 묶음만
+                    # 한 건씩 다시 돌려 파일별 결과를 지금과 같은 정확도로 남긴다.
+                    logger.warning("색인 묶음 부분 실패 — 파일별로 다시 처리 files=%s", len(group))
+                    items = {}
+                    for fid in group:
+                        items.update(_index_group(
+                            body.audience, [fid], uris_by_id, store, dept_settings, rag
+                        ))
+                lease.checkpoint_files(items)
+                file_results.update(items)
             failed_ids = [fid for fid in body.file_ids
                           if (file_results.get(fid) or {}).get("status") != "DONE"]
             result = {
@@ -3072,7 +3137,7 @@ class ReindexPendingBody(BaseModel):
 
     limit: int = Field(default=200, ge=1, le=2000)
     # URI 개수 기준이다(문서 수 아님 — 아래 루프의 len(pending_uris) 비교).
-    # rag.import_files 는 호출 1회당 URI 25개까지만 받고(_MAX_IMPORT_URIS),
+    # rag.import_files 는 호출 1회당 URI 25개까지만 받고(MAX_IMPORT_URIS),
     # 호출 지연이 URI 수와 거의 무관하게 ~21초다. 즉 **호출 횟수가 곧 시간**이라
     # 한 번에 최대한 담아야 한다. 실측(1,211건 재색인): 10 이면 ~140회 42분.
     #

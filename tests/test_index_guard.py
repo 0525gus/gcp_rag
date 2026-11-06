@@ -168,7 +168,8 @@ def test_uncertain_rpc_retains_document_lock_and_fails_job(monkeypatch):
     with pytest.raises(DeadlineExceeded):
         sync_main.index_gcs_task(body)
     assert job.get().to_dict()["status"] == "FAILED"
-    assert store._tokens.document(f"__mutation__{FILE_ID}").get().to_dict()["phase"] == "UNCERTAIN"
+    lock = store._tokens.document(f"__mutation__{FILE_ID}__faculty").get().to_dict()
+    assert lock["phase"] == "UNCERTAIN"
     assert store.get(FILE_ID).status == DocStatus.PARSED
 
 
@@ -260,12 +261,15 @@ def test_partial_batch_checkpoints_success_and_retries_only_failed_document(monk
     fail_second = True
 
     def importing(_store, uris, ids, **kwargs):
-        calls.append(ids[0])
-        bad = ids == [second] and fail_second
+        calls.append(tuple(ids))
+        bad = second in ids and fail_second
         return ImportOutcome(uris, 0 if bad else len(uris), 1 if bad else 0, 0)
 
     monkeypatch.setattr(sync_main, "_import_and_mark", importing)
     outcome = sync_main.index_gcs_task(body)
+    # 묶음으로 한 번 반입하고, 부분 실패면 그 묶음만 파일별로 다시 돌린다.
+    assert calls == [(FILE_ID, second), (FILE_ID,), (second,)]
+    calls.clear()
     assert outcome["partial"] is True
     assert outcome["failedFileIds"] == [second]
     assert outcome["completedFileIds"] == [FILE_ID]
@@ -276,7 +280,7 @@ def test_partial_batch_checkpoints_success_and_retries_only_failed_document(monk
     assert results[second]["status"] == "FAILED"
     fail_second = False
     assert sync_main.index_gcs_task(body)["status"] == "DONE"
-    assert calls == [FILE_ID, second]  # redelivery never replays the finished batch
+    assert calls == []  # redelivery never replays the finished batch
     assert store.get(second).status == DocStatus.PARSED
     assert store._col.document(second).collection("index_failures").document("job").get().exists
 
@@ -336,3 +340,124 @@ def test_student_success_does_not_override_failed_faculty_checkpoint(monkeypatch
     assert result["partial"] is True
     assert store.get(FILE_ID).status == DocStatus.PARSED
     assert store._col.document(FILE_ID).collection("index_results").document("job").get().to_dict()["status"]=="FAILED"
+
+
+def _part_lease(store, job, body, part_id):
+    return MutationLease(store, [FILE_ID], versions=body.file_versions, job_ref=job,
+                         part_ref=job.collection("parts").document(part_id))
+
+
+def test_faculty_and_student_parts_of_one_document_run_concurrently(monkeypatch):
+    """두 코퍼스는 서로 다르므로 같은 문서라도 교직원·학생 part가 동시에 돈다."""
+    store, job, body = setup_job(monkeypatch, parts=("faculty", "student"))
+    faculty = _part_lease(store, job, body, "faculty")
+    assert faculty.claim()
+    faculty.pin()
+    student = _part_lease(store, job, body, "student")
+    assert student.claim()
+    student.pin()
+    faculty.finish({"audience": "FACULTY"})
+    student.finish({"audience": "STUDENT"})
+
+
+@pytest.mark.parametrize("part_id", ["faculty", "student"])
+def test_ingest_waits_for_any_running_index_part(monkeypatch, part_id):
+    store, job, body = setup_job(monkeypatch, parts=("faculty", "student"))
+    lease = _part_lease(store, job, body, part_id)
+    lease.claim()
+    lease.pin()
+    with pytest.raises(HTTPException) as error, document_mutation(store, store.settings, [FILE_ID]):
+        pytest.fail("must not mutate while an index part runs")
+    assert error.value.status_code == 409
+    lease.finish({"audience": part_id.upper()})
+    with document_mutation(store, store.settings, [FILE_ID]):
+        pass
+
+
+def test_index_part_waits_for_ingest_and_for_its_own_part(monkeypatch):
+    store, job, body = setup_job(monkeypatch, parts=("faculty", "student"))
+    ingest = MutationLease(store, [FILE_ID])
+    ingest.claim()
+    ingest.pin()
+    with pytest.raises(HTTPException):
+        _part_lease(store, job, body, "faculty").claim()
+    ingest.finish()
+    first = _part_lease(store, job, body, "faculty")
+    assert first.claim()
+    first.pin()
+    job.collection("parts").document("faculty").set({"phase": "IDLE", "status": "QUEUED"}, merge=True)
+    with pytest.raises(HTTPException):
+        _part_lease(store, job, body, "faculty").claim()
+
+
+def test_finalizer_waits_while_a_part_lock_remains(monkeypatch):
+    store, job, _ = setup_job(monkeypatch)
+    job.collection("parts").document("faculty").set({"status": "DONE", "count": 1}, merge=True)
+    store._tokens.document(f"__mutation__{FILE_ID}__faculty").set({"owner": "x", "phase": "UNCERTAIN"})
+    assert sync_main._finalize_index_job(store.settings, "job")["status"] == "RUNNING"
+
+
+def test_index_groups_respect_vertex_uri_limit():
+    uris = {f"f{i}": ["a", "b"] for i in range(14)}
+    uris["empty"] = []
+    uris["huge"] = ["x"] * 30
+    order = ["f0", "empty", *[f"f{i}" for i in range(1, 14)], "huge"]
+    groups = sync_main._index_file_groups(order, uris)
+    assert ["empty"] in groups and ["huge"] in groups
+    batched = [g for g in groups if g not in (["empty"], ["huge"])]
+    assert all(sum(len(uris[f]) for f in g) <= sync_main.MAX_IMPORT_URIS for g in batched)
+    assert [f for g in batched for f in g] == ["f0", *[f"f{i}" for i in range(1, 14)]]
+    assert len(batched) == 2  # 28 URIs -> 24 + 4
+
+def test_faculty_and_student_tasks_overlap_end_to_end(monkeypatch):
+    """두 task가 서로를 기다리지 않는다: 둘 다 반입 단계에 동시에 들어가야 끝난다."""
+    store, job, body = setup_job(monkeypatch, parts=("faculty", "student"))
+    both_inside = Barrier(2)
+
+    def faculty_import(_store, uris, ids, **_kw):
+        both_inside.wait(timeout=5)
+        return ImportOutcome(uris, len(uris), 0, 0)
+
+    def student_sync(uris, ids, _settings, _store):
+        both_inside.wait(timeout=5)
+        return {"enabled": True, "ok": True, "imported": 1, "removed": 0}
+
+    monkeypatch.setattr(sync_main, "_import_and_mark", faculty_import)
+    monkeypatch.setattr(sync_main, "_sync_student_corpus", student_sync)
+    student_body = body.model_copy(update={"audience": "STUDENT", "part_id": "student"})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [pool.submit(sync_main.index_gcs_task, b) for b in (body, student_body)]
+        statuses = [r.result(timeout=10)["status"] for r in results]
+    # 먼저 끝난 쪽은 RUNNING, 나중에 끝난 쪽이 작업을 DONE으로 확정한다.
+    assert "DONE" in statuses
+    assert job.get().to_dict()["status"] == "DONE"
+    assert store.get(FILE_ID).status == DocStatus.INDEXED
+
+
+def test_student_part_syncs_a_group_in_one_call(monkeypatch):
+    from shared.index_guard import document_version
+    from shared.models import DocState
+
+    store, job, body = setup_job(monkeypatch, parts=("faculty", "student"))
+    extra = [f"doc_{i:02d}_aaaaaaaaaaaaaaaaaaaa" for i in range(5)]
+    for fid in extra:
+        store.upsert(DocState(file_id=fid, drive_id="drive", status=DocStatus.PARSED,
+                              content_hash="v1", modified_time="2026-09-01T00:00:00Z"))
+        body.file_ids.append(fid)
+        body.gcs_uris.append(f"gs://source/{fid}.md")
+        body.file_versions[fid] = document_version(store.get(fid))
+    job.set({"fileIds": body.file_ids, "gcsUris": body.gcs_uris,
+             "fileVersions": body.file_versions}, merge=True)
+    calls = []
+
+    def student_sync(uris, ids, _settings, _store):
+        calls.append(list(ids))
+        return {"enabled": True, "ok": True, "imported": 3, "removed": 2}
+
+    monkeypatch.setattr(sync_main, "_sync_student_corpus", student_sync)
+    student_body = body.model_copy(update={"audience": "STUDENT", "part_id": "student"})
+    sync_main.index_gcs_task(student_body)
+    assert calls == [body.file_ids]
+    part = job.collection("parts").document("student").get().to_dict()
+    assert part["count"] == 3 and part["result"]["removed"] == 2
+    assert all(r["status"] == "DONE" for r in part["fileResults"].values())

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Vertex AI RAG import_files 는 호출 1회당 GCS URI 25개까지만 허용한다
 # (초과 시 InvalidArgument: "GCS URIs cannot be specified more than 25 times.")
-_MAX_IMPORT_URIS = 25
+MAX_IMPORT_URIS = 25
 
 # corpus_name → (만든 시각, fileId→resource_name 인덱스)
 _CORPUS_INDEX_CACHE: dict[str, tuple[float, dict[str, list[str]]]] = {}
@@ -206,10 +206,10 @@ class RagEngineClient:
         logger.info("RAG import chunking size=%s overlap=%s", size, overlap)
 
         batches: list[ImportOutcome] = []
-        for i in range(0, len(gcs_uris), _MAX_IMPORT_URIS):
-            batch = gcs_uris[i : i + _MAX_IMPORT_URIS]
+        for i in range(0, len(gcs_uris), MAX_IMPORT_URIS):
+            batch = gcs_uris[i : i + MAX_IMPORT_URIS]
             batches.append(self._import_batch(batch, transformation, max_retries))
-            if i + _MAX_IMPORT_URIS < len(gcs_uris):
+            if i + MAX_IMPORT_URIS < len(gcs_uris):
                 time.sleep(2.0)  # 서브배치 사이 쿼터 여유 확보
 
         total = ImportOutcome(

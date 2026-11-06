@@ -17,8 +17,10 @@ class MemoryDb:
     def collection(self, path):
         return Ref(self, path)
 
-    def transaction(self):
-        return Transaction(self)
+    def transaction(self, max_attempts=5):
+        txn = Transaction(self)
+        txn._max_attempts = max_attempts
+        return txn
 
     def batch(self):
         return Transaction(self)
@@ -27,6 +29,10 @@ class MemoryDb:
 class Ref:
     def __init__(self, db, path):
         self.db, self.path = db, path
+
+    @property
+    def id(self):
+        return self.path.rsplit("/", 1)[-1]
 
     def document(self, name):
         return Ref(self.db, f"{self.path}/{name}")

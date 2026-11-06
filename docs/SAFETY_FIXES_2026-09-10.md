@@ -24,7 +24,12 @@
   상태 전이와 lastSyncedAt은 버전에 포함하지 않는다.
 - Firestore transaction으로 part와 해당 문서들의 실행 소유권을 함께 획득한다.
   동일 task의 동시 delivery와 동일 문서의 다른 작업은 함께 변경을 수행하지
-  못한다. 같은 문서의 faculty/student part도 순서대로 실행된다.
+  못한다. (2026-11-06 변경) 같은 문서의 faculty/student part는 서로 다른
+  코퍼스를 바꾸므로 동시에 실행된다. 문서 잠금을 일반 잠금과 part별 잠금으로
+  나눴고, ingest·삭제·복구는 일반 잠금을 잡으면서 모든 part 잠금이 비어 있어야
+  한다. part는 자기 part 잠금만 잡고 일반 잠금이 비어 있어야 한다. 색인은 Vertex
+  import 한도(URI 25개) 안에서 문서를 묶어 한 번에 반입하고, 부분 실패한 묶음만
+  문서별로 다시 처리해 파일별 결과를 남긴다.
 - Cloud Tasks가 켜져 있으면 ingest, 동기 색인, 복구 색인의 import/학생 동기화,
   삭제도 같은 문서 잠금을 사용한다. 따라서 import 도중 정상 ingest 경로가
   같은 GCS URI를 새 내용으로 덮어쓰지 않는다.
