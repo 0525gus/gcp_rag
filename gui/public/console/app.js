@@ -1136,7 +1136,7 @@
     const review = payload.fileReview;
     const reviewedFiles = review?.reviewStatus === "REVIEWED" ? (review.files || []) : [];
     $("#syncRunFileReview").innerHTML = review?.reviewStatus === "REVIEWED" ? `
-      <header><div><b>문서별 색인 결과</b><span>오류가 발생한 색인 묶음 ${reviewedFiles.length}개 문서 · 전체 실행의 처리 기록 수와 다릅니다. 당시 반입 결과이며 현재 상태와 다를 수 있습니다.</span></div></header>
+      <header class="file-review-head"><b>문서별 색인 결과</b></header>
       ${[["FAILED", "실패 확인"], ["PARTIAL", "일부 완료 · 확인 필요"], ["UNKNOWN", "확인 필요"], ["DONE", "완료 확인"]].map(([status, label]) => {
         const group = reviewedFiles.filter((file) => file.status === status);
         return `<details class="sync-file-result-group"${status === "FAILED" ? " open" : ""}><summary>${label} <b>${group.length}개</b></summary><div class="sync-detail-item-list">${group.map((file) => `
