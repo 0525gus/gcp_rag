@@ -67,7 +67,7 @@
           <p class="setup-resource-status" id="setupResourceStatus">로그인 확인 후 기존 리소스를 불러옵니다.</p>
           <div class="resource-provision-callout hidden" id="setupProvisionCallout">
             <span class="resource-callout-icon">＋</span>
-            <div><b>없는 공통 리소스를 여기서 만들 수 있습니다</b><p>무엇을 켜고 무엇을 만들지 먼저 확인한 뒤 진행합니다.</p></div>
+            <div><b>없는 공통 리소스를 여기서 만들 수 있습니다</b></div>
             <button type="button" class="button primary compact" id="planCommonResources">공통 리소스 만들기</button>
           </div>
           <div class="setup-provision-plan hidden" id="setupProvisionPlan" aria-live="polite">
@@ -158,7 +158,6 @@
           <div class="page-heading">
             <div>
               <h1 id="dashboardTitle">서비스 현황</h1>
-              <p>설정부터 동기화까지, 운영에 필요한 상태를 한곳에서 확인하세요.</p>
               <span class="refresh-stamp" data-refresh-stamp="departments">조회 전</span>
             </div>
             <button class="button primary" id="checkAllButton">
@@ -232,7 +231,6 @@
             <div class="empty-state hidden" id="emptyState">
               <div class="empty-visual"><span></span><span></span><span></span></div>
               <h3>등록된 서비스가 없습니다</h3>
-              <p>첫 학과 서비스를 추가하면 여기서 상태를 한눈에 볼 수 있습니다.</p>
               <button class="button primary" data-go-create>첫 학과 서비스 추가</button>
             </div>
           </section>
@@ -243,7 +241,7 @@
             <div>
               <span class="eyebrow" id="createEyebrow">NEW DEPARTMENT</span>
               <h1 id="createTitle">서비스 등록</h1>
-              <p id="createDescription">필요한 정보를 단계별로 입력하면 안전한 YAML을 생성합니다.</p>
+              <p id="createDescription" hidden></p>
             </div>
             <button class="text-button" id="cancelCreate">작성 취소</button>
           </div>
@@ -259,7 +257,7 @@
               <div class="wizard-step active" data-step="1">
                 <div class="form-section-heading">
                   <span class="section-number">01</span>
-                  <div><h2>기본 정보와 GCP 리소스</h2><p>학과를 식별하고 대상 코퍼스와 버킷을 연결합니다.</p></div>
+                  <div><h2>기본 정보와 GCP 리소스</h2></div>
                   <button type="button" class="button secondary compact resource-refresh" id="refreshDepartmentResources">리소스 다시 불러오기</button>
                 </div>
                 <div class="form-grid two-columns">
@@ -430,7 +428,7 @@
               <div class="wizard-step" data-step="3">
                 <div class="form-section-heading">
                   <span class="section-number">03</span>
-                  <div><h2>생성 전 마지막 확인</h2><p>민감한 MCP 키는 생성 버튼을 누를 때 서버가 안전하게 만듭니다.</p></div>
+                  <div><h2>생성 전 마지막 확인</h2></div>
                 </div>
                 <div class="review-grid">
                   <div class="review-summary" id="reviewSummary"></div>
@@ -461,7 +459,6 @@
           <div class="page-heading">
             <div>
               <h1 id="syncTitle">데이터 동기화</h1>
-              <p>학과별 변경분 동기화와 전체 다시 적재를 수동으로 실행하고 진행 상태를 확인하세요.</p>
               <span class="refresh-stamp" data-refresh-stamp="syncRuns">조회 전</span>
             </div>
             <button type="button" class="button secondary" id="refreshSyncRuns" aria-live="polite" aria-busy="false">실행 이력 새로고침</button>
@@ -469,7 +466,7 @@
 
           <div class="sync-control-grid">
             <section class="panel sync-launch-panel">
-              <header><span class="sync-panel-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></svg></span><div><h2>수동 동기화 실행</h2><p>대상 학과와 실행 방식을 선택합니다.</p></div></header>
+              <header><span class="sync-panel-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></svg></span><div><h2>수동 동기화 실행</h2></div></header>
               <div class="sync-launch-body">
                 <label class="field">
                   <span>학과</span>
@@ -489,8 +486,8 @@
             </section>
 
             <section class="panel sync-active-panel" id="syncActivePanel" aria-live="polite">
-              <header><span class="sync-panel-mark live" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span><div><h2>현재 실행</h2><p>Workflow와 backfill 처리 상태를 자동으로 갱신합니다.</p></div></header>
-              <div class="sync-active-empty" id="syncActiveEmpty"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><h3>진행 중인 동기화가 없습니다</h3><p>새 실행을 시작하거나 아래에서 최근 결과를 확인하세요.</p></div>
+              <header><span class="sync-panel-mark live" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span><div><h2>현재 실행</h2></div></header>
+              <div class="sync-active-empty" id="syncActiveEmpty"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><h3>진행 중인 동기화가 없습니다</h3></div>
               <div class="sync-active-content hidden" id="syncActiveContent"></div>
             </section>
           </div>
@@ -512,13 +509,12 @@
           <div class="page-heading">
             <div>
               <h1 id="corpusTitle">검색 테스트</h1>
-              <p>질문을 보내 실제 Vertex RAG 코퍼스에서 검색되는 문서 조각과 출처를 확인하세요.</p>
             </div>
           </div>
           <div class="corpus-chat-layout">
             <aside class="panel corpus-chat-settings">
               <div class="corpus-settings-mark"><span></span><span></span><span></span></div>
-              <div><h2>대화 대상</h2><p>학과와 공개 범위를 선택하면 해당 코퍼스만 조회합니다.</p></div>
+              <div><h2>대화 대상</h2></div>
               <label class="field">
                 <span>학과</span>
                 <select id="corpusDepartment"><option value="">학과 선택</option></select>
@@ -538,7 +534,6 @@
                   <small>검색된 원문을 근거로 답합니다. 체크하지 않을시 질의에 대해 RAG 코퍼스 검색 결과만 보여줍니다.</small>
                 </div>
               </label>
-              <div class="corpus-security-note"><span>✓</span><p>MCP 키와 gcloud 토큰은 브라우저에 전달하지 않습니다.</p></div>
             </aside>
             <section class="panel corpus-chat-panel">
               <header>
@@ -559,7 +554,6 @@
         <section class="view" id="indexIssuesView" aria-labelledby="indexIssuesTitle">
           <div class="page-heading">
             <div><h1 id="indexIssuesTitle">색인 보류·오류</h1>
-              <p>확인이 필요한 문서를 살펴보고, 필요한 문서만 다시 처리하세요.</p>
               <span class="refresh-stamp" data-refresh-stamp="indexIssues">조회 전</span></div>
             <button type="button" class="button secondary" id="refreshIndexIssues">새로고침</button>
           </div>
@@ -590,7 +584,6 @@
           <div class="page-heading">
             <div>
               <h1 id="environmentTitle">운영 환경</h1>
-              <p>현재 콘솔이 사용하는 로컬 저장소와 인증 상태입니다.</p>
               <span class="refresh-stamp" data-refresh-stamp="environment">조회 전</span>
             </div>
             <button type="button" class="button secondary" id="openDocaiSetup">공통 설정 · Document AI</button>
@@ -602,7 +595,6 @@
             <div class="panel-toolbar">
               <div>
                 <h2>공통 런타임</h2>
-                <p class="runtime-description">모든 학과가 함께 사용하는 문서 처리 · 동기화 서비스입니다.</p>
               </div>
               <div class="toolbar-controls">
                 <span class="runtime-summary" id="commonRuntimeMeta" aria-live="polite">상태 확인 전</span>
@@ -639,7 +631,6 @@
           <section class="department-index-card" aria-labelledby="departmentIndexTitle">
             <div class="department-index-copy">
               <h3 id="departmentIndexTitle">문서 색인</h3>
-              <p>검색에 반영되지 않은 문서의 보류·오류 사유를 확인하고 재처리할 수 있습니다.</p>
             </div>
             <button type="button" class="button secondary" id="drawerIndexIssues">보류·오류 보기 <span aria-hidden="true">→</span></button>
           </section>
@@ -647,7 +638,7 @@
           <details class="department-management" id="drawerMore">
             <summary><strong>고급 관리</strong><span>문서 처리 옵션과 리소스 관리</span></summary>
             <div class="advanced-settings-content">
-              <div class="advanced-settings-intro"><h3>문서 처리 옵션</h3><p>교직원·학생 자료에 적용할 처리 방식을 각각 선택하세요.</p></div>
+              <div class="advanced-settings-intro"><h3>문서 처리 옵션</h3></div>
               <div class="advanced-parser-grid">
 <section class="advanced-parser-card"><header><h4>Layout Parser</h4><p>HWP/HWPX의 기본 파싱 품질이 낮을 때 PDF로 변환하여 재처리합니다.</p></header><div class="advanced-audience-option">
     <div class="advanced-option-control"><label for="drawerDocaiFallbackStaff">교직원 자료</label><select id="drawerDocaiFallbackStaff" disabled><option value="false">끄기</option><option value="true">켜기</option></select></div>

@@ -785,7 +785,6 @@ button, select { cursor: pointer; }
 /* 운영 환경의 공통 런타임 카드. 학과 화면의 DEPLOY 검사와 달리 공통 4종만 본다. */
 .runtime-panel { margin: 0 0 14px; overflow: hidden; }
 .runtime-panel .panel-toolbar { gap: 16px; }
-.runtime-description { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .runtime-panel .toolbar-controls { flex-wrap: wrap; gap: 12px; }
 .runtime-summary { color: #52627a; font-size: 12px; font-weight: 650; }
 .runtime-grid { padding: 20px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; background: #f8fafc; }
@@ -898,7 +897,7 @@ button, select { cursor: pointer; }
   .resource-modal { padding: 10px; }.resource-modal-panel { max-height: calc(100vh - 20px); }.resource-modal-body { padding-inline: 17px; }.resource-modal-panel > header, .resource-modal-panel > footer { padding-inline: 17px; }
   .sync-active-empty { min-height: 0; padding: 32px 20px; }
   #corpusView.active { height: auto; max-height: none; overflow: visible; padding-bottom: 50px; }
-  .corpus-chat-layout { min-height: 0; height: auto; max-height: none; grid-template-columns: 1fr; }.corpus-chat-settings { grid-template-columns: auto 1fr; align-items: start; }.corpus-chat-settings .field, .corpus-audience-field, .corpus-generate-toggle, .corpus-security-note { grid-column: 1 / -1; }.corpus-chat-panel { height: min(62dvh, 620px); min-height: 380px; max-height: 62dvh; }
+  .corpus-chat-layout { min-height: 0; height: auto; max-height: none; grid-template-columns: 1fr; }.corpus-chat-settings { grid-template-columns: auto 1fr; align-items: start; }.corpus-chat-settings .field, .corpus-audience-field, .corpus-generate-toggle { grid-column: 1 / -1; }.corpus-chat-panel { height: min(62dvh, 620px); min-height: 380px; max-height: 62dvh; }
 }
 
 @media (max-width: 480px) {

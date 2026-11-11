@@ -312,7 +312,7 @@
       <span class="issue-document"><span class="issue-file-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 12h6M9 16h4"/></svg></span><span class="issue-document-copy"><b>${escapeHtml(item.name)}</b><span class="issue-row-reason">${escapeHtml(issueReason(item))}</span></span></span>
       <span class="issue-badge" data-tone="${issueTone(item.status)}">${escapeHtml(item.statusLabel)}</span>
       <span class="issue-date">${escapeHtml(issueDate(item.updatedAt))}</span><span class="issue-open" aria-hidden="true">보기 <span>↗</span></span>
-    </button>`).join("") : `<div class="issue-empty"><span class="issue-empty-mark" aria-hidden="true">${indexIssueState.loading ? "…" : "≡"}</span><b>${indexIssueState.loading ? "문서 상태를 확인하고 있습니다" : !$("#indexIssuesDepartment").value ? "학과를 선택해 주세요" : indexIssueState.loaded ? "표시할 문서가 없습니다" : "문서를 불러오지 못했습니다"}</b><p>${indexIssueState.loading ? "조회된 결과부터 순서대로 보여드립니다." : !$("#indexIssuesDepartment").value ? "선택한 학과의 보류·오류 문서를 한곳에서 확인하세요." : indexIssueState.loaded ? indexIssueState.cursor ? "현재까지 조회한 범위에 조건과 일치하는 문서가 없습니다." : "조건과 일치하는 보류·오류 문서가 없습니다." : "새로고침을 눌러 다시 확인해 주세요."}</p></div>`;
+    </button>`).join("") : `<div class="issue-empty"><span class="issue-empty-mark" aria-hidden="true">${indexIssueState.loading ? "…" : "≡"}</span><b>${indexIssueState.loading ? "문서 상태를 확인하고 있습니다" : !$("#indexIssuesDepartment").value ? "학과를 선택해 주세요" : indexIssueState.loaded ? "표시할 문서가 없습니다" : "문서를 불러오지 못했습니다"}</b><p>${indexIssueState.loading || !$("#indexIssuesDepartment").value ? "" : indexIssueState.loaded ? indexIssueState.cursor ? "현재까지 조회한 범위에 조건과 일치하는 문서가 없습니다." : "조건과 일치하는 보류·오류 문서가 없습니다." : "새로고침을 눌러 다시 확인해 주세요."}</p></div>`;
   }
 
   // background 는 이미 보이는 목록을 지우지 않고 전체 집계가 끝났을 때 한 번에 바꾼다.
@@ -380,7 +380,7 @@
       $("#indexIssueDetailBody").innerHTML = `<div class="issue-reason" data-tone="${issueTone(data.item.status)}"><span class="issue-badge" data-tone="${issueTone(data.item.status)}">${escapeHtml(data.item.statusLabel)}</span><p>${escapeHtml(issueReason(data.item))}</p></div>
         <dl class="issue-properties"><div><dt>문서 위치</dt><dd>${escapeHtml(data.item.path || "기록 없음")}</dd></div><div><dt>노출 범위</dt><dd>${data.item.audience === "STUDENT" ? "학생·교직원" : "교직원"}</dd></div><div><dt>처리 경로</dt><dd>${escapeHtml(data.item.route || "기록 없음")}</dd></div><div><dt>마지막 처리</dt><dd>${escapeHtml(issueDate(data.item.updatedAt))}</dd></div></dl>`
         + (data.queues || []).map((row) => `<article><b>${escapeHtml(row.label)}</b><p>${escapeHtml(row.reason)}</p><small>재시도 ${escapeHtml(row.retryCount)}회 · ${escapeHtml(issueDate(row.updatedAt))}</small></article>`).join("")
-        + '<h3>파일별 RAG 처리 결과</h3><p class="issue-help">관련 작업 시간대에 기록된 결과입니다. 현재 문서 상태와 기록 시점을 함께 확인하세요.</p>'
+        + '<h3>파일별 RAG 처리 결과</h3>'
         + ((data.evidence || []).map((row) => `<article><b>${escapeHtml(row.status)}</b><p>${escapeHtml(row.error || "이 객체의 색인이 성공했습니다.")}</p><small>${escapeHtml(row.object)} · 코퍼스 ${escapeHtml(row.corpusId)} · ${escapeHtml(issueDate(row.checkedAt))}</small></article>`).join("") || '<p>확인 가능한 파일별 처리 결과가 없습니다. 개별 실패 원인은 단정할 수 없습니다.</p>')
         + `<h3>관련 색인 작업</h3><p class="issue-help">${escapeHtml(data.batchNotice)}</p>`
         + ((data.jobs || []).map((job) => `<article><b>${escapeHtml(job.status)}</b> · ${escapeHtml(issueDate(job.createdAt))}<p>${escapeHtml(job.error || "작업 오류 미기록")}</p><code>${escapeHtml(job.jobId)}</code>${job.parts.map((part) => `<p>${part.audience === "student" ? "학생" : "교직원"}: ${escapeHtml(part.fileResult ? ({DONE:"이 문서 완료", FAILED:"이 문서 실패", RUNNING:"이 문서 결과 확인 필요"}[part.fileResult.status] || "이 문서 확인 필요") : `묶음 ${part.status}`)} · ${escapeHtml(part.fileResult ? (part.fileResult.error || "") : (part.error || "파일별 결과 미기록"))}</p>`).join("")}</article>`).join("") || '<p>관련 작업 기록이 없습니다.</p>')
@@ -4315,11 +4315,8 @@
     const cloud = editing && source === "cloud";
     $("#createEyebrow").textContent = editing ? "EDIT DEPARTMENT" : "NEW DEPARTMENT";
     $("#createTitle").textContent = editing ? "학과 서비스 수정" : "서비스 등록";
-    $("#createDescription").textContent = editing
-      ? cloud
-        ? "Cloud Run의 전체 설정을 수정하고 새 revision으로 바로 배포합니다."
-        : "기존 MCP 키를 유지하면서 연결 설정을 안전하게 수정합니다."
-      : "필요한 정보를 단계별로 입력하면 안전한 YAML을 생성합니다.";
+    $("#createDescription").textContent = cloud ? "Cloud Run의 전체 설정을 수정하고 새 revision으로 바로 배포합니다." : "";
+    $("#createDescription").hidden = !cloud;
     $("[data-step-marker='3'] b").textContent = editing ? "검토·저장" : "검토·생성";
     $("#confirmText").textContent = editing
       ? cloud
@@ -4338,7 +4335,7 @@
       state.editingRevision = config.configRevision;
       setEditorMode(true, state.editingSource);
       if (config.unifiedMcp) {
-        $("#createDescription").textContent = "공통 MCP의 학과별 검색 범위와 Cloud 등록 설정을 수정합니다.";
+        $("#createDescription").hidden = true;
         $("#confirmText").textContent = "변경 내용을 확인했으며 공통 MCP의 학과 설정을 업데이트합니다.";
       }
       const form = $("#departmentForm");
