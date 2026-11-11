@@ -1,3 +1,4 @@
+import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from threading import Barrier, Event
@@ -7,7 +8,7 @@ from google.api_core.exceptions import DeadlineExceeded
 from starlette.exceptions import HTTPException
 
 import services.sync.main as sync_main
-from shared.index_guard import MutationLease, StaleIndexTask, document_mutation
+from shared.index_guard import MutationLease, StaleIndexTask, document_mutation, mutation_lock_names
 from shared.models import DocStatus
 from shared.rag_engine import ImportOutcome
 from test_index_tasks import FILE_ID, setup_job
@@ -461,3 +462,11 @@ def test_student_part_syncs_a_group_in_one_call(monkeypatch):
     part = job.collection("parts").document("student").get().to_dict()
     assert part["count"] == 3 and part["result"]["removed"] == 2
     assert all(r["status"] == "DONE" for r in part["fileResults"].values())
+
+@pytest.mark.parametrize("fid", ["1fH3Bvp5qy4-vPa2vUATm71PfpsyMBg__", "plain_id", "__", "x_"])
+def test_lock_names_avoid_firestore_reserved_ids(fid):
+    names = mutation_lock_names(fid)
+    assert len(set(names)) == len(names)
+    assert not any(re.fullmatch(r"__.*__", name) for name in names)
+    if not fid.endswith("_"):
+        assert names[0] == f"__mutation__{fid}"

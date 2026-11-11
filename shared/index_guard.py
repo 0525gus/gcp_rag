@@ -96,7 +96,10 @@ _TXN_ATTEMPTS = 12
 
 
 def _lock_name(fid: str, part_id: str | None = None) -> str:
-    return f"__mutation__{fid}" if part_id is None else f"__mutation__{fid}__{part_id}"
+    name = f"__mutation__{fid}" if part_id is None else f"__mutation__{fid}__{part_id}"
+    # Firestore rejects IDs matching __.*__, which Drive IDs ending in "__" produce.
+    # "~" is outside the file ID alphabet, so the suffix cannot collide.
+    return f"{name}~" if name.endswith("__") else name
 
 
 def mutation_lock_names(fid: str) -> list[str]:
