@@ -457,13 +457,13 @@
     const select = $("#corpusDepartment");
     if (!select) return;
     const current = select.value;
-    const localDepartments = state.departments.filter((dept) => !dept.cloudOnly);
-    select.innerHTML = '<option value="">학과 선택</option>' + localDepartments.map((dept) =>
+    const departments = state.departments;
+    select.innerHTML = '<option value="">학과 선택</option>' + departments.map((dept) =>
       `<option value="${escapeHtml(dept.code)}">${escapeHtml(dept.name)} · ${escapeHtml(dept.code)}</option>`
     ).join("");
-    if (localDepartments.some((dept) => dept.code === current)) select.value = current;
-    else if (localDepartments.length === 1) select.value = localDepartments[0].code;
-    select.disabled = localDepartments.length === 0;
+    if (departments.some((dept) => dept.code === current)) select.value = current;
+    else if (departments.length === 1) select.value = departments[0].code;
+    select.disabled = departments.length === 0;
     updateCorpusChatTarget();
   }
 
