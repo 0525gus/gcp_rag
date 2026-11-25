@@ -11,6 +11,7 @@ import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -152,6 +153,68 @@ def _cache_put(key: _CacheKey, value: SearchResponse) -> None:
             _cache.popitem(last=False)
 
 
+def _doc_lookup(store: DocStateStore, hits: list[Any]) -> Callable[[str], Any]:
+    cache: dict[str, Any] = store.get_many(hit.source.file_id for hit in hits)
+
+    def lookup(file_id: str) -> Any:
+        if file_id not in cache:
+            cache[file_id] = store.get(file_id)
+        return cache[file_id]
+
+    return lookup
+
+
+def _servable(meta: Any, *, scope: SearchScope | None, drive_id: str | None) -> bool:
+    if scope and (
+        not meta
+        or meta.drive_id not in scope.drive_ids
+        or (scope.audience == "student" and meta.audience != "STUDENT")
+    ):
+        return False
+    if meta and (
+        meta.status in {DocStatus.SKIPPED, DocStatus.EXCLUDED, DocStatus.DELETED}
+        or (
+            meta.status == DocStatus.FAILED
+            and (meta.error or "").startswith("out_of_folder_scope_cleanup_failed")
+        )
+    ):
+        return False
+    return not drive_id or bool(meta and meta.drive_id == drive_id)
+
+
+def _readable(hit: Any, meta: Any) -> Any:
+    name = (meta.name if meta and meta.name else hit.source.name) or ""
+    if (meta and meta.mime_type == "text/html") or name.lower().endswith((".html", ".htm")):
+        return replace(hit, text=clean_html_evidence(hit.text))
+    return hit
+
+
+def _evidence_source(
+    hit: Any, meta: Any, name: str, *, scope: SearchScope | None
+) -> dict[str, Any]:
+    source = {
+        "fileId": hit.source.file_id,
+        "name": name,
+        "path": meta.path if meta else None,
+        "bundle": meta.bundle if meta else None,
+        "title": meta.source_title if meta else None,
+        "websiteUrl": meta.website_url if meta else None,
+        **citation_links(
+            (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri,
+            name,
+            meta.website_url if meta else None,
+            prefer_post=bool(scope and scope.audience == "student"),
+        ),
+        "modifiedTime": meta.modified_time if meta else hit.source.modified_time,
+        "driveId": meta.drive_id if meta else None,
+    }
+    # 파일명만으로는 문서를 못 가리는 코퍼스라(게시판 수집물 27건이 전부
+    # content.txt, 게시글당 첨부 중앙값 2개) 자료묶음을 붙인 표시용 이름을
+    # 함께 싣는다. name 은 원래 파일명 그대로 둔다.
+    source["label"] = citation_label(source)
+    return source
+
+
 def search(
     query: str,
     top_k: int | None = None,
@@ -191,7 +254,13 @@ def search(
     request_settings = replace(settings, rag_corpus_name=scope.corpus) if scope else settings
     k = top_k or request_settings.top_k_default
     k = max(1, min(k, settings.search_top_k_max))
-    logger.info("search query=%r top_k=%s drive_id=%s", query, k, drive_id)
+    logger.info(
+        "search query=%r top_k=%s drive_id=%s scope=%s",
+        query,
+        k,
+        drive_id,
+        f"{scope.department}/{scope.audience}" if scope else "-",
+    )
 
     rewrite_policy = (
         "rewrite-v1",
@@ -279,40 +348,11 @@ def search(
         if _EXPERIMENT_DIAGNOSTICS
         else None
     )
-    store = DocStateStore(request_settings)
-    meta_cache: dict[str, Any] = store.get_many(hit.source.file_id for hit in raw_hits)
-
-    def _meta(file_id: str) -> Any:
-        if file_id not in meta_cache:
-            meta_cache[file_id] = store.get(file_id)
-        return meta_cache[file_id]
-
-    def _servable(hit: Any) -> bool:
-        meta = _meta(hit.source.file_id)
-        if scope and (
-            not meta
-            or meta.drive_id not in scope.drive_ids
-            or (scope.audience == "student" and meta.audience != "STUDENT")
-        ):
-            return False
-        if meta and (
-            meta.status in {DocStatus.SKIPPED, DocStatus.EXCLUDED, DocStatus.DELETED}
-            or (
-                meta.status == DocStatus.FAILED
-                and (meta.error or "").startswith("out_of_folder_scope_cleanup_failed")
-            )
-        ):
-            return False
-        if drive_id and (not meta or meta.drive_id != drive_id):
-            return False
-        return True
+    _meta = _doc_lookup(DocStateStore(request_settings), raw_hits)
 
     cleaned = []
     for hit in raw_hits:
-        meta = _meta(hit.source.file_id)
-        name = (meta.name if meta and meta.name else hit.source.name) or ""
-        if (meta and meta.mime_type == "text/html") or name.lower().endswith((".html", ".htm")):
-            hit = replace(hit, text=clean_html_evidence(hit.text))
+        hit = _readable(hit, _meta(hit.source.file_id))
         if hit.text.strip():
             cleaned.append(hit)
     raw_hits = cleaned
@@ -339,7 +379,9 @@ def search(
         )
         raw_hits = [raw_hits[i] for i in order]
 
-    raw_hits = [h for h in raw_hits if _servable(h)]
+    raw_hits = [
+        h for h in raw_hits if _servable(_meta(h.source.file_id), scope=scope, drive_id=drive_id)
+    ]
 
     if settings.search_reranker_mode != "none":
         raw_hits = postprocess_hits(
@@ -417,30 +459,10 @@ def search(
         ):
             display_name = meta.path if meta and meta.path else display_name
 
-        source = {
-            "fileId": hit.source.file_id,
-            "name": display_name,
-            "path": meta.path if meta else None,
-            "bundle": meta.bundle if meta else None,
-            "title": meta.source_title if meta else None,
-            "websiteUrl": meta.website_url if meta else None,
-            **citation_links(
-                (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri,
-                display_name,
-                meta.website_url if meta else None,
-                prefer_post=bool(scope and scope.audience == "student"),
-            ),
-            "modifiedTime": (meta.modified_time if meta else hit.source.modified_time),
-            "driveId": meta.drive_id if meta else None,
-        }
-        # 파일명만으로는 문서를 못 가리는 코퍼스라(게시판 수집물 27건이 전부
-        # content.txt, 게시글당 첨부 중앙값 2개) 자료묶음을 붙인 표시용 이름을
-        # 함께 싣는다. name 은 원래 파일명 그대로 둔다.
-        source["label"] = citation_label(source)
         documents.append(
             {
                 "citationId": len(documents) + 1,
-                "source": source,
+                "source": _evidence_source(hit, meta, display_name, scope=scope),
                 "chunks": [
                     {
                         "text": chunk.text,
@@ -493,39 +515,13 @@ def retrieve_channel(
     retrieve_ms = (time.perf_counter() - started) * 1000
 
     store_started = time.perf_counter()
-    store = DocStateStore(request_settings)
-    meta_cache: dict[str, Any] = store.get_many(hit.source.file_id for hit in raw_hits)
-
-    def _meta(file_id: str) -> Any:
-        if file_id not in meta_cache:
-            meta_cache[file_id] = store.get(file_id)
-        return meta_cache[file_id]
-
-    def _servable(hit: Any) -> bool:
-        meta = _meta(hit.source.file_id)
-        if scope and (
-            not meta
-            or meta.drive_id not in scope.drive_ids
-            or (scope.audience == "student" and meta.audience != "STUDENT")
-        ):
-            return False
-        if meta and (
-            meta.status in {DocStatus.SKIPPED, DocStatus.EXCLUDED, DocStatus.DELETED}
-            or (
-                meta.status == DocStatus.FAILED
-                and (meta.error or "").startswith("out_of_folder_scope_cleanup_failed")
-            )
-        ):
-            return False
-        return not drive_id or bool(meta and meta.drive_id == drive_id)
+    _meta = _doc_lookup(DocStateStore(request_settings), raw_hits)
 
     cleaned = []
     for hit in raw_hits:
         meta = _meta(hit.source.file_id)
-        name = ((meta.name if meta else None) or hit.source.name or "")
-        if (meta and meta.mime_type == "text/html") or name.lower().endswith((".html", ".htm")):
-            hit = replace(hit, text=clean_html_evidence(hit.text))
-        if hit.text.strip() and _servable(hit):
+        hit = _readable(hit, meta)
+        if hit.text.strip() and _servable(meta, scope=scope, drive_id=drive_id):
             cleaned.append(hit)
 
     candidates = postprocess_hits(
@@ -574,24 +570,9 @@ def retrieve_channel(
     results: list[dict[str, Any]] = []
     for rank, index in enumerate(ranking.order[:result_k], 1):
         hit = candidates[index]
-        meta = _meta(hit.source.file_id)
-        source = {
-            "fileId": hit.source.file_id,
-            "name": titles[index] or hit.source.file_id,
-            "path": (meta.path if meta else None),
-            "bundle": bundles[index] or None,
-            "title": meta.source_title if meta else None,
-            "websiteUrl": meta.website_url if meta else None,
-            **citation_links(
-                (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri,
-                titles[index],
-                meta.website_url if meta else None,
-                prefer_post=bool(scope and scope.audience == "student"),
-            ),
-            "modifiedTime": (meta.modified_time if meta else hit.source.modified_time),
-            "driveId": (meta.drive_id if meta else None),
-        }
-        source["label"] = citation_label(source)
+        source = _evidence_source(
+            hit, _meta(hit.source.file_id), titles[index] or hit.source.file_id, scope=scope
+        )
         row: dict[str, Any] = {
             "rank": rank,
             "vectorCandidateRank": index + 1,

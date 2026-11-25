@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
+import urllib.request
 import webbrowser
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -17,13 +23,18 @@ from scripts._env import force_utf8_stdout  # noqa: E402
 from scripts.dept_config import list_departments, load_config_env  # noqa: E402
 
 SEVERITY_ORDER = ("DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY")
+ENTRIES_URL = "https://logging.googleapis.com/v2/entries:list"
+_FRESHNESS_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
 def _mcp_service_names() -> list[str]:
     return [
-        f"rag-mcp-{code}-{audience}"
-        for code in list_departments()
-        for audience in ("staff", "student")
+        "rag-mcp",
+        *(
+            f"rag-mcp-{code}-{audience}"
+            for code in list_departments()
+            for audience in ("staff", "student")
+        ),
     ]
 
 
@@ -74,7 +85,7 @@ def build_filter(
         parts.append(f"severity>={sev}")
 
     if query:
-        q = query.replace('"', '\\"')
+        q = query.replace("\\", "\\\\").replace('"', '\\"')
         parts.append(
             f'(textPayload:"{q}" OR jsonPayload.message:"{q}" OR protoPayload.status.message:"{q}")'
         )
@@ -91,30 +102,84 @@ def explorer_url(project: str, log_filter: str) -> str:
     )
 
 
-def run_gcloud_read(
+def parse_freshness(text: str) -> timedelta:
+    match = re.fullmatch(r"(\d+)([smhdw])", text.strip().lower())
+    if not match:
+        raise SystemExit(f"조회 기간 형식이 잘못됐습니다: {text} (예: 30m, 1h, 6h, 1d)")
+    return timedelta(seconds=int(match.group(1)) * _FRESHNESS_UNITS[match.group(2)])
+
+
+def _access_token() -> str:
+    gcloud = (shutil.which("gcloud.cmd") if os.name == "nt" else None) or shutil.which("gcloud")
+    if not gcloud:
+        raise SystemExit("gcloud CLI 가 PATH 에 없습니다.")
+    proc = subprocess.run(
+        [gcloud, "auth", "print-access-token"], capture_output=True, text=True, check=False
+    )
+    token = proc.stdout.strip()
+    if proc.returncode != 0 or not token:
+        raise SystemExit("gcloud 로그인이 필요합니다: gcloud auth login")
+    return token
+
+
+def read_entries(
     project: str,
     log_filter: str,
     *,
     limit: int,
-    freshness: str,
-    format_: str,
-) -> int:
-    if not shutil.which("gcloud"):
-        raise SystemExit("gcloud CLI 가 PATH 에 없습니다.")
-    cmd = [
-        "gcloud",
-        "logging",
-        "read",
-        log_filter,
-        f"--project={project}",
-        f"--limit={limit}",
-        f"--freshness={freshness}",
-        f"--format={format_}",
-    ]
-    print(f"# {' '.join(cmd)}\n", file=sys.stderr)
-    # Windows의 gcloud는 .cmd 배치 스크립트라 shell=True 없이는 CreateProcess가 못 찾는다.
-    proc = subprocess.run(cmd, check=False, shell=(os.name == "nt"))
-    return proc.returncode
+    since: datetime,
+    token: str,
+    urlopen: Any = urllib.request.urlopen,
+) -> list[dict[str, Any]]:
+    body: dict[str, Any] = {
+        "resourceNames": [f"projects/{project}"],
+        "filter": f'{log_filter}\ntimestamp>="{since.astimezone(UTC):%Y-%m-%dT%H:%M:%SZ}"',
+        "orderBy": "timestamp desc",
+        "pageSize": min(limit, 1000),
+    }
+    entries: list[dict[str, Any]] = []
+    while len(entries) < limit:
+        request = urllib.request.Request(
+            ENTRIES_URL,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(request, timeout=60) as response:
+            page = json.load(response)
+        entries.extend(page.get("entries") or [])
+        next_token = page.get("nextPageToken")
+        if not next_token:
+            break
+        body["pageToken"] = next_token
+    return entries[:limit]
+
+
+def format_entry(entry: dict[str, Any]) -> str:
+    labels = (entry.get("resource") or {}).get("labels") or {}
+    proto = entry.get("protoPayload") or {}
+    http = entry.get("httpRequest") or {}
+    request_line = " ".join(
+        str(value)
+        for value in (http.get("requestMethod"), http.get("status"), http.get("requestUrl"))
+        if value
+    )
+    message = (
+        entry.get("textPayload")
+        or (entry.get("jsonPayload") or {}).get("message")
+        or (proto.get("status") or {}).get("message")
+        or request_line
+        or proto.get("methodName")
+        or ""
+    )
+    return "\t".join(
+        [
+            entry.get("timestamp", ""),
+            entry.get("severity", "DEFAULT"),
+            labels.get("service_name") or labels.get("workflow_id") or "",
+            str(message).rstrip(),
+        ]
+    )
 
 
 def main() -> int:
@@ -140,11 +205,7 @@ def main() -> int:
         default="1h",
         help="조회 기간 (예: 30m, 1h, 6h, 1d)",
     )
-    parser.add_argument(
-        "--format",
-        default="value(timestamp,severity,textPayload,jsonPayload.message)",
-        help="gcloud --format",
-    )
+    parser.add_argument("--json", action="store_true", help="로그 항목 원본을 JSON 한 줄씩 출력")
     parser.add_argument(
         "--open",
         action="store_true",
@@ -161,6 +222,8 @@ def main() -> int:
         help="Log Explorer URL만 출력",
     )
     args = parser.parse_args()
+    if args.limit < 1:
+        parser.error("--limit 은 1 이상이어야 합니다.")
 
     load_config_env()
 
@@ -182,13 +245,18 @@ def main() -> int:
         print(url, file=sys.stderr)
         webbrowser.open(url)
 
-    return run_gcloud_read(
-        project,
-        log_filter,
-        limit=args.limit,
-        freshness=args.freshness,
-        format_=args.format,
-    )
+    since = datetime.now(UTC) - parse_freshness(args.freshness)
+    try:
+        entries = read_entries(
+            project, log_filter, limit=args.limit, since=since, token=_access_token()
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:500]
+        print(f"로그 조회 실패 (HTTP {exc.code}): {detail}", file=sys.stderr)
+        return 1
+    for entry in entries:
+        print(json.dumps(entry, ensure_ascii=False) if args.json else format_entry(entry))
+    return 0
 
 
 if __name__ == "__main__":
