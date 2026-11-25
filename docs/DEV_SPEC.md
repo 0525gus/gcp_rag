@@ -1,6 +1,6 @@
 # 문서 검색(RAG) 시스템 개발 명세
 
-- 최종 개정: 2026-09-01
+- 최종 개정: 2026-11-13
 - 대상: 한국공학대학교 학과별 문서 검색 파이프라인
 - 기준: 현재 저장소 코드와 운영 설정
 
@@ -305,8 +305,8 @@ MCP 서비스 하나는 배포 시 정해진 코퍼스 하나만 조회한다. �
 
 검색 순서:
 
-1. 요청 `top_k`를 1~20으로 제한한다. 기본값은 5다.
-2. 후보 청크를 `min(60, max(top_k × 3, top_k))`개 가져온다.
+1. 요청 `top_k`를 1~20으로 제한한다. 기본값은 7이다.
+2. 후보 청크를 `min(60, max(top_k × 9, top_k))`개 가져온다. 기본 `top_k`에서도 상한 60이 먼저 걸린다.
 3. 벡터 거리 0.30을 초과한 후보를 제거한다.
 4. HTML 원본 후보를 정제한 뒤 BM25 순위와 벡터 순위를 RRF로 결합해 재정렬한다.
 5. 삭제·제외·스킵 상태와 폴더 밖 정리 실패 문서를 제거하고, 요청된 drive_id를 적용한다.
@@ -368,23 +368,31 @@ MCP는 FactChat 연결을 위해 기본적으로 공개 Cloud Run URL을 사용�
 
 ### 공통 설정
 
-현재 `config/common.yaml`의 핵심값:
+기본값은 코드 한 곳에만 있다. 런타임 값은 `shared/config.py`의 `Settings` 필드,
+배포 전용 값은 `scripts/common_config.py`의 `DEPLOY_DEFAULTS`다. `config/common.yaml`은
+프로젝트·리전·Artifact 저장소·Firestore DB·메타데이터 버킷·Document AI 프로세서처럼
+이 프로젝트에만 해당하는 값과, 기본값을 일부러 바꾼 값만 담는다. 배포 스크립트와 관리
+GUI는 `scripts/common_config.py`가 둘을 합친 결과만 읽고 자기 기본값을 두지 않는다.
 
-| 설정 | 현재값 | 의미 |
+주요 기본값:
+
+| 설정 | 기본값 | 의미 |
 |---|---:|---|
 | `FIRESTORE_DATABASE` | `rag-sync-state` | 공용 상태 DB |
 | `INGEST_CONCURRENCY` | 8 | ingest 병렬 worker 수 |
 | `SYNC_CONCURRENCY` | 4 | Cloud Run sync concurrency |
 | `RAG_DELETE_CONCURRENCY` | 1 | RagFile 삭제 동시성 |
 | `RAG_DELETE_PACING_SECONDS` | 1.1 | 삭제 호출 간격 |
-| `RAG_MAPPING_WRITE_ENABLED` | true | import 성공 후 매핑 기록 |
+| `RAG_MAPPING_WRITE_ENABLED` | true | import 성공 후 매핑 기록(`RAG_METADATA_BUCKET` 필요) |
 | `RAG_MAPPING_READ_ENABLED` | true | 삭제 시 매핑 우선 사용 |
 | `RAG_MAPPING_FALLBACK_SCAN_ENABLED` | true | 매핑 누락 시 코퍼스 순회 |
-| `CLOUD_TASKS_ENABLED` | true | 비동기 분리 색인 사용 |
+| `CLOUD_TASKS_ENABLED` | true | 비동기 분리 색인. Workflow가 이 경로만 쓴다 |
 | `INDEX_JOB_TIMEOUT_SECONDS` | 900 | 색인 job deadline |
-| `TOP_K_DEFAULT` | 5 | 기본 검색 문서 수 |
-| `SEARCH_FETCH_MULTIPLIER` | 3 | 후보 청크 여유 배수 |
+| `TOP_K_DEFAULT` | 7 | 기본 검색 문서 수(Golden 200 Arm 2) |
+| `SEARCH_FETCH_MULTIPLIER` | 9 | 후보 청크 여유 배수(Golden 200 Arm 2) |
 | `SEARCH_FETCH_MAX` | 60 | 후보 청크 상한 |
+| `SEARCH_MAX_TOTAL_CHUNKS` | 15 | 한 응답의 총 청크 상한 |
+| `MCP_CPU` / `MCP_CONCURRENCY` | 2 / 40 | 공통 MCP Cloud Run 사양 |
 | `ALLOW_UNAUTH` | true | MCP Cloud Run 공개 여부 |
 
 Cloud 학과 등록부는 Drive ID와 동기화/학생 폴더, 두 GCS 버킷, 교직원·학생 코퍼스,

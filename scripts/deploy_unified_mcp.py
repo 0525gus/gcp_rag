@@ -1,5 +1,3 @@
-"""Deploy one scoped MCP without reading or copying legacy API keys into its env."""
-
 import argparse
 import json
 import os
@@ -14,12 +12,13 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.dept_gui import _common, _provision_access_token
+from scripts import common_config
+from scripts.dept_gui import _provision_access_token
 from scripts.mcp_registry import RegistryAdmin
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Deploy one scoped MCP without reading or copying legacy API keys into its env.')
     parser.add_argument("--image", help="Immutable image digest; otherwise build the current checkout")
     parser.add_argument("--skip-build", action="store_true", help="Resolve the existing mcp:latest digest")
     parser.add_argument("--cpu", type=int, choices=(1, 2))
@@ -67,22 +66,21 @@ def main():
         )
     ):
         parser.error("metadata rank weights must be nonnegative")
-    common = _common()
+    common = common_config.load_common(ROOT / "config")
     project, region = common["GCP_PROJECT_ID"], common["GCP_REGION"]
-    cpu = args.cpu or int(common.get("MCP_CPU", 1))
+    cpu = args.cpu or int(common["MCP_CPU"])
     if cpu not in (1, 2):
         parser.error("MCP_CPU must be 1 or 2")
     gcloud = shutil.which("gcloud")
     if not gcloud:
         parser.error("gcloud is required")
-    admin = RegistryAdmin(project, region, common.get("FIRESTORE_DATABASE", "rag-sync-state"),
-                          _provision_access_token())
+    admin = RegistryAdmin(project, region, common["FIRESTORE_DATABASE"], _provision_access_token())
     _, record, _ = admin.read()
     if not record:
         parser.error("Initialize the Cloud MCP registry before deploying the shared runtime")
     image = args.image
     if not image:
-        tag = f"{region}-docker.pkg.dev/{project}/{common.get('ARTIFACT_REPO', 'rag-mcp')}/mcp:latest"
+        tag = f"{region}-docker.pkg.dev/{project}/{common['ARTIFACT_REPO']}/mcp:latest"
         if not args.skip_build:
             subprocess.run([gcloud, "builds", "submit", f"--project={project}",
                             "--config=cloudbuild.mcp.yaml", f"--substitutions=_IMAGE={tag}",
@@ -113,8 +111,8 @@ def main():
         "GCP_PROJECT_ID": project, "GCP_REGION": region,
         "GCS_HWP_ORIGINAL_BUCKET": "routing-required", "GCS_SOURCE_BUCKET": "routing-required",
         "RAG_CORPUS_NAME": "routing-required", "MCP_ROUTING_MODE": "registry",
-        "FIRESTORE_DATABASE": common.get("FIRESTORE_DATABASE", "rag-sync-state"),
-        "DOC_STATE_COLLECTION": common.get("DOC_STATE_COLLECTION", "doc_state"),
+        "FIRESTORE_DATABASE": common["FIRESTORE_DATABASE"],
+        "DOC_STATE_COLLECTION": common["DOC_STATE_COLLECTION"],
         "SEARCH_CACHE_TTL_SECONDS": str(args.cache_ttl),
         "GIT_COMMIT": git_commit,
         "GIT_DIRTY": str(git_dirty).lower(),
@@ -140,8 +138,7 @@ def main():
         "SEARCH_MAX_TOTAL_CHUNKS",
         "SEARCH_MAX_CHUNKS_PER_FILE",
     ):
-        if name in common:
-            env[name] = str(common[name])
+        env[name] = str(common[name])
     if args.title_rank_weight is not None:
         env["SEARCH_TITLE_RERANK_WEIGHT"] = str(args.title_rank_weight)
     if args.temporal_rank_weight is not None:
@@ -156,8 +153,6 @@ def main():
         env["SEARCH_RERANKER_MODE"] = args.reranker_mode
     if args.reranker_candidate_k is not None:
         env["SEARCH_RERANKER_CANDIDATE_K"] = str(args.reranker_candidate_k)
-        # A tagged breadth benchmark must be able to request and observe the
-        # whole document candidate set through the MCP response.
         env["SEARCH_TOP_K_MAX"] = str(max(20, args.reranker_candidate_k))
     experiment_overrides = {
         "TOP_K_DEFAULT": args.top_k_default,
@@ -175,11 +170,13 @@ def main():
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False, encoding="utf-8") as handle:
         yaml.safe_dump(flags, handle)
         path = handle.name
+    public = common_config.flag(common["ALLOW_UNAUTH"])
+    access = "--allow-unauthenticated" if public else "--no-allow-unauthenticated"
     try:
         command = [gcloud, "run", "deploy", "rag-mcp", f"--project={project}",
                    f"--region={region}", f"--image={image}", f"--cpu={cpu}", "--memory=1Gi",
-                   "--concurrency=40", "--min=0", "--min-instances=0", "--max-instances=100",
-                   "--cpu-throttling", "--cpu-boost", "--timeout=300", "--allow-unauthenticated",
+                   f"--concurrency={common['MCP_CONCURRENCY']}", "--min=0", "--min-instances=0",
+                   "--max-instances=100", "--cpu-throttling", "--cpu-boost", "--timeout=300", access,
                    f"--service-account=rag-mcp-search@{project}.iam.gserviceaccount.com",
                    f"--revision-suffix={args.suffix}", f"--flags-file={path}", "--quiet"]
         if args.no_traffic:
@@ -201,9 +198,7 @@ def main():
             f"--region={region}", "--format=json",
         ], check=True, capture_output=True, text=True).stdout)
         url = service["status"]["url"]
-        # Re-read after the deployment: concurrent key changes must survive URL publication.
-        admin = RegistryAdmin(project, region, common.get("FIRESTORE_DATABASE", "rag-sync-state"),
-                              _provision_access_token())
+        admin = RegistryAdmin(project, region, common["FIRESTORE_DATABASE"], _provision_access_token())
         _, current, configs = admin.read()
         if current.get("serviceUrl") != url:
             admin.write(configs, service_url=url, expected_revision=current["revision"])

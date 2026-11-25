@@ -1,20 +1,7 @@
-﻿# Drive → GCS → RAG 색인을 수동으로 돌린다 (rag-daily-sync 워크플로 실행).
-# 사용: .\scripts\backfill.ps1               전체 백필 (첫 적재)
-#       .\scripts\backfill.ps1 -Delta        델타만 (스케줄러와 같은 동작)
-#       .\scripts\backfill.ps1 -NoWait       실행만 걸고 빠진다
-#
-# 스케줄러는 00:00 KST 에 돈다. 그걸 기다리지 않을 때 쓴다.
-#
-# 코퍼스가 ACTIVE 가 아니면 시작하지 않는다 - 색인이 통째로 실패하는데
-# 워크플로는 SUCCEEDED 로 끝나서 알아채기 어렵다(실측).
-
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
-  # 델타 모드. 기본은 전체 백필.
   [switch]$Delta,
-  # 실행을 걸고 완료를 기다리지 않는다.
   [switch]$NoWait,
-  # 전 학과 드라이브 대신 쓸 값 (쉼표 구분). 한 학과만 다시 적재할 때.
   [string]$DriveIds = "",
   [int]$MaxChanges = 0,
   [int]$IndexBatchSize = 0
@@ -28,7 +15,6 @@ if ($PSVersionTable.PSVersion.Major -ge 7) {
 Set-Location (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot "_load_env.ps1")
 . (Join-Path $PSScriptRoot "preflight.ps1")
-# DRIVE_IDS 는 전 학과 union 이 된다 — 기본 동작이 "전 학과 백필" 이다.
 Set-BaseDeployConfig | Out-Null
 $DEPT_MAP = Get-DepartmentMap
 
@@ -43,27 +29,21 @@ if (-not (Get-Command gcloud -ErrorAction SilentlyContinue)) {
 }
 
 $PROJECT_ID = Get-EnvOr GCP_PROJECT_ID ""
-$REGION = Get-EnvOr GCP_REGION "asia-northeast3"
+$REGION = $env:GCP_REGION
 $rawIds = if ($DriveIds) { $DriveIds } else { Get-EnvOr DRIVE_IDS "" }
 $ids = @($rawIds -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($ids.Count -eq 0) { throw "DRIVE_IDS 가 비어 있다" }
 
-# 코퍼스가 못 쓰는 상태면 색인이 전부 실패한다. 워크플로는 그래도 SUCCEEDED 로
-# 끝나므로 여기서 먼저 막는다.
 $tokenR = Get-GcloudText -GcloudArgs @("auth", "print-access-token")
 if (-not $tokenR.Ok) { throw "gcloud auth print-access-token 실패 - gcloud auth login" }
 $token = $tokenR.Text.Split("`n")[0].Trim()
 
-# 대상 드라이브가 속한 학과의 코퍼스만 본다 — 한 학과를 다시 적재하는데 남의
-# 학과 코퍼스 상태로 막히면 안 된다.
 $owners = @()
 foreach ($p in $DEPT_MAP.PSObject.Properties) {
   if (@($p.Value.driveIds | Where-Object { $ids -contains $_ }).Count -gt 0) {
     $owners += $p
   }
 }
-# 맵에 없는 드라이브를 넘기면 sync 가 그 문서를 전부 건너뛴다(UnknownDriveError).
-# 워크플로는 그래도 SUCCEEDED 로 끝나므로 여기서 먼저 막는다.
 $known = @($owners | ForEach-Object { $_.Value.driveIds } )
 $unknown = @($ids | Where-Object { $known -notcontains $_ })
 if ($unknown.Count -gt 0) {
