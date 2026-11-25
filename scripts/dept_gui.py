@@ -97,6 +97,12 @@ _GCLOUD_INSTALL: dict[str, Any] = {"status": "IDLE"}
 _SYNC_AUTH_LOCK = threading.Lock()
 _SYNC_AUTH_TOKEN = ""
 _SYNC_AUTH_TOKEN_EXPIRES = 0.0
+_ACCESS_TOKEN_LOCK = threading.Lock()
+_ACCESS_TOKEN = ""
+_ACCESS_TOKEN_EXPIRES = 0.0
+# gcloud 는 남은 수명이 300초 이하인 토큰만 갱신해서 준다(core/credentials/store.py
+# _CREDENTIALS_EXPIRY_WINDOW). 받은 토큰은 최소 300초 유효하므로 그보다 짧게 쓴다.
+_ACCESS_TOKEN_TTL_SECONDS = 240
 _SYNC_TARGET_CACHE_LOCK = threading.Lock()
 _SYNC_TARGET_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _SYNC_TARGET_CACHE_TTL_SECONDS = 30
@@ -1427,10 +1433,17 @@ def _stop_gcloud_login_process() -> None:
     _AUTH_PROCESS = None
 
 
+def _forget_access_token() -> None:
+    global _ACCESS_TOKEN, _ACCESS_TOKEN_EXPIRES
+    with _ACCESS_TOKEN_LOCK:
+        _ACCESS_TOKEN, _ACCESS_TOKEN_EXPIRES = "", 0.0
+
+
 def _clear_cloud_caches() -> None:
     global _SYNC_AUTH_TOKEN, _SYNC_AUTH_TOKEN_EXPIRES
     with _SYNC_AUTH_LOCK:
         _SYNC_AUTH_TOKEN, _SYNC_AUTH_TOKEN_EXPIRES = "", 0.0
+    _forget_access_token()
     for lock, cache in (
         (_SYNC_TARGET_CACHE_LOCK, _SYNC_TARGET_CACHE),
         (_CLOUD_DEPARTMENT_CONFIG_CACHE_LOCK, _CLOUD_DEPARTMENT_CONFIG_CACHE),
@@ -1815,13 +1828,19 @@ def _apply_resource_plan_overrides(
 
 
 def _provision_access_token() -> str:
-    gcloud = _gcloud_executable()
-    if not gcloud:
-        raise RuntimeError("gcloud를 찾을 수 없습니다.")
-    ok, token = _run_command([gcloud, "auth", "print-access-token", "--quiet"], timeout=20)
-    if not ok or not token.strip():
-        raise RuntimeError("gcloud 로그인이 필요합니다.")
-    return token.strip()
+    global _ACCESS_TOKEN, _ACCESS_TOKEN_EXPIRES
+    with _ACCESS_TOKEN_LOCK:
+        if _ACCESS_TOKEN and time.monotonic() < _ACCESS_TOKEN_EXPIRES:
+            return _ACCESS_TOKEN
+        gcloud = _gcloud_executable()
+        if not gcloud:
+            raise RuntimeError("gcloud를 찾을 수 없습니다.")
+        ok, token = _run_command([gcloud, "auth", "print-access-token", "--quiet"], timeout=20)
+        if not ok or not token.strip():
+            raise RuntimeError("gcloud 로그인이 필요합니다.")
+        _ACCESS_TOKEN = token.strip()
+        _ACCESS_TOKEN_EXPIRES = time.monotonic() + _ACCESS_TOKEN_TTL_SECONDS
+        return _ACCESS_TOKEN
 
 
 def _create_bucket_resource(name: str, project: str, region: str) -> str:
@@ -2175,6 +2194,7 @@ def retrieve_department_corpus(
         raise ValueError("질문은 1~1000자로 입력해 주세요.")
     limit = max(1, min(int(top_k), 10))
 
+    started = time.perf_counter()
     config = cloud_department_public_config(normalised)
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
@@ -2189,7 +2209,6 @@ def retrieve_department_corpus(
         f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/"
         f"{region}:retrieveContexts"
     )
-    started = time.perf_counter()
     status, body, _ = _http_post_json(
         url,
         {
@@ -2225,6 +2244,7 @@ def retrieve_department_corpus(
                 "score": item.get("score"),
             }
         )
+    answer = _corpus_answer_fields(text, contexts, project, token) if generate else {}
     return {
         "code": normalised,
         "departmentName": config["name"],
@@ -2233,7 +2253,7 @@ def retrieve_department_corpus(
         "query": text,
         "contexts": contexts,
         "latencyMs": round((time.perf_counter() - started) * 1000),
-        **(_corpus_answer_fields(text, contexts, project, token) if generate else {}),
+        **answer,
     }
 
 
@@ -3898,7 +3918,7 @@ def _firestore_client(project: str):
 
     ADC는 gcloud 활성 계정과 별도로 저장된다. 로컬 콘솔이 서로 다른 두 계정을
     섞으면 리소스 조회는 되지만 Firestore 삭제만 403으로 실패할 수 있으므로,
-    다른 관리 API와 동일하게 매번 활성 gcloud 계정의 토큰을 사용한다.
+    다른 관리 API와 동일하게 활성 gcloud 계정의 토큰을 사용한다.
     """
     try:
         from google.cloud import firestore
