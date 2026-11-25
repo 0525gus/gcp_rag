@@ -28,6 +28,7 @@ class EvidenceSource(TypedDict):
     path: str | None
     bundle: str | None
     sourceUri: str | None
+    attachmentUri: NotRequired[str | None]
     modifiedTime: str | None
     driveId: str | None
 

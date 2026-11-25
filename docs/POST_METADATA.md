@@ -16,7 +16,8 @@
 - 원본 name/path/Drive sourceUri를 보존하고 Firestore에 sourceTitle/websiteUrl/metadataFileId를 저장한다.
 - OCR/TXT/HWP 정규화 텍스트 및 바이너리 첨부의 경로 sidecar에 게시글 제목·주소를 반영한다.
 - 검색 청크의 제목·주소는 해당 파일의 Firestore 메타데이터로 연결한다. RAG 청크별 custom attributes를 등록하는 방식은 아니다.
-- MCP documents[].source에 title/websiteUrl을 추가한다. sourceUri는 원본 파일 주소를 유지한다.
+- MCP documents[].source에 title/websiteUrl을 추가한다. 교직원 키 응답의 sourceUri는 원본 파일 주소를 유지한다.
+  학생 키 응답은 sourceUri를 게시글 주소로 주고, PDF·HWP·Office 첨부의 원본 파일 주소는 attachmentUri로 준다.
 - GUI 검색 결과에는 게시글 원문과 원본 파일 링크를 구분한다.
 - 메타데이터는 ingest 때 읽으며, metadata.json 변경은 다음 변경분 동기화에서 자동 반영한다. 수동 재처리나 전체 동기화도 가능하다.
   metadata.json 변경은 다음 Drive 변경분 동기화에서 같은 폴더의 메타데이터 갱신 작업을 자동 생성한다.

@@ -1,6 +1,26 @@
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+_ATTACHMENT_SUFFIXES = (
+    ".pdf", ".hwp", ".hwpx", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+)
+
+
+def citation_links(
+    file_uri: str | None,
+    filename: str | None,
+    website_url: str | None,
+    *,
+    prefer_post: bool,
+) -> dict[str, str | None]:
+    file_link = citation_view_uri(file_uri, filename)
+    if not (prefer_post and website_url):
+        return {"sourceUri": file_link}
+    links: dict[str, str | None] = {"sourceUri": website_url}
+    if file_link and (filename or "").strip().lower().endswith(_ATTACHMENT_SUFFIXES):
+        links["attachmentUri"] = file_link
+    return links
+
 
 def citation_view_uri(uri: str | None, filename: str | None = None) -> str | None:
     if not uri:

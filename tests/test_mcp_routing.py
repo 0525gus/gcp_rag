@@ -103,6 +103,61 @@ def test_single_uri_scopes_and_cache_are_isolated_under_concurrent_requests(rout
     assert len(calls) == before
 
 
+def test_student_citations_link_the_post_and_keep_document_attachments(routed, monkeypatch):
+    app, client, _, _ = routed
+    post = "https://www.tukorea.ac.kr/bbs/ce/201/1/artclView.do?layout=unknown"
+    files = {"poster": "poster.png", "form": "form.hwp", "page": "content.html"}
+
+    class Rag:
+        def __init__(self, settings):
+            pass
+
+        def retrieve(self, query, **kwargs):
+            return [SearchHit(f"{fid} evidence", 0.1, SearchSource(fid)) for fid in files]
+
+    class Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
+        def get(self, fid):
+            return DocState(file_id=fid, drive_id="drive-cs", audience=Audience.STUDENT,
+                            status=DocStatus.INDEXED, name=files[fid],
+                            source_uri=f"https://drive.google.com/file/d/{fid}/view",
+                            website_url=None if fid == "page" else post)
+
+    monkeypatch.setattr(app, "RagEngineClient", Rag)
+    monkeypatch.setattr(app, "DocStateStore", lambda *_: Store())
+
+    def links(sources):
+        return {s["fileId"]: (s["sourceUri"], s.get("attachmentUri")) for s in sources}
+
+    def search_links(key):
+        docs = rpc(client, key)[1]["result"]["structuredContent"]["documents"]
+        return links(d["source"] for d in docs)
+
+    def channel_links(key):
+        response = client.post("/retrieval/vector", headers={"Authorization": f"Bearer {key}"},
+                               json={"query": "same", "top_k": 3, "candidate_k": 3})
+        assert response.status_code == 200, response.text
+        return links(row["source"] for row in response.json()["results"])
+
+    hwp_download = "https://drive.google.com/uc?export=download&id=form"
+    student = {
+        "poster": (post, None),
+        "form": (post, hwp_download),
+        "page": ("https://drive.google.com/file/d/page/view", None),
+    }
+    staff = {
+        "poster": ("https://drive.google.com/file/d/poster/view", None),
+        "form": (hwp_download, None),
+        "page": ("https://drive.google.com/file/d/page/view", None),
+    }
+    assert search_links("cs-student") == student
+    assert channel_links("cs-student") == student
+    assert search_links("cs-staff") == staff
+    assert channel_links("cs-staff") == staff
+
+
 def test_unknown_key_revocation_and_registry_failure_fail_closed(routed):
     _, client, current, calls = routed
     assert rpc(client, "bad")[0] == 401

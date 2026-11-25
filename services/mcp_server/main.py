@@ -35,7 +35,7 @@ from shared.search_postprocess import (  # noqa: E402
 )
 
 from shared.html_text import clean_html_evidence  # noqa: E402
-from shared.source_links import citation_view_uri  # noqa: E402
+from shared.source_links import citation_links  # noqa: E402
 from shared.mcp_routing import RouteRegistry, SearchScope  # noqa: E402
 from shared.model_reranker import (  # noqa: E402
     RerankRecord,
@@ -165,7 +165,9 @@ def search(
     작성합니다. documents의 각 항목은 fileId로 구분한 문서이고, chunks는 그
     문서에서 검색된 부분입니다. 청크는 원문 전체나 연속된 구간을 보장하지 않습니다.
     citationId와 source를 사용해 인용하고, 문서 사이의 관계를 근거 없이 추론하지
-    마세요. sourceUri는 일반 문서의 미리보기 링크이며 HWP/HWPX 문서에서는 다운로드
+    마세요. sourceUri는 답변에 붙일 출처 링크입니다. 게시글에서 수집한 자료는 게시글
+    주소일 수 있고, 이때 첨부 원본 파일 링크는 attachmentUri로 함께 올 수 있습니다.
+    그 밖의 sourceUri는 원본 파일 미리보기 링크이며 HWP/HWPX 문서에서는 다운로드
     링크입니다. websiteUrl이 있으면 수집한 게시글 원문 주소이며 title은 게시글 제목입니다.
     검색 결과만으로 답할 수 없으면 확인되지 않은 부분을 밝혀 주세요.
     같은 정보를 얻기 위해 표현만 바꿔 반복 호출할 필요는 없습니다.
@@ -422,9 +424,11 @@ def search(
             "bundle": meta.bundle if meta else None,
             "title": meta.source_title if meta else None,
             "websiteUrl": meta.website_url if meta else None,
-            "sourceUri": citation_view_uri(
+            **citation_links(
                 (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri,
                 display_name,
+                meta.website_url if meta else None,
+                prefer_post=bool(scope and scope.audience == "student"),
             ),
             "modifiedTime": (meta.modified_time if meta else hit.source.modified_time),
             "driveId": meta.drive_id if meta else None,
@@ -578,9 +582,11 @@ def retrieve_channel(
             "bundle": bundles[index] or None,
             "title": meta.source_title if meta else None,
             "websiteUrl": meta.website_url if meta else None,
-            "sourceUri": citation_view_uri(
+            **citation_links(
                 (meta.source_uri if meta and meta.source_uri else None) or hit.source.source_uri,
                 titles[index],
+                meta.website_url if meta else None,
+                prefer_post=bool(scope and scope.audience == "student"),
             ),
             "modifiedTime": (meta.modified_time if meta else hit.source.modified_time),
             "driveId": (meta.drive_id if meta else None),
