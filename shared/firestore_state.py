@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -31,6 +32,17 @@ class DocStateStore:
         data = snap.to_dict() or {}
         data.setdefault("fileId", file_id)
         return DocState.from_firestore(data)
+
+    def get_many(self, file_ids: Iterable[str]) -> dict[str, DocState | None]:
+        found: dict[str, DocState | None] = dict.fromkeys(file_ids)
+        if not found:
+            return found
+        for snap in self._db.get_all([self._col.document(file_id) for file_id in found]):
+            if snap.exists:
+                data = snap.to_dict() or {}
+                data.setdefault("fileId", snap.id)
+                found[snap.id] = DocState.from_firestore(data)
+        return found
 
     def upsert(self, state: DocState) -> None:
         state.last_synced_at = datetime.now(timezone.utc)

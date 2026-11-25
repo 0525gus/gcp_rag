@@ -278,7 +278,7 @@ def search(
         else None
     )
     store = DocStateStore(request_settings)
-    meta_cache: dict[str, Any] = {}
+    meta_cache: dict[str, Any] = store.get_many(hit.source.file_id for hit in raw_hits)
 
     def _meta(file_id: str) -> Any:
         if file_id not in meta_cache:
@@ -490,7 +490,7 @@ def retrieve_channel(
 
     store_started = time.perf_counter()
     store = DocStateStore(request_settings)
-    meta_cache: dict[str, Any] = {}
+    meta_cache: dict[str, Any] = store.get_many(hit.source.file_id for hit in raw_hits)
 
     def _meta(file_id: str) -> Any:
         if file_id not in meta_cache:

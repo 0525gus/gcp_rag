@@ -329,6 +329,9 @@ def test_search_still_returns_top_k_after_filtering_hidden_docs(
             return hits[:top_k]
 
     class _Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def __init__(self, *_a: Any) -> None:
             pass
 
@@ -375,6 +378,9 @@ def test_search_fills_top_k_at_the_maximum_too(
             return pool[:top_k]
 
     class _Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def __init__(self, *_a: Any) -> None:
             pass
 

@@ -47,6 +47,9 @@ def routed(monkeypatch):
                                 "cs-staff", "ee-student", "unknown"]]
 
     class Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def get(self, fid):
             if fid == "unknown":
                 return None

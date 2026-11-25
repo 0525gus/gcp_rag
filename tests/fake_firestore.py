@@ -23,6 +23,12 @@ class MemoryDb:
     def batch(self):
         return Transaction(self)
 
+    def get_all(self, refs, transaction=None):
+        for ref in refs:
+            snap = ref.get(transaction=transaction)
+            snap.id = ref.id
+            yield snap
+
 
 class Ref:
     def __init__(self, db, path):
