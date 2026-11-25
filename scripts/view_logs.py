@@ -1,22 +1,3 @@
-"""Cloud Logging / Log Explorer 조회 헬퍼.
-
-Cloud Run(rag-sync / rag-parser / rag-mcp) 로그를 터미널에서 보거나
-콘솔 Log Explorer로 바로 연다. gcloud 인증이 필요하다.
-
-사용:
-  # 최근 sync 로그 50줄
-  python scripts/view_logs.py sync
-
-  # ERROR 이상만, 최근 6시간
-  python scripts/view_logs.py mcp --severity=ERROR --freshness=6h
-
-  # 텍스트 검색 + 콘솔 Log Explorer 열기
-  python scripts/view_logs.py all -q "Reconciliation" --open
-
-  # 필터만 출력 (복사용)
-  python scripts/view_logs.py parser --filter-only
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -39,11 +20,6 @@ SEVERITY_ORDER = ("DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRI
 
 
 def _mcp_service_names() -> list[str]:
-    """전 학과 MCP 서비스 이름. 이름은 규칙으로 만든다(저장하지 않는다).
-
-    학과가 늘면 로그 대상도 같이 는다 — 목록을 손으로 적어 두면 새 학과 로그가
-    조용히 빠진다. Cloud 학과 등록부가 곧 목록이다.
-    """
     return [
         f"rag-mcp-{code}-{audience}"
         for code in list_departments()
@@ -98,7 +74,6 @@ def build_filter(
         parts.append(f"severity>={sev}")
 
     if query:
-        # textPayload / jsonPayload.message 둘 다
         q = query.replace('"', '\\"')
         parts.append(
             f'(textPayload:"{q}" OR jsonPayload.message:"{q}" OR protoPayload.status.message:"{q}")'
@@ -108,7 +83,6 @@ def build_filter(
 
 
 def explorer_url(project: str, log_filter: str) -> str:
-    # 콘솔 Log Explorer 딥링크 (query 파라미터)
     encoded = urllib.parse.quote(log_filter, safe="")
     return (
         f"https://console.cloud.google.com/logs/query"
@@ -188,7 +162,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # parse_args 뒤에 부른다 — 앞에 두면 `--help`도 Cloud 인증을 요구한다.
     load_config_env()
 
     project = _project()

@@ -1,5 +1,3 @@
-"""Google Drive Changes API (Shared Drives)."""
-
 from __future__ import annotations
 
 import io
@@ -31,7 +29,6 @@ NUM_RETRIES = 5
 
 
 def parse_drive_size(raw: Any) -> int | None:
-    """Drive 는 size 를 문자열로 준다. 없거나 이상하면 None(=크기 미상)."""
     try:
         return int(raw) if raw is not None else None
     except (TypeError, ValueError):
@@ -61,25 +58,11 @@ class DriveClient:
     def list_changes(
         self, drive_id: str, page_token: str, *, max_changes: int | None = None
     ) -> tuple[list[DriveChange], str, bool]:
-        """changes.list 페이지네이션. 반환: (변경 목록, 다음 토큰, 더 남았는지).
-
-        ``max_changes`` 를 주면 그 건수를 채우는 즉시 멈추고 재개용 토큰을 돌려준다.
-        델타 전체를 한 번에 반환하면 호출측(Cloud Workflows)의 변수 한도 512KB를
-        넘겨 실행 자체가 죽고, 토큰이 커밋되지 않아 다음 실행의 델타가 더 커진다 —
-        한 번 넘으면 자력으로 못 돌아온다. 그래서 여기서 끊는다.
-
-        끝까지 읽었으면 ``newStartPageToken`` 과 ``False`` 를, 중간에 끊었으면
-        ``nextPageToken`` 과 ``True`` 를 돌려준다. 둘 다 다음 ``changes.list`` 의
-        ``pageToken`` 으로 그대로 쓸 수 있으므로 호출측은 구분할 필요가 없다.
-        """
         changes: list[DriveChange] = []
         token: str | None = page_token
         new_start: str | None = None
 
         while token:
-            # 한 페이지를 통째로 받은 뒤에 한도를 재면 최대 pageSize-1 건을 초과해
-            # 돌려준다 — maxChanges=150 을 주면 200 건이 오는 식이라, 한도를 낮춰
-            # 잡으려는 조정이 반대로 돈다. 남은 몫만큼만 요청한다.
             page_size = 100
             if max_changes is not None:
                 page_size = max(1, min(page_size, max_changes - len(changes)))
@@ -114,11 +97,9 @@ class DriveClient:
             if "newStartPageToken" in resp:
                 new_start = resp["newStartPageToken"]
             if max_changes is not None and token and len(changes) >= max_changes:
-                # 재개 지점은 nextPageToken. 이 배치를 커밋하면 다음 호출이 이어받는다.
                 return changes, token, True
 
         if new_start is None:
-            # 변경이 없으면 기존 토큰 유지
             new_start = page_token
         return changes, new_start, False
 
@@ -139,7 +120,6 @@ class DriveClient:
         return buffer.getvalue()
 
     def export_file(self, file_id: str, export_mime: str) -> bytes:
-        """Google Docs/Sheets/Slides → 바이너리 export."""
         request = self._service.files().export_media(
             fileId=file_id, mimeType=export_mime
         )
@@ -190,7 +170,6 @@ class DriveClient:
         return result
 
     def read_post_metadata(self, file_id: str) -> tuple[PostMetadata, str]:
-        """Read only a single metadata.json in the document's immediate folder."""
         parents = self.get_parents(file_id)
         if len(parents) != 1:
             return PostMetadata(), ""
@@ -224,7 +203,6 @@ class DriveClient:
         max_depth: int = 32,
         strict_metadata: bool = False,
     ) -> PathContext:
-        """parents를 따라 올라가 폴더명 경로 + 직계 자료묶음(bundle) 계산."""
         folder_names_leaf_to_root: list[str] = []
         current = list(parents) if parents is not None else []
         if parents is None:
@@ -257,7 +235,7 @@ class DriveClient:
         context = build_path_context(folder_names_leaf_to_root, file_name)
         try:
             metadata, metadata_id = self.read_post_metadata(file_id)
-        except Exception as exc:  # A malformed optional sidecar does not fail the document.
+        except Exception as exc:
             logger.warning("post metadata ignored file=%s: %s", file_id, exc)
             if strict_metadata:
                 raise
@@ -272,14 +250,11 @@ class DriveClient:
         *,
         parents: list[str] | None = None,
     ) -> bool:
-        """SYNC_FOLDER_IDS 범위 안이면 True. folder_ids 비면 전체 허용."""
         allow = {f for f in folder_ids if f}
         if not allow:
             return True
         initial = parents
         if initial is None:
-            # 조회 실패를 범위 밖(False)으로 바꾸면 일시적 Drive 오류가 문서
-            # 삭제로 이어진다. 호출자까지 전파해 배치와 토큰 커밋을 중단한다.
             initial = self.get_parents(file_id)
         return is_under_folder_allowlist(
             file_id=file_id,
@@ -289,7 +264,6 @@ class DriveClient:
         )
 
     def iter_all_files(self, drive_id: str) -> Iterator[dict[str, Any]]:
-        """초기 풀 스캔용 (bootstrap)."""
         page_token: str | None = None
         while True:
             resp = (
@@ -313,7 +287,6 @@ class DriveClient:
                 break
 
     def iter_files_under_folders(self, folder_ids: list[str]) -> Iterator[dict[str, Any]]:
-        """지정 폴더 트리만 BFS로 파일 나열 (폴더 자체는 yield 안 함)."""
         folder_mime = "application/vnd.google-apps.folder"
         queue = [fid for fid in folder_ids if fid]
         seen_folders: set[str] = set()
@@ -351,7 +324,6 @@ class DriveClient:
     def iter_backfill_files(
         self, drive_id: str, folder_ids: list[str] | None = None
     ) -> Iterator[dict[str, Any]]:
-        """초기 적재용. folder_ids 있으면 그 트리만, 없으면 드라이브 전체."""
         folders = [f for f in (folder_ids or []) if f]
         if folders:
             yield from self.iter_files_under_folders(folders)

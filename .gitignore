@@ -25,14 +25,12 @@ Thumbs.db
 *.log
 credentials.json
 service-account*.json
-# scripts/cleanup_orphans.py --csv 산출물 (실행 근거 기록, 커밋 대상 아님)
 orphans*.csv
 .terraform/
 *.tfstate*
 .gcloud/
 sample/*
 
-# 로컬 실행/평가 산출물 — 재생성 가능하며 소스 커밋 대상이 아니다.
 outputs/
 tmp/
 tests/_bench_out/

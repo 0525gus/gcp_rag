@@ -102,8 +102,6 @@ test("ships the finished Korean console without starter artifacts", async () => 
   assert.match(page, /redirect\("\/console\/index\.html"\)/);
   assert.match(layout, /lang="ko"/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
-  // Documentation and generated Drive links are intentional. Runtime assets
-  // must remain local; an external URL ban also rejects valid source links.
   assert.doesNotMatch(html, /<(?:script|link)\b[^>]*(?:src|href)=["']https?:\/\//i);
   await assert.rejects(access(new URL("../app/_sites-preview/SkeletonPreview.tsx", import.meta.url)));
 });

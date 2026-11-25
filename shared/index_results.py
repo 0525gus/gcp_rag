@@ -1,14 +1,7 @@
-"""Conservative historical file-result classification; never rewrites Workflow state."""
-
 from __future__ import annotations
 
 
 def classify_files(job, parts, documents, evidence, *, version_matches):
-    """Evidence is scoped to this job's time, corpus and exact requested URI.
-
-    Metadata success alone never proves that the body succeeded. Historical
-    evidence is not permission to change today's document or retry checkpoints.
-    """
     rows = []
     for fid in dict.fromkeys(job.get("fileIds") or []):
         doc = documents.get(fid) or {}

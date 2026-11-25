@@ -1,5 +1,3 @@
-"""PDF 전환 → Document AI Layout Parser 폴백."""
-
 from __future__ import annotations
 
 import logging
@@ -22,7 +20,6 @@ class FallbackParseError(RuntimeError):
 
 
 def hwp_to_pdf(source_path: Path, out_dir: Path) -> Path:
-    """LibreOffice 헤드리스로 PDF 변환."""
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
         raise FallbackParseError("LibreOffice(soffice) not found in PATH")
@@ -50,7 +47,6 @@ def hwp_to_pdf(source_path: Path, out_dir: Path) -> Path:
 
     pdf_path = out_dir / f"{source_path.stem}.pdf"
     if not pdf_path.exists():
-        # 일부 환경에서 확장자 처리 차이
         candidates = list(out_dir.glob("*.pdf"))
         if not candidates:
             raise FallbackParseError("PDF output not found after conversion")
@@ -93,7 +89,6 @@ def parse_with_document_ai(
 def fallback_parse(
     hwp_bytes: bytes, *, filename: str, settings: Settings | None = None
 ) -> tuple[str, ParseMetrics]:
-    """HWP/HWPX → PDF → Document AI Layout Parser."""
     suffix = ".hwpx" if filename.lower().endswith(".hwpx") else ".hwp"
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
@@ -105,10 +100,8 @@ def fallback_parse(
 
 
 def _document_to_markdown(document: documentai.Document) -> str:
-    """Layout Parser 결과에서 텍스트·표를 마크다운으로 직렬화."""
     parts: list[str] = []
 
-    # document_layout이 있으면 우선
     layout = getattr(document, "document_layout", None)
     blocks = getattr(layout, "blocks", None) if layout else None
     if blocks:
@@ -122,7 +115,6 @@ def _document_to_markdown(document: documentai.Document) -> str:
         if parts:
             return "\n\n".join(p.strip() for p in parts if p and p.strip())
 
-    # 폴백: 전체 텍스트
     return (document.text or "").strip()
 
 

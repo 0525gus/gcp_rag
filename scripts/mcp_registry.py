@@ -1,5 +1,3 @@
-"""Cloud control plane for unified MCP: Secret Manager configs + hashed Firestore routes."""
-
 from __future__ import annotations
 
 import base64
@@ -87,7 +85,6 @@ class RegistryAdmin:
         return snap, record, configs
 
     def write(self, configs: dict, *, service_url: str = "", expected_revision: str | None = None):
-        # Freeze the caller's input so routes and their secret cannot diverge during HTTP calls.
         configs = copy.deepcopy(configs)
         snap, previous, _ = self.read()
         if expected_revision is not None and (previous or {}).get("revision") != expected_revision:
@@ -135,8 +132,6 @@ class RegistryAdmin:
         if code not in configs:
             return
         disabled = set(configs[code].get("mcpDisabledAudiences", []))
-        # 이미 비활성화된 범위 때문에 Secret Manager 새 버전과 Firestore revision을
-        # 다시 만들지 않는다. teardown 재시도는 이 경로를 자주 지난다.
         if audience in disabled:
             return current
         disabled.add(audience)

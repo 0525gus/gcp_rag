@@ -1,5 +1,3 @@
-"""단위 테스트 — GCP 불필요."""
-
 from __future__ import annotations
 
 import sys
@@ -61,16 +59,11 @@ def test_classify_routes():
 
 
 def test_no_extractor_formats_are_not_skipped():
-    """SKIP 은 GCS 업로드도 사이드카도 없다 — 파일명으로도 검색되지 않는다.
-
-    본문을 못 뽑는 형식이라도 FILE_COPY 로 받아 경로 사이드카는 남긴다.
-    """
     assert classify_route("application/zip", "a.zip") == RouteKind.FILE_COPY
     assert classify_route("application/vnd.ms-excel", "a.xls") == RouteKind.FILE_COPY
 
 
 def test_macro_enabled_xlsx_reaches_the_spreadsheet_branch():
-    """.xlsm 은 _SPREADSHEET_COPY_MIMES 에 있는데도 SKIP 되고 있었다."""
     from services.sync.main import _SPREADSHEET_COPY_MIMES  # noqa: PLC0415
 
     mime = "application/vnd.ms-excel.sheet.macroenabled.12"
@@ -79,7 +72,6 @@ def test_macro_enabled_xlsx_reaches_the_spreadsheet_branch():
 
 
 def test_sidecar_only_mimes_are_a_subset_of_file_copy():
-    """사이드카 전용 목록에 넣었는데 FILE_COPY 가 아니면 SKIP 으로 새어 나간다."""
     from shared.mime_types import FILE_COPY_MIME, SIDECAR_ONLY_MIME  # noqa: PLC0415
 
     assert SIDECAR_ONLY_MIME <= FILE_COPY_MIME
@@ -138,13 +130,11 @@ def test_path_breadcrumb_bundle():
         title="안내.pdf",
         body="# 본문\n내용",
     )
-    # 제목·자료묶음은 한 번씩만. 경로는 싣지 않는다(거의 전 문서가 공유해 신호가 없음)
     assert md.count("안내.pdf") == 1
     assert md.count("2026 digital training") == 1
     assert "경로:" not in md
     assert "# 본문" in md and "내용" in md
 
-    # 재파싱해도 머리말이 두 겹으로 쌓이지 않아야 한다
     again = build_breadcrumb_markdown(
         path=ctx.path,
         bundle=ctx.bundle,
@@ -154,7 +144,6 @@ def test_path_breadcrumb_bundle():
     assert again == md
     assert "내용" in strip_breadcrumb(again)
 
-    # GCS 에 남아있는 구형(YAML frontmatter) 산출물도 걷어내야 한다
     legacy = (
         "---\n"
         f"path: {ctx.path}\n"
@@ -172,10 +161,8 @@ def test_path_breadcrumb_bundle():
     )
     assert migrated.strip() == md.strip()
 
-    # 본문이 그냥 `# 제목` 으로 시작하는 경우는 헤더로 오인해 먹으면 안 된다
     assert strip_breadcrumb("# 진짜 제목\n\n본문") == "# 진짜 제목\n\n본문"
 
-    # sidecar 는 머리말이 유일한 내용이라 예전 그대로 둔다
     side = build_breadcrumb_markdown(
         path=ctx.path, bundle=ctx.bundle, title="슬라이드.pptx"
     )
@@ -221,14 +208,8 @@ def test_search_postprocess():
         ),
     ]
     out = postprocess_hits(hits, top_k=3)
-    # 들어온 순서를 그대로 존중한다(83563ad). score 를 거리로 볼지 유사도로 볼지
-    # 추측해 여기서 다시 정렬하면 추측이 틀렸을 때 순위가 통째로 뒤집힌다.
-    # c 는 unescape 하면 a 와 본문이 같아진다 — 같은 글이 두 파일로 색인된
-    # 경우라 뒤엣것을 버린다. 그래서 3칸을 요청해도 2건만 나온다.
     assert [h.source.file_id for h in out] == ["a", "b"]
-    # 확장자는 떼고, 문서당 한 줄로 접는다
     assert len({h.source.file_id for h in out}) == len(out)
-    # 같은 문서의 청크 둘은 버리지 않고 이어 붙인다
     assert "의무상담 안내" in out[1].text and "중복" in out[1].text
     assert "&lt;" not in out[0].text and "표1" in out[0].text
 
@@ -285,7 +266,6 @@ def test_rhwp_parser_mocked(monkeypatch):
 
 
 def test_missing_bucket_env_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
-    """버킷 env 가 비면 기동 시점에 죽는다 — 빈 버킷명으로 조용히 도는 것보다 낫다."""
     monkeypatch.setenv("GCP_PROJECT_ID", "p")
     monkeypatch.setenv("GCS_HWP_ORIGINAL_BUCKET", "hwp")
     monkeypatch.delenv("GCS_SOURCE_BUCKET", raising=False)

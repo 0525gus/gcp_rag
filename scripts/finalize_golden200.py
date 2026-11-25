@@ -1,5 +1,3 @@
-"""Merge Golden200 corrections, add verified weakness tags, and validate all sources."""
-
 from __future__ import annotations
 
 import json

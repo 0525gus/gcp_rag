@@ -1,5 +1,3 @@
-"""Verify live scope isolation and compare CPU revisions without persisting keys or evidence."""
-
 import argparse
 import asyncio
 import json
@@ -80,7 +78,6 @@ async def run(args):
     report = {"targets": targets, "registryRevision": registry["revision"], "verification": [],
               "timings": {}, "notes": ["End-to-end client timing; includes network and Vertex/Firestore latency.",
                                         "First connection is not a controlled cold-start measurement."]}
-    # One URI, four credentials, simultaneous identical questions.
     for label, url in targets.items():
         scopes = [(code, aud, cfg["keys"][aud]) for code, cfg in configs.items()
                   for aud in ("staff", "student") if cfg.get("corpora", {}).get(aud)]
@@ -100,7 +97,6 @@ async def run(args):
     if args.benchmark:
         key = configs["cs"]["keys"]["staff"]
         timings = defaultdict(list)
-        # Alternate revision order each round to reduce backend warming/order bias.
         names = list(targets)
         for round_index in range(3):
             for label in names if round_index % 2 == 0 else names[::-1]:
@@ -121,7 +117,7 @@ async def run(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Verify live scope isolation and compare CPU revisions without persisting keys or evidence.')
     parser.add_argument("--target", action="append", required=True, help="label=https://service/mcp")
     parser.add_argument("--benchmark", action="store_true")
     parser.add_argument("--out", type=Path, required=True)

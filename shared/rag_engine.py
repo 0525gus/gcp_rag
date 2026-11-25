@@ -1,5 +1,3 @@
-"""Vertex AI RAG Engine 클라이언트 (import / delete / retrieve)."""
-
 from __future__ import annotations
 
 import logging
@@ -27,9 +25,7 @@ logger = logging.getLogger(__name__)
 # (초과 시 InvalidArgument: "GCS URIs cannot be specified more than 25 times.")
 MAX_IMPORT_URIS = 25
 
-# corpus_name → (만든 시각, fileId→resource_name 인덱스)
 _CORPUS_INDEX_CACHE: dict[str, tuple[float, dict[str, list[str]]]] = {}
-# 인덱스를 만든 뒤 import 된 fileId — 이 id 를 건드릴 때만 다시 만든다
 _CORPUS_DIRTY_IDS: dict[str, set[str]] = {}
 _INDEX_TTL_SECONDS = 300.0
 
@@ -43,19 +39,6 @@ _RAG_LIST_PAGE_RETRIES = 10
 
 @dataclass(frozen=True)
 class ImportOutcome:
-    """import 한 번의 실제 결과.
-
-    `uris` 는 우리가 **보낸** 것이고 나머지 셋은 Vertex 가 **돌려준** 것이다.
-    이 둘을 구분하지 않은 것이 오래된 결함이었다 — 예전에는 보낸 목록을 그대로
-    성공으로 돌려줘서, import 에서 거부된 파일이 그대로 INDEXED 로 기록됐다.
-    실측 사례: xlsx 27건이 상시 import 거부 중이었는데 집계에는 전부 성공으로
-    잡혀 있었다(services/sync/main.py `_ingest_direct` 주석). 그때는 xlsx 라는
-    증상만 개별 차단했고 **검출 능력은 생기지 않았다.** 이 타입이 그 자리다.
-
-    `rag.import_files` 는 호출 자체가 실패할 때만 예외를 던진다. 파일 단위
-    실패는 예외가 아니라 응답의 카운트로 오므로, 여기서 읽지 않으면 볼 방법이 없다.
-    """
-
     uris: list[str]
     imported: int
     failed: int
@@ -65,25 +48,10 @@ class ImportOutcome:
 
     @property
     def ok(self) -> bool:
-        """보낸 것이 코퍼스에 들어가 있는가.
-
-        `skipped` 는 **성공 쪽으로 센다.** 의미가 확정돼 있지 않은데, 유력한
-        해석은 '이미 코퍼스에 있어 건너뜀'이고 그건 우리가 원하는 최종 상태다.
-        실패로 세면 pre-delete 를 생략하는 경로(`reindex-pending` 비-force)에서
-        **그 문서가 영원히 PARSED 에 머물며 매일 다시 import 된다** — 회수하려고
-        만든 장치가 무한 루프가 되는 것이다.
-
-        `skipped` 가 사실은 '지원하지 않아 건너뜀'이더라도 손실은 없다. 이
-        작업의 본질은 **관측**이고, skipped 는 아래 로그에 WARNING 으로 그대로
-        남는다. 상태 전이 가드는 부차적이며, 틀리더라도 루프를 만드는 쪽으로
-        틀려서는 안 된다.
-        """
         return self.failed == 0 and (self.imported + self.skipped) >= len(self.uris)
 
 
 class RagImportError(RuntimeError):
-    """RAG import가 요청 전체를 확실히 처리하지 못했을 때 발생한다."""
-
     def __init__(
         self,
         *,
@@ -108,11 +76,10 @@ class RagImportError(RuntimeError):
 
 
 class RagImportThrottledError(RuntimeError):
-    """Vertex RAG 요청 쿼터가 재시도 한도까지 복구되지 않았을 때의 오류."""
+    pass
 
 
 def _contains_exception(exc: BaseException, kinds: tuple[type[BaseException], ...]) -> bool:
-    """SDK wrapper의 cause/context/args 안에 든 실제 API 예외까지 찾는다."""
     pending: list[BaseException] = [exc]
     seen: set[int] = set()
     while pending:
@@ -129,12 +96,6 @@ def _contains_exception(exc: BaseException, kinds: tuple[type[BaseException], ..
 
 
 def _with_throttle_retry(fn: Any, *, what: str, max_retries: int = 6) -> Any:
-    """RPM 초과(429)만 지수 백오프로 재시도한다.
-
-    import 에만 재시도가 걸려 있었다. list/delete 는 배치 하나가 수십 번 부르는데도
-    무방비라, 쿼터를 넘기면 그대로 호출측까지 튀어 500 이 되고 — SKIP 분기처럼
-    워크플로우 재시도가 없는 경로에서는 pageToken 이 영구 미커밋으로 굳는다.
-    """
     delay = 1.0
     last: Exception | None = None
     for attempt in range(max_retries):
@@ -160,13 +121,6 @@ class RagEngineClient:
         corpus_name: str | None = None,
         credentials: Any | None = None,
     ) -> None:
-        """corpus_name 을 주면 그 코퍼스를, 없으면 설정의 기본(=교직원용)을 쓴다.
-
-        학생/교직원 코퍼스를 나누면서 인스턴스마다 대상이 달라진다. 아래 인덱스
-        캐시는 처음부터 corpus_name 으로 키잉돼 있어(_CORPUS_INDEX_CACHE) 코퍼스가
-        여럿이어도 서로 섞이지 않는다 — 인스턴스 속성 스냅샷으로는 코퍼스가 둘
-        이상일 때 서로 덮어쓴다.
-        """
         self.settings = settings or get_settings()
         agentplatform.init(
             project=self.settings.gcp_project_id,
@@ -183,13 +137,6 @@ class RagEngineClient:
         chunk_overlap: int | None = None,
         max_retries: int = 5,
     ) -> ImportOutcome:
-        """GCS 마크다운을 코퍼스로 증분 import. RPM 제한 대비 재시도.
-
-        청킹 값은 RAG_CHUNK_SIZE / RAG_CHUNK_OVERLAP 로 조정한다(인자 우선).
-
-        반환값은 **보낸 목록이 아니라 실제 결과**다(`ImportOutcome`). 호출측은
-        `ok` 를 보고 상태 전이를 결정할 것 — 그러라고 있는 값이다.
-        """
         if not gcs_uris:
             return ImportOutcome(uris=[], imported=0, failed=0, skipped=0)
 
@@ -210,7 +157,7 @@ class RagEngineClient:
             batch = gcs_uris[i : i + MAX_IMPORT_URIS]
             batches.append(self._import_batch(batch, transformation, max_retries))
             if i + MAX_IMPORT_URIS < len(gcs_uris):
-                time.sleep(2.0)  # 서브배치 사이 쿼터 여유 확보
+                time.sleep(2.0)
 
         total = ImportOutcome(
             uris=[u for b in batches for u in b.uris],
@@ -220,20 +167,11 @@ class RagEngineClient:
             results=tuple(result for b in batches for result in b.results),
             result_sinks=tuple(sink for b in batches for sink in b.result_sinks),
         )
-        # 캐시를 통째로 버리면 다음 배치가 또 코퍼스를 훑는다.
-        # 이번에 건드린 id 만 dirty 로 두고 나머지 캐시는 살린다.
-        # (실패분도 포함한다 — 코퍼스에 반쯤 들어갔을 수 있어 인덱스를 믿으면 안 된다)
         self._mark_dirty({extract_file_id(u) for u in total.uris})
         return total
 
     @staticmethod
     def _read_outcome(gcs_uris: list[str], response: Any) -> ImportOutcome:
-        """응답에서 실제 색인 결과를 꺼낸다.
-
-        예전에는 `imported_rag_files_count` 를 로그로 흘리고 버렸다. 응답에는
-        `failed_rag_files_count` / `skipped_rag_files_count` 도 함께 실려 있다.
-        """
-
         def _count(field: str) -> int | None:
             raw = getattr(response, field, None)
             return int(raw) if raw is not None else None
@@ -286,8 +224,6 @@ class RagEngineClient:
                         result_sinks=(result_sink,),
                     )
                 if outcome.skipped:
-                    # ok 판정에는 성공으로 세지만(위 docstring) 정상 경로에서
-                    # 나올 값이 아니다 — pre-delete 가 놓친 것이 있다는 뜻이다.
                     logger.warning(
                         "RAG import skipped=%s corpus=%s uris=%s — pre-delete 누락 의심",
                         outcome.skipped, self.corpus_name, len(gcs_uris),
@@ -388,7 +324,7 @@ class RagEngineClient:
                     sink_uri,
                 )
                 return results
-            except Exception as exc:  # mapping 관측 실패가 실제 색인을 실패시키면 안 됨
+            except Exception as exc:
                 last_error = exc
                 if attempt < 3:
                     time.sleep(delay)
@@ -397,12 +333,6 @@ class RagEngineClient:
         return []
 
     def list_files(self) -> list[Any]:
-        """코퍼스 파일을 페이지별로, 진행 지점을 잃지 않고 조회한다.
-
-        SDK pager 전체를 ``list()``로 감싸 재시도하면 60번째 페이지에서 429가 난
-        경우에도 첫 페이지부터 다시 읽는다. 페이지 토큰을 호출자가 관리해야 현재
-        페이지에서만 기다렸다가 이어갈 수 있다.
-        """
         files: list[Any] = []
         page_token: str | None = None
         page_number = 0
@@ -447,16 +377,6 @@ class RagEngineClient:
         return files
 
     def _file_index(self, wanted: set[str] | None = None) -> dict[str, list[str]]:
-        """fileId → RagFile resource_name 목록.
-
-        list_files() 는 코퍼스 전체를 훑으므로 배치마다 부르면
-        O(배치수 × 코퍼스)가 된다. 1,209건 재색인 때 이게 지배적인 비용이었다.
-        같은 프로세스 안에서는 짧은 TTL 로 재사용한다.
-
-        import 이 끝날 때마다 캐시를 통째로 버리면 재색인(배치별 delete→import)
-        에서는 캐시가 한 번도 안 맞는다. 그래서 import 된 id 만 dirty 로 두고,
-        **그 id 를 실제로 건드릴 때만** 다시 만든다.
-        """
         dirty = _CORPUS_DIRTY_IDS.get(self.corpus_name, set())
         cached = _CORPUS_INDEX_CACHE.get(self.corpus_name)
         if (
@@ -473,9 +393,6 @@ class RagEngineClient:
                 continue
             display = getattr(f, "display_name", "") or ""
             source_uri = getattr(f, "source_uri", None)
-            # source 산출물은 {fileId}{.partN}{확장자} 꼴이라 여기서 되돌린다.
-            # display_name 이 잘렸을 때를 대비해 source_uri 도 같이 넘긴다 —
-            # 부분문자열 비교로 떨어지면 f1 을 지우며 f10 까지 지운다.
             index.setdefault(extract_file_id(display, source_uri), []).append(
                 resource_name
             )
@@ -485,27 +402,17 @@ class RagEngineClient:
         return index
 
     def _mark_dirty(self, file_ids: set[str]) -> None:
-        """import 으로 새 RagFile 이 생긴 id 표시 — 다음에 건드리면 재구축."""
         if file_ids:
             _CORPUS_DIRTY_IDS.setdefault(self.corpus_name, set()).update(file_ids)
 
     def invalidate_file_index(self) -> None:
-        """코퍼스가 크게 바뀐 뒤 캐시를 통째로 버린다."""
         _CORPUS_INDEX_CACHE.pop(self.corpus_name, None)
         _CORPUS_DIRTY_IDS.pop(self.corpus_name, None)
 
     def delete_by_file_id(self, file_id: str) -> bool:
-        """fileId 기반 청크 제거 (display_name / 메타데이터 매칭)."""
         return self.delete_files_by_ids([file_id]) > 0
 
     def delete_files_by_ids(self, file_ids: list[str]) -> int:
-        """여러 fileId의 RagFile을 제거한다.
-
-        매핑 read가 켜져 있으면 Firestore 단건 조회로 바로 resource name을 얻는다.
-        매핑이 없는 파일만 기존 코퍼스 전체 스캔으로 보완한다. rollout 중에는
-        fallback을 끄지 않아 불완전한 backfill이 문서 삭제 누락으로 이어지지 않게
-        한다.
-        """
         check_active_mutation()
         wanted = {fid for fid in file_ids if fid}
         if not wanted:
@@ -530,8 +437,6 @@ class RagEngineClient:
                         continue
                     missing.discard(fid)
                     for row in rows:
-                        # project ID/number 표기가 달라도 마지막 RagFile ID가 같으면
-                        # 동일 리소스다. backfill+dual-write 중복 행을 한 호출로 접는다.
                         rag_file_id = row.rag_file_name.rstrip("/").rsplit("/", 1)[-1]
                         target = (fid, rag_file_id)
                         direct_index.setdefault(fid, []).append(row.rag_file_name)
@@ -543,7 +448,7 @@ class RagEngineClient:
                     len(wanted - missing),
                     len(missing),
                 )
-            except Exception:  # 매핑 장애 시 기존 스캔으로 안전하게 복귀한다.
+            except Exception:
                 logger.exception("RAG mapping lookup failed; using corpus scan fallback")
                 mapping_store = None
                 direct_index = {}
@@ -556,15 +461,10 @@ class RagEngineClient:
             or getattr(self.settings, "rag_mapping_fallback_scan_enabled", True)
         ):
             if getattr(self.settings, "cloud_tasks_enabled", False):
-                # 다른 Cloud Run worker의 import는 이 프로세스의 dirty-ID 캐시에
-                # 반영되지 않는다. 분산 실행에서 fallback은 최신 목록을 읽어야 한다.
                 self.invalidate_file_index()
             scanned = self._file_index(missing)
             index = {**direct_index}
             for fid in missing:
-                # 캐시 안의 리스트 참조를 유지해야 아래 성공 삭제의 remove가
-                # 캐시에도 반영된다. 복사하면 같은 프로세스의 다음 호출이 이미
-                # 삭제한 RagFile을 다시 삭제하려 든다.
                 index.setdefault(fid, scanned.get(fid, []))
         elif missing:
             raise RuntimeError("RAG mapping missing and fallback scan disabled; deletion unverified")
@@ -581,9 +481,6 @@ class RagEngineClient:
         if not targets:
             return 0
 
-        # 삭제 1건은 호출 자체가 ~0.4초 걸린다. 순차로 돌리면 그 지연이 그대로
-        # 쌓이므로(1,373건이면 15분) 동시에 여러 건을 보낸다.
-        # 쿼터는 초당 (동시수 / 호출지연) 로 소모되니 페이싱과 함께 조절할 것.
         workers = max(1, self.settings.rag_delete_concurrency)
         pacing = self.settings.rag_delete_pacing_seconds
 
@@ -591,8 +488,6 @@ class RagEngineClient:
             fid, resource_name = item
             removed = True
             try:
-                # 페이싱으로도 쿼터를 다 못 막는다(동시 실행 + 다른 배치와 경합).
-                # 429 는 기다리면 풀리므로 여기서 한 번 더 삼킨다.
                 _with_throttle_retry(
                     lambda name=resource_name: rag.delete_file(name=name),
                     what="delete_file",
@@ -608,8 +503,6 @@ class RagEngineClient:
             if mapping_store is not None:
                 key = (fid, resource_name.rstrip("/").rsplit("/", 1)[-1])
                 for mapping in mappings_by_target.get(key, ()):
-                    # 실패한 삭제의 매핑은 반드시 남긴다. 이 지점은 삭제 성공 또는
-                    # NotFound가 확인된 경우에만 도달한다.
                     mapping_store.delete(mapping)
             return item, removed
 
@@ -626,7 +519,6 @@ class RagEngineClient:
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            # 한 묶음(=동시 실행 수)을 보내고 페이싱만큼 쉬는 식으로 속도를 제어한다
             for start in range(0, len(targets), workers):
                 chunk = targets[start : start + workers]
                 for done, removed in pool.map(_delete_one, chunk):
@@ -644,9 +536,6 @@ class RagEngineClient:
         vector_distance_threshold: float | None = None,
         metadata_filter: str | None = None,
     ) -> list[SearchHit]:
-        # vector_distance_threshold / metadata_filter 는 RagRetrievalConfig 의
-        # 최상위 필드가 아니라 filter=rag.Filter(...) 안에 있다. 평평한 kwarg 로
-        # 넘기면 TypeError 로 터진다 (그래서 이 경로는 여태 죽어 있었다).
         cfg_kwargs: dict[str, Any] = {"top_k": top_k}
         filter_kwargs: dict[str, Any] = {}
         if vector_distance_threshold is not None:

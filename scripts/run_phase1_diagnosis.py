@@ -1,15 +1,3 @@
-"""Run the frozen-corpus Phase-1 retrieval diagnosis without FactChat or an LLM.
-
-The run order is fixed and persisted as separate tables:
-
-  01 gold audit -> 02 k=50/100/200 curves -> 03 oracle union recall
-  -> 04 Q1/Q2/Q3/Q4 diagnosis -> 05 leave-one-out attribution
-
-The script reads the configured corpus, Firestore document state, and source GCS
-objects directly.  It never writes to those systems and never persists source
-body text in the result directory.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -103,8 +91,6 @@ class RunContext:
 
 @dataclass(frozen=True)
 class ChannelIndexes:
-    """Corpus-side lexical statistics built once for the frozen run."""
-
     body: Bm25Index
     title: TitleBm25Index
     bundle: TitleBm25Index
@@ -135,7 +121,6 @@ def _git_identity() -> tuple[str, bool]:
 
 
 def _gcloud_access_credentials() -> tuple[Any, str]:
-    """Use the active gcloud user token without requiring persisted local ADC."""
     from google.oauth2.credentials import Credentials
 
     gcloud = shutil.which("gcloud") or shutil.which("gcloud.cmd")
@@ -160,7 +145,6 @@ def _gcloud_access_credentials() -> tuple[Any, str]:
 
 
 def _common_settings() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-    """Read the unified registry without printing its API keys."""
     from scripts.dept_gui import _common, _mcp_registry_read
 
     _record, configs = _mcp_registry_read()
@@ -195,7 +179,6 @@ def _settings_from_registry(department: str, audience: str) -> tuple[Settings, f
 
 
 def normalized_evidence(value: str) -> str:
-    """Normalize whitespace, dates, and Korean money units for audit matching."""
     text = html.unescape(value or "").casefold()
 
     def date_repl(match: re.Match[str]) -> str:
@@ -208,7 +191,6 @@ def normalized_evidence(value: str) -> str:
 
     text = _DATE.sub(date_repl, text)
     text = _MONEY.sub(money_repl, text)
-    # Keep bare 4+ digit numbers so 3,000,000 and 3000000 compare after commas vanish.
     text = re.sub(r"(?<!\d)(\d[\d, ]{3,})(?!\d)", lambda m: re.sub(r"[, ]", "", m.group(1)), text)
     return _WS.sub(" ", text).strip()
 
@@ -256,13 +238,6 @@ def _states(store: DocStateStore, drive_ids: frozenset[str]) -> dict[str, DocSta
 
 
 def _rag_file_counts(access_token: str, settings: Settings) -> dict[str, int]:
-    """List RAG files with a hard timeout per page.
-
-    The agentplatform pager can wait indefinitely while retrying a stalled list
-    request.  This audit is read-only and must fail visibly rather than make a
-    local evaluation appear frozen, so it calls the documented REST list route
-    directly and preserves the page token itself.
-    """
     counts: dict[str, int] = {}
     page_token = ""
     while True:
@@ -395,7 +370,6 @@ def _ranked_nonzero(scores: list[float], docs: list[InventoryDocument], k: int) 
 
 
 def build_channel_indexes(docs: list[InventoryDocument]) -> ChannelIndexes:
-    """Build fixed-corpus lexical indexes once, before evaluating all queries."""
     return ChannelIndexes(
         body=Bm25Index([doc.body for doc in docs]),
         title=TitleBm25Index([doc.title for doc in docs]),
@@ -546,7 +520,6 @@ def run(context: RunContext, *, source_workers: int, out_dir: Path) -> int:
     docs = sorted((doc for doc in inventory.values() if doc.indexed), key=lambda doc: doc.file_id)
     common = _common_fields(context, index_version)
 
-    # 01. Gold retrievability audit.
     print("[1/5] gold retrievability audit", flush=True)
     audit_rows: list[dict[str, Any]] = []
     for position, item in enumerate(golden, 1):
@@ -613,7 +586,6 @@ def run(context: RunContext, *, source_workers: int, out_dir: Path) -> int:
     print("[1/5] building reusable BM25 indexes", flush=True)
     indexes = build_channel_indexes(docs)
 
-    # 02. Large-fetch curves.  q1_cache is reused by later union and diagnosis.
     print("[2/5] large-fetch curves", flush=True)
     curves: list[dict[str, Any]] = []
     q1_cache: dict[int, dict[str, list[str]]] = {}
@@ -708,7 +680,6 @@ def run(context: RunContext, *, source_workers: int, out_dir: Path) -> int:
             )
     _write_csv(out_dir / "02_large_fetch_curve_summary.csv", curve_summary)
 
-    # 03. Oracle union recall, before ranking/pruning.
     print("[3/5] oracle union recall", flush=True)
     union_rows: list[dict[str, Any]] = []
     for position, item in enumerate(golden, 1):
@@ -745,7 +716,6 @@ def run(context: RunContext, *, source_workers: int, out_dir: Path) -> int:
         ],
     )
 
-    # 04. Q1/Q2/Q3/Q4 query diagnosis.  Vector Q1 is reused; Q2/Q3 are actual new calls.
     print("[4/5] Q1/Q2/Q3/Q4 diagnosis", flush=True)
     diagnosis_rows: list[dict[str, Any]] = []
     for position, item in enumerate(golden, 1):
@@ -804,7 +774,6 @@ def run(context: RunContext, *, source_workers: int, out_dir: Path) -> int:
     ]
     _write_csv(out_dir / "04_q1_q4_diagnosis_summary.csv", diagnosis_summary)
 
-    # 05. Leave-one-out attribution over the same max-K candidate union.
     print("[5/5] leave-one-out attribution", flush=True)
     attribution_rows: list[dict[str, Any]] = []
     for channel in CHANNELS:
@@ -841,7 +810,6 @@ def run(context: RunContext, *, source_workers: int, out_dir: Path) -> int:
         )
     _write_csv(out_dir / "05_loo_channel_attribution.csv", attribution_rows)
 
-    # Confirm the index did not change during the multi-hour diagnostic run.
     ending_counts = _rag_file_counts(
         context.access_token, context.settings
     )
@@ -878,7 +846,7 @@ def run(context: RunContext, *, source_workers: int, out_dir: Path) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Run the frozen-corpus Phase-1 retrieval diagnosis without FactChat or an LLM.')
     parser.add_argument("--department", required=True, help="unified registry department code")
     parser.add_argument("--audience", default="staff", choices=("staff", "student"))
     parser.add_argument("--split", default="dev", choices=tuple(SPLIT_FILES))

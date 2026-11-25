@@ -1,5 +1,3 @@
-"""Create a deterministic bundle-grouped Golden200 dev/holdout snapshot."""
-
 from __future__ import annotations
 
 import argparse
@@ -56,7 +54,6 @@ def _choose_holdout(groups: dict[str, list[dict[str, Any]]]) -> list[dict[str, A
             continue
         held = [row for name in selected for row in groups[name]]
         actual = Counter(tag for row in held for tag in _tags(row))
-        # Match prevalence of every weakness tag, with a small type-balance tie breaker.
         score = sum((actual[tag] - wanted) ** 2 for tag, wanted in target_tags.items())
         score += sum(
             (sum(row.get("type", "") == kind for row in held) - total_count * HOLDOUT_SIZE / total) ** 2
@@ -75,7 +72,7 @@ def _write_json(path: Path, value: Any) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Create a deterministic bundle-grouped Golden200 dev/holdout snapshot.')
     parser.add_argument("--golden", type=Path, default=ROOT / "tests/golden200.json")
     parser.add_argument("--sources", type=Path, default=ROOT / "tests/_bench_out/golden200_sources.json")
     parser.add_argument("--out-dir", type=Path, default=ROOT / "tests/frozen/golden200-2026-09-13")

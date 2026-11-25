@@ -1,5 +1,3 @@
-"""해시 유틸 (GCP SDK 의존 없음)."""
-
 from __future__ import annotations
 
 import hashlib

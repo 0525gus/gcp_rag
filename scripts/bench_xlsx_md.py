@@ -1,14 +1,3 @@
-"""xlsx → 마크다운 변환률을 실제 코퍼스로 잰다.
-
-DEV_SPEC "1-1. XLSX 셀 → 마크다운 표" 의 수치를 재현한다.
-셀 내용은 출력하지 않는다 — 명단류가 섞여 있어 집계만 낸다.
-
-사용:
-    # GCS 에서 받아서
-    gcloud storage cp "gs://<source-bucket>/*.xlsx" ./xlsx_sample/
-    python scripts/bench_xlsx_md.py ./xlsx_sample
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -28,8 +17,6 @@ def main() -> int:
     ap.add_argument("corpus", help="xlsx 파일이 든 디렉터리")
     args = ap.parse_args()
 
-    # rglob — 실코퍼스는 폴더 구조를 그대로 내려받아 하위 디렉터리에 흩어져 있다.
-    # glob 이면 조용히 0건이 나와 "문제 없음"으로 오해한다.
     files = sorted(Path(args.corpus).rglob("*.xlsx"))
     if not files:
         print(f"xlsx 없음: {args.corpus}", file=sys.stderr)

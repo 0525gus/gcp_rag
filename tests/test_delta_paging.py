@@ -1,10 +1,3 @@
-"""델타 페이징 계약 — 워크플로우 변수 한도(512KB)를 넘기지 않는지 검증한다.
-
-변경 전체를 한 번에 반환하면 Cloud Workflows 실행이 변수 한도에서 죽고, 토큰이
-커밋되지 않아 다음 실행의 델타가 더 커진다. 한 번 넘으면 자력 회복이 불가능하므로
-'끊어서 주고, 배치마다 커밋한다'가 이 파이프라인의 핵심 불변식이다.
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -21,10 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / "workflows" / "daily_sync.yaml"
 
 
-# ------------------------------------------------------------------ 가짜 Drive
 class _FakeChangesApi:
-    """changes.list 를 페이지 단위로 흉내낸다 (pageSize=100 고정)."""
-
     def __init__(self, pages: list[dict[str, Any]]) -> None:
         self._pages = pages
         self.requested_tokens: list[str] = []
@@ -67,9 +57,7 @@ def _client(pages: list[dict[str, Any]]) -> tuple[DriveClient, _FakeChangesApi]:
     return client, api
 
 
-# ------------------------------------------------------------------ ① drive.py
 def test_stops_at_max_changes_and_returns_resume_token() -> None:
-    # 100건짜리 페이지 3장. 상한 200이면 2장만 읽고 멈춰야 한다.
     pages = [
         _page(100, next_token="t1"),
         _page(100, next_token="t2"),
@@ -81,7 +69,6 @@ def test_stops_at_max_changes_and_returns_resume_token() -> None:
 
     assert len(changes) == 200
     assert has_more is True
-    # 재개 지점은 nextPageToken — 3번째 페이지를 아직 안 읽었다
     assert token == "t2"
     assert api.requested_tokens == ["t0", "t1"]
 
@@ -101,7 +88,6 @@ def test_resumes_from_returned_token_without_gap_or_overlap() -> None:
 
     assert still_more is False
     assert final_token == "final"
-    # 260건을 정확히 한 번씩 — 누락도 중복도 없어야 한다
     ids = [c.file_id for c in first] + [c.file_id for c in second]
     assert len(ids) == 260
 
@@ -121,7 +107,6 @@ def test_no_cap_reads_everything_and_returns_new_start_token() -> None:
 
 
 def test_exact_boundary_on_last_page_is_not_has_more() -> None:
-    # 정확히 상한만큼 읽었는데 다음 페이지가 없으면 완료다.
     pages = [_page(100, next_token="t1"), _page(100, next_token=None, new_start="final")]
     client, _ = _client(pages)
 
@@ -142,7 +127,6 @@ def test_no_changes_keeps_existing_token() -> None:
     assert token == "final"
 
 
-# ------------------------------------------------------------- ② /sync/changes
 class _Store:
     def __init__(self, token: str | None) -> None:
         self._token = token
@@ -176,7 +160,6 @@ class _StubDrive:
 def test_missing_token_delegates_to_backfill_instead_of_dumping_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 최초 실행에 드라이브 전체 목록을 반환하면 워크플로우가 변수 한도에서 죽는다.
     called = False
 
     def _boom(*_a: Any, **_k: Any) -> dict[str, Any]:
@@ -233,9 +216,6 @@ def test_delta_changes_identify_created_updated_and_deleted_files(
                     created_time="2026-08-31T00:00:00Z",
                     modified_time="2026-08-31T00:00:00Z",
                 ),
-                # Uploading a local file can preserve its older filesystem mtime,
-                # making createdTime later than modifiedTime.  It is still a new
-                # Drive file and must not be presented as an update.
                 DriveChange(
                     file_id="created-with-preserved-mtime",
                     drive_id="d",
@@ -298,7 +278,6 @@ def test_delta_changes_exclude_folder_notifications(
     assert result["pendingPageToken"] == "next-token"
 
 
-# ------------------------------------------------------------------ ③ workflow
 def _drive_steps() -> list[dict[str, Any]]:
     data = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     return next(
@@ -329,7 +308,6 @@ def test_index_gcs_relies_on_service_retry_and_logs_failed_file_items() -> None:
     assert "status=INDEX_FAILED" in log_step["args"]["text"]
 
     assigned = {k for entry in _named(steps, "sync_page")["assign"] for k in entry}
-    # 페이지마다 초기화돼야 직전 페이지 수치가 새 페이지 정합성 검사를 오염시키지 않는다
     for key in ("change_list", "pending_uris", "drive_listed", "drive_failed", "drive_uris"):
         assert key in assigned
 
@@ -342,7 +320,6 @@ def test_next_page_only_loops_when_token_was_committed() -> None:
 
     commit_cond = _named(steps, "commit_token")["switch"][0]["condition"]
     loop_cond = loop_branch["condition"]
-    # 커밋 조건이 하나라도 빠지면 미커밋 상태로 되돌아가 같은 페이지를 무한 반복한다
     for clause in (
         'pending_page_token != ""',
         "drive_failed == 0",
@@ -392,18 +369,11 @@ def test_backfill_branch_terminates_the_page_loop() -> None:
     totals = _named(branches[0]["steps"], "apply_backfill_totals")["assign"]
     assigned = {k: v for entry in totals for k, v in entry.items()}
 
-    # backfill-run 이 드라이브 전체를 끝내므로 다시 돌면 무한 루프다
     assert assigned["drive_has_more"] is False
     assert assigned["drive_backfill"] is False
 
 
 def test_page_size_never_overshoots_the_requested_limit() -> None:
-    """한 페이지를 통째로 받은 뒤 재면 최대 pageSize-1 건을 초과해 돌려준다.
-
-    maxChanges 를 낮춰 잡으려는 조정이 반대로 도는 함정이었다 — 150 을 주면
-    100 을 받고 아직 모자라서 100 을 더 받아 200 이 나왔다.
-    """
-
     class _SizeAwareApi(_FakeChangesApi):
         def __init__(self) -> None:
             super().__init__([])

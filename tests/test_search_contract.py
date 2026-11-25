@@ -1,5 +1,3 @@
-"""Public protocol, evidence boundaries and HTML ingestion regression checks."""
-
 import json
 import os
 from dataclasses import replace
@@ -121,7 +119,6 @@ def test_protocol_exposes_only_search_and_returns_evidence_once(server, clock):
             "context" not in payload and "coverage" not in payload and "chunk_count" not in payload
         )
         assert response_documents(result) == payload["documents"]
-        # SDK emits a text representation for MCP clients without structured-output support.
         assert json.loads(result["content"][0]["text"]) == payload
         clock["now"] = datetime(2026, 9, 18, 15, 0, 0, tzinfo=timezone.utc)
         cached_result = rpc(
@@ -185,7 +182,6 @@ def test_cached_date_rolls_over_in_korea_without_retrieval(
     assert second == {**first, "currentDate": expected_after}
     assert second["timeZone"] == "Asia/Seoul"
     assert len(calls) == 1
-    # Updating the date on the returned copy must not mutate the stored payload.
     assert next(iter(app._cache.values()))[1]["currentDate"] == expected_before
     fresh = app.search("새로운 날짜 질의")
     assert fresh["currentDate"] == expected_after

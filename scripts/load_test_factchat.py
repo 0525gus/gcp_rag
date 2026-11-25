@@ -1,5 +1,3 @@
-"""Test actual FactChat conversations; require a verified unified-MCP canary first."""
-
 import argparse
 import asyncio
 import getpass
@@ -159,7 +157,7 @@ async def run(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Test actual FactChat conversations; require a verified unified-MCP canary first.')
     parser.add_argument("--key-file", type=Path)
     parser.add_argument("--key-prompt", action="store_true")
     parser.add_argument("--chatbot-id", type=int, default=51767)

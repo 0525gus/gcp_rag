@@ -1,5 +1,3 @@
-"""Recognize the parser's explicit no-text outcome, without hiding other errors."""
-
 import json
 
 from shared.mime_types import IMAGE_OCR_MIME

@@ -1,5 +1,3 @@
-"""Out-of-folder-scope documents must be removed before becoming SKIPPED."""
-
 from __future__ import annotations
 
 import pytest
@@ -167,7 +165,6 @@ def test_missing_state_still_cleans_orphaned_scope_artifacts(monkeypatch) -> Non
     result = ingest(_body())
 
     assert result["status"] == "EXCLUDED"
-    # No RAG match is already clean and must remain an idempotent success.
     assert result["ragDeleted"] is False
     assert result["sourceDeleted"] == 1
     assert result["hwpOriginalDeleted"] == 0
@@ -176,12 +173,6 @@ def test_missing_state_still_cleans_orphaned_scope_artifacts(monkeypatch) -> Non
 
 
 def test_already_evicted_file_does_not_rescan_the_corpus(monkeypatch) -> None:
-    """정리를 마친 범위 밖 파일이 다시 델타에 실려도 코퍼스를 또 순회하지 않는다.
-
-    delete_by_file_id 는 파일 하나를 찾으려고 코퍼스를 전수 순회한다. 범위 밖
-    파일은 바뀔 때마다 델타에 다시 오므로, 생략하지 않으면 그 비용이 매 실행
-    반복되고 대량 변경 시 list 쿼터를 넘겨 SKIP 분기를 실패시킨다.
-    """
     gcs = _FakeGcs({"source-bucket": [], "hwp-original-bucket": []})
     store = _FakeStore(
         DocState(
@@ -205,7 +196,6 @@ def test_already_evicted_file_does_not_rescan_the_corpus(monkeypatch) -> None:
 
 
 def test_skipped_for_another_reason_still_cleans_the_corpus(monkeypatch) -> None:
-    """SKIPPED 만으로 생략하면 안 된다 — 미지원 MIME 로 바뀐 문서는 청크가 남는다."""
     blob = _FakeBlob("f1.pdf")
     gcs = _FakeGcs({"source-bucket": [blob], "hwp-original-bucket": []})
     store = _FakeStore(
@@ -229,10 +219,7 @@ class _SplitSettings(_FakeSettings):
 
 
 class _RecordingRag:
-    """코퍼스별 삭제 호출을 기록한다. 인자 없는 생성 = 기본(교직원) 코퍼스."""
-
     calls: list[tuple[str | None, str]] = []
-    # 값이 있으면 학생 코퍼스 삭제만 실패시킨다 (교직원 쪽은 성공).
     student_error: Exception | None = None
 
     def __init__(self, *_a, corpus_name: str | None = None, **_k) -> None:
@@ -256,11 +243,6 @@ def _patch_split_dependencies(monkeypatch, *, store: _FakeStore, gcs: _FakeGcs) 
 
 
 def test_out_of_scope_cleanup_also_removes_from_student_corpus(monkeypatch) -> None:
-    """분리가 켜지면 학생 코퍼스에서도 내려야 한다.
-
-    기본 클라이언트는 교직원 코퍼스만 본다. 학생 쪽을 빼면 범위 밖으로 나간
-    문서가 교직원 검색에서만 사라지고 **학생에게는 계속 검색된다**.
-    """
     gcs = _FakeGcs({"source-bucket": [], "hwp-original-bucket": []})
     store = _FakeStore(
         DocState(file_id="f1", drive_id="drive-1", status=DocStatus.INDEXED)
@@ -275,7 +257,6 @@ def test_out_of_scope_cleanup_also_removes_from_student_corpus(monkeypatch) -> N
 
 
 def test_student_corpus_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) -> None:
-    """학생 코퍼스 삭제 실패를 삼키면 안 된다 — 내려야 할 자료가 남는다."""
     gcs = _FakeGcs({"source-bucket": [], "hwp-original-bucket": []})
     store = _FakeStore(
         DocState(file_id="f1", drive_id="drive-1", status=DocStatus.INDEXED)
@@ -312,7 +293,7 @@ def test_rag_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) -> None:
 
     assert caught.value.status_code == 500
     assert "out_of_folder_scope_cleanup_failed" in str(caught.value.detail)
-    assert blob.deleted is True  # GCS is still cleaned even when RAG cleanup fails.
+    assert blob.deleted is True
     assert store.upserts == []
     assert len(store.dlq) == 1
     assert store.dlq[0][0] == "f1"
@@ -338,6 +319,6 @@ def test_gcs_cleanup_failure_is_dlq_and_never_skipped(monkeypatch) -> None:
 
     assert caught.value.status_code == 500
     assert rag_calls == ["f1"]
-    assert blobs[1].deleted is True  # Remaining objects are attempted after one failure.
+    assert blobs[1].deleted is True
     assert store.upserts == []
     assert len(store.dlq) == 1

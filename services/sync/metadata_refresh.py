@@ -1,5 +1,3 @@
-"""Durable, bounded propagation of collector metadata without repeating OCR."""
-
 import hashlib
 import json
 from dataclasses import replace
@@ -33,7 +31,6 @@ def enqueue_page(settings, job_id, page_token=""):
 
 
 def schedule_change(change, token, store, settings, drive):
-    """Persist jobs before the caller is allowed to commit the Drive change token."""
     source = _source_ref(store, change.file_id)
     previous = source.get().to_dict() or {}
     if change.name != "metadata.json" and not previous:
@@ -86,7 +83,6 @@ def schedule_change(change, token, store, settings, drive):
 
 
 def refresh_file(meta, *, store, settings, drive, gcs, source_uris, index):
-    """Update existing artifacts and their shared document metadata under a lease."""
     fid = meta["id"]
     with document_mutation(store, settings, [fid]):
         state = store.get(fid)
@@ -100,7 +96,6 @@ def refresh_file(meta, *, store, settings, drive, gcs, source_uris, index):
             fid, settings.sync_folder_id_list
         ):
             return {"status": "IGNORED"}
-        # Avoid writing old content over a newer Drive revision. Normal sync handles it.
         if meta.get("modifiedTime") and state.modified_time != meta["modifiedTime"]:
             return {"status": "CONTENT_CHANGED"}
         try:
@@ -108,7 +103,6 @@ def refresh_file(meta, *, store, settings, drive, gcs, source_uris, index):
                 fid, state.name or meta.get("name", fid), strict_metadata=True
             )
         except ValueError as exc:
-            # No writes occurred: release the lease normally, retain valid old metadata.
             return {"status": "INVALID_METADATA", "error": str(exc)[:1000]}
         except Exception as exc:  # noqa: BLE001 - retry read failures outside the document lease
             return {"status": "RETRY", "error": str(exc)[:1000]}

@@ -1,11 +1,3 @@
-"""RAG Engine 크기 한도를 넘는 PDF를 페이지 단위로 분할.
-
-Vertex RAG Engine 은 PDF 를 50MB 까지만 받는다. 한도를 넘는 문서를 통째로
-버리면 검색에서 아예 사라지므로, 페이지 경계로 잘라 여러 조각으로 올린다.
-청킹은 조각마다 독립적으로 일어나지만, 조각 경계가 페이지 경계라
-문장이 잘리지는 않는다.
-"""
-
 from __future__ import annotations
 
 import io
@@ -19,15 +11,10 @@ _SAFETY = 0.85
 
 
 class PdfSplitError(RuntimeError):
-    """분할 불가 — 단일 페이지가 한도를 넘는 등."""
+    pass
 
 
 def split_pdf(data: bytes, limit_bytes: int) -> list[bytes]:
-    """PDF 를 limit_bytes 미만 조각들로 나눈다.
-
-    한도 이하면 [data] 를 그대로 돌려준다(호출측 분기 단순화).
-    페이지 하나가 한도를 넘으면 PdfSplitError.
-    """
     if len(data) <= limit_bytes:
         return [data]
 
@@ -66,12 +53,10 @@ def split_pdf(data: bytes, limit_bytes: int) -> list[bytes]:
             continue
 
         if pages_in_writer == 1:
-            # 이 페이지 하나만으로 한도를 넘는다 — 더 쪼갤 수 없다.
             raise PdfSplitError(
                 f"페이지 {idx + 1} 단독으로 한도 초과: {size}B > {target}B"
             )
 
-        # 방금 넣은 페이지를 빼고 확정한 뒤, 그 페이지로 새 조각을 시작한다.
         pages = list(range(idx - pages_in_writer + 1, idx))
         writer = PdfWriter()
         for p in pages:

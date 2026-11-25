@@ -1,22 +1,10 @@
-﻿# 알림 일괄 설정 (멱등) - 예산 1건 + 운영 정책 3건
-# 사용:
-#   $env:ALERT_EMAIL = "ops@example.com"
-#   .\scripts\setup_alerts.ps1
-#   $env:BUDGET_AMOUNT = "200USD"; .\scripts\setup_alerts.ps1
-#
-# 예산 알림과 운영 알림은 서로를 못 잡는다.
-#   - 예산은 '돈'을 본다. 스케줄러가 멈추면 비용은 줄어들어 조용하다
-#   - 운영은 '동작'을 본다. 백필이 정상인데 비용만 폭증하면 조용하다
-# 전제: gcloud 인증. 예산은 결제 계정 권한이 따로 필요 (없으면 예산만 건너뜀)
-
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 if ($PSVersionTable.PSVersion.Major -ge 7) {
   $PSNativeCommandUseErrorActionPreference = $false
 }
 
 Set-Location (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $PSScriptRoot "_load_env.ps1")
-# GCP_PROJECT_ID 만 쓴다 — 학과 무관이라 어느 학과로 깔든 같은 값이다(common.yaml).
 Set-BaseDeployConfig | Out-Null
 
 function Assert-LastExit {

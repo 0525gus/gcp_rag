@@ -1,5 +1,3 @@
-"""Transactional in-memory backend using the SDK's real retry decorator."""
-
 from copy import deepcopy
 from threading import RLock
 from types import SimpleNamespace

@@ -1,5 +1,3 @@
-"""Cloud Tasks HTTP task producer for split RAG indexing."""
-
 from __future__ import annotations
 
 import json
@@ -24,12 +22,6 @@ class IndexTaskQueue:
         payload: dict[str, Any],
         endpoint: str = "/sync/index-gcs-task",
     ) -> str:
-        """Create one deterministic, OIDC-authenticated HTTP task.
-
-        A repeated workflow request can attempt to create the same task. Cloud
-        Tasks retains task names after completion, so ALREADY_EXISTS is treated
-        as idempotent success.
-        """
         if endpoint not in {"/sync/index-gcs-task", "/sync/metadata-refresh-task"}:
             raise ValueError("unsupported task endpoint")
         base_url = self.settings.sync_task_base_url.rstrip("/")

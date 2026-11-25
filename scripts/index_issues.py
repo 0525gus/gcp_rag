@@ -1,4 +1,3 @@
-"""Read-only, department-scoped views of unresolved document indexing state."""
 from __future__ import annotations
 
 import base64
@@ -37,8 +36,6 @@ def issue_item(file_id, data):
         status = "BODY_MISSING"
     if status not in LABELS:
         return None
-    # Old skipped records did not persist a reason. Describe the historical
-    # outcome without claiming that the current processor is disconnected.
     reason_code = reason if reason in {"IMAGE_OCR_DISABLED", "UNSUPPORTED_FORMAT", "OCR_EMPTY_TEXT"} else ""
     if reason.startswith("ADMIN_REVIEW_SIZE:"):
         reason_code = "ADMIN_REVIEW_SIZE"
@@ -65,11 +62,6 @@ def issue_item(file_id, data):
 
 
 def list_issues(db, collection, drive_ids, *, cursor="", scan_limit=500, split_collection="doc_split_queue"):
-    """Page through drive-scoped state without requiring a composite index.
-
-    Normal documents are scanned but never returned. The cursor is scoped to the
-    server-resolved drive list, and the UI reports counts for loaded pages only.
-    """
     drives = sorted(set(drive_ids))
     position, after = 0, ""
     if cursor:
@@ -91,7 +83,6 @@ def list_issues(db, collection, drive_ids, *, cursor="", scan_limit=500, split_c
         page = list(query.limit(remaining + 1).stream(timeout=20))
         for snap in page[:remaining]:
             data = snap.to_dict() or {}
-            # Keep the scope check even if a query adapter is changed later.
             if data.get("driveId") == drives[position]:
                 item = issue_item(snap.id, data)
                 if item:
@@ -130,14 +121,12 @@ def issue_detail(db, names, drive_ids, file_id):
     for key, label in (("dlq", "오류 재처리 대기"), ("splitQueue", "분할 대기")):
         queued = db.collection(names[key]).document(file_id).get(timeout=20)
         values = queued.to_dict() or {}
-        # Recovered documents can retain old queue entries. Do not resurrect them.
         if queued.exists and data.get("status") == "FAILED" and values.get("driveId") == data.get("driveId"):
             queues.append({"label": label, "reason": str(values.get("reason") or "")[:2000],
                            "retryCount": values.get("retryCount", 0),
                            "updatedAt": timestamp(values.get("lastRetryAt") or values.get("enqueuedAt"))})
             if key == "splitQueue":
                 item.update(status="SPLIT_QUEUED", statusLabel=LABELS["SPLIT_QUEUED"])
-    # This is batch context, never evidence that every member failed individually.
     jobs = list(db.collection(names["jobs"]).where(
         filter=FieldFilter("fileIds", "array_contains", file_id),
     ).limit(101).stream(timeout=20))

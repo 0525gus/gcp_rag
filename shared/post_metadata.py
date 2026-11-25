@@ -1,5 +1,3 @@
-"""Validated, deterministic metadata supplied by the source collector."""
-
 from __future__ import annotations
 
 import json
@@ -39,5 +37,5 @@ def parse_post_metadata(payload: bytes) -> PostMetadata:
             or any(c.isspace() or ord(c) < 32 for c in url)
         ):
             raise ValueError("source_url must be an HTTP(S) URL without credentials")
-        _ = parsed.port  # validates malformed ports
+        _ = parsed.port
     return PostMetadata(title=title, source_url=url)

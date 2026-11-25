@@ -1,9 +1,3 @@
-"""GCS 잔존 객체 판정 규칙.
-
-삭제하는 스크립트라 판정이 틀리면 살아 있는 문서의 산출물을 지운다.
-GCP 의존이 없는 `classify` 만 대상으로 규칙을 못 박는다.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -29,13 +23,11 @@ def test_keeps_objects_of_live_documents() -> None:
 
 
 def test_keeps_failed_documents_because_retry_will_pick_them_up() -> None:
-    # /sync/retry-failed 가 다시 집어가므로 산출물을 남겨야 한다
     assert classify("failed1.hwp", _LIVE) is None
     assert classify("failed1.md", _LIVE) is None
 
 
 def test_flags_raw_original_of_deleted_document() -> None:
-    """이 스크립트가 존재하는 이유 — 실측 52건이 이 경우였다."""
     verdict = classify("gone1.hwp", _LIVE)
     assert verdict == ("gone1", REASON_DELETED)
 
@@ -46,8 +38,8 @@ def test_flags_deleted_document_across_all_produced_extensions() -> None:
         "gone1.hwpx",
         "gone1.md",
         "gone1.meta.md",
-        "gone1.part3.pdf",  # 분할 조각 — 옛 삭제 목록이 놓쳤다
-        "gone1.rtf",  # 옛 삭제 목록에 없던 확장자
+        "gone1.part3.pdf",
+        "gone1.rtf",
         "gone1.doc",
     ):
         assert classify(name, _LIVE) == ("gone1", REASON_DELETED), name
@@ -55,7 +47,6 @@ def test_flags_deleted_document_across_all_produced_extensions() -> None:
 
 def test_unknown_status_is_flagged_but_can_be_excluded() -> None:
     assert classify("nosuchid.hwp", _LIVE) == ("nosuchid", REASON_UNKNOWN)
-    # doc_state 를 유실한 뒤라면 살아 있는 문서일 수 있으므로 뺄 수 있어야 한다
     assert classify("nosuchid.hwp", _LIVE, only_deleted=True) is None
 
 

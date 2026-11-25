@@ -1,11 +1,3 @@
-"""Observable rankings for each retrieval signal over one vector candidate pool.
-
-Only ``vector`` creates candidates in the current architecture.  The other
-channels are deterministic rankings of exactly that pool.  This module keeps the
-distinction visible so an evaluation cannot accidentally call title/metadata
-reranking "independent recall".
-"""
-
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -57,11 +49,6 @@ def rank_channel(
     bundles: list[str],
     metadata: list[str],
 ) -> ChannelRanking:
-    """Rank one fixed candidate pool by a single retrieval signal.
-
-    Ties preserve the incoming vector order.  Metadata uses the raw deterministic
-    rule sum; its components are returned so conflict penalties remain auditable.
-    """
     if channel not in RETRIEVAL_CHANNELS:
         raise ValueError(f"unknown retrieval channel: {channel}")
     n = len(bodies)

@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""로컬 종단 검증 — 코퍼스 디렉터리를 실제 ingest 파이프라인에 통과시킨다.
-
-Drive/GCS/Firestore 를 인메모리 대역으로 바꾸고, 파서 서비스 HTTP 호출은 파서
-코드를 그대로 인프로세스에서 돌려 응답을 만든다. 즉 **라우팅·크기 게이트·
-사이드카·표 정규화가 모두 실제 코드**로 돌아간다. 클라우드 자원이 필요 없다.
-
-단위 테스트가 못 잡는 것을 잡는다 — 라우트 분기와 크기 게이트의 상호작용은
-파일 하나로는 드러나지 않고, 실제 코퍼스의 크기 분포가 있어야 보인다.
-(이 스크립트가 처음 돌 때 50MB 초과 PDF 가 분할 로직에 도달하지 못하는 것을 잡았다.)
-
-사용:
-    PYTHONPATH=. python scripts/e2e_local.py sample
-"""
 
 from __future__ import annotations
 
@@ -63,8 +50,6 @@ EXT_MIME = {
 
 
 class FakeDrive:
-    """경로 컨텍스트는 디렉터리 구조에서 만든다."""
-
     def __init__(self, files: dict[str, Path], root: Path) -> None:
         self.files = files
         self.root = root
@@ -94,7 +79,6 @@ class FakeGcs:
         self.blobs: list[str] = []
         self.sidecars: list[str] = []
         self.deleted: list[str] = []
-        # 파서가 써 둔 마크다운. sync 는 응답의 gcsMarkdownUri 를 다시 읽는다.
         self.objects: dict[str, bytes] = {}
 
     def upload_hwp_original(self, data: bytes, file_id: str, ext: str) -> str:
@@ -169,8 +153,6 @@ class _Resp:
 
 
 class ParserStub:
-    """services/parser/main.py 의 /parse 계약을 인프로세스로 재현한다."""
-
     def __init__(self, blobs: dict[str, bytes], settings: Settings, gcs: FakeGcs) -> None:
         self.blobs = blobs
         self.settings = settings
@@ -218,7 +200,6 @@ class ParserStub:
 def main() -> int:
     ap = argparse.ArgumentParser(description="코퍼스를 실제 ingest 경로로 흘려 검증")
     ap.add_argument("corpus", help="파일이 든 디렉터리 (재귀 탐색)")
-    # 기본값을 하드코딩하면 검증 도구가 실제 배포 설정과 어긋난다 — Settings 에서 받는다.
     ap.add_argument("--max-gcs-bytes", type=int, default=None)
     args = ap.parse_args()
     max_gcs_bytes = (

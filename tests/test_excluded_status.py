@@ -1,9 +1,3 @@
-"""`EXCLUDED`(대상 폴더 밖) 와 `SKIPPED`(대상인데 처리 못 함)의 분리.
-
-핵심은 집계다. 둘이 뭉쳐 있던 동안 폴더 밖 393건이 `accounted` 에 들어가
-"대상인데 처리 못 한 것"의 신호를 덮었다.
-"""
-
 from __future__ import annotations
 
 import sys
@@ -27,7 +21,6 @@ class _Drive:
         return self._in_scope
 
 
-# ------------------------------------------------------------------ 라우팅
 def test_out_of_scope_file_routes_to_exclude() -> None:
     entry = _route_file_meta(
         drive_id="d",
@@ -51,8 +44,6 @@ def test_in_scope_file_keeps_its_route() -> None:
 
 
 def test_unsupported_mime_is_skip_not_exclude() -> None:
-    # 대상 폴더 안이지만 처리할 방법이 없는 형식 → SKIP 이어야 한다.
-    # (예시가 .zip 이었으나 지금은 사이드카로라도 색인한다 — 이미지로 바꿨다)
     entry = _route_file_meta(
         drive_id="d",
         file_meta={"id": "f1", "name": "포스터.jpg", "mimeType": "image/jpeg"},
@@ -62,7 +53,6 @@ def test_unsupported_mime_is_skip_not_exclude() -> None:
     assert entry["route"] == RouteKind.SKIP.value
 
 
-# ------------------------------------------------------------------ 집계
 def _recon(**over):
     base = {
         "driveId": "d", "listed": 0, "gcsUploaded": 0, "indexed": 0,
@@ -73,7 +63,6 @@ def _recon(**over):
 
 
 def test_excluded_is_subtracted_from_listed() -> None:
-    # 조회 10건 중 7건이 폴더 밖 → 실제 대상은 3건이고 그 3건이 업로드됨
     res = _recon(listed=10, excluded=7, gcsUploaded=3, uris=3, indexed=3)
     assert res["listedInScope"] == 3
     assert res["unaccounted"] == 0
@@ -81,30 +70,24 @@ def test_excluded_is_subtracted_from_listed() -> None:
 
 
 def test_old_behaviour_would_have_been_inconsistent() -> None:
-    # excluded 를 skipped 로 뭉치면 균형은 맞지만 skipped 가 신호를 잃는다.
-    # 여기서는 '차감하지 않으면 어긋난다'만 고정한다.
     res = _recon(listed=10, excluded=0, gcsUploaded=3, uris=3, indexed=3)
     assert res["unaccounted"] == 7
     assert res["ok"] is False
 
 
 def test_skipped_still_counts_as_accounted() -> None:
-    # 대상인데 처리 못 한 것은 여전히 집계에 들어간다
     res = _recon(listed=5, excluded=0, gcsUploaded=3, uris=3, indexed=3, skipped=2)
     assert res["unaccounted"] == 0
     assert res["ok"] is True
 
 
 def test_excluded_defaults_to_zero_for_old_callers() -> None:
-    # 필드를 안 보내는 구버전 워크플로도 동작해야 한다
     res = _recon(listed=3, gcsUploaded=3, uris=3, indexed=3)
     assert res["excluded"] == 0
     assert res["ok"] is True
 
 
-# ------------------------------------------------------------------ 정리 대상
 def test_excluded_is_not_a_live_status() -> None:
-    # 폴더 밖으로 나간 문서의 산출물은 회수 대상이어야 한다
     assert DocStatus.EXCLUDED.value not in _LIVE_STATUSES
     assert DocStatus.SKIPPED.value in _LIVE_STATUSES
 
@@ -126,7 +109,6 @@ def test_cleanup_leaves_skipped_objects() -> None:
     assert classify("abc123def456.md", statuses) is None
 
 
-# ------------------------------------------------------------------ 상태 호환
 def test_excluded_round_trips() -> None:
     src = DocState(file_id="f1", drive_id="d", status=DocStatus.EXCLUDED)
     assert DocState.from_firestore(src.to_firestore()).status is DocStatus.EXCLUDED
@@ -137,14 +119,7 @@ def test_unknown_status_still_falls_back_to_pending() -> None:
     assert state.status is DocStatus.PENDING
 
 
-# ------------------------------------------------------- EXCLUDE 라우트 처리
 def test_exclude_route_evicts_without_asking_drive_again(monkeypatch) -> None:
-    """워크플로가 EXCLUDE 로 넘긴 문서도 잔존물 회수까지 마치고 EXCLUDED 가 된다.
-
-    list_changes 가 이미 같은 folder_ids 로 판정해 붙인 라우트라 범위 판정을
-    다시 물으면 Drive 호출만 더 든다. 한때 이 분기가 지워진 헬퍼를 부르고 있어
-    EXCLUDE 로 들어온 문서가 NameError 로 죽었다 — 정상 경로라 조용했다.
-    """
     import services.sync.main as sync_main
     from services.sync.main import IngestBody, _ingest_with
 

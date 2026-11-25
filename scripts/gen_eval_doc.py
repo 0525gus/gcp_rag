@@ -1,12 +1,3 @@
-"""골든셋 검증 결과 JSON → 보고용 마크다운 문서.
-
-표를 손으로 옮겨 적으면 틀린다. eval_golden.py 가 남긴 결과에서 바로
-뽑아, 재측정하면 문서도 같이 갱신되도록 한다.
-
-사용:
-    python scripts/eval_golden.py tests/golden100.json --out result.json
-    python scripts/gen_eval_doc.py result.json docs/GOLDEN_EVAL.md
-"""
 import argparse
 import json
 import statistics

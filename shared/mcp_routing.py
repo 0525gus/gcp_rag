@@ -1,5 +1,3 @@
-"""Credential-bound MCP routing. Registry contains hashes, never API keys."""
-
 from __future__ import annotations
 
 import hashlib
@@ -85,8 +83,6 @@ def parse_routes(snapshot: dict, project: str, region: str) -> dict[str, SearchS
 
 
 class RouteRegistry:
-    """Bounded credential cache. Expired snapshots never survive a read failure."""
-
     def __init__(self, settings, *, loader: Callable | None = None, ttl: float = 5):
         if not math.isfinite(ttl) or ttl < 0:
             raise ValueError("MCP registry TTL must be finite and nonnegative")
@@ -115,6 +111,5 @@ class RouteRegistry:
                 self._expires = 0
                 started = time.monotonic()
                 self._routes = parse_routes(self.loader(), self.project, self.region)
-                # A slow read must not extend the lifetime of credentials read before revocation.
                 self._expires = started + self.ttl
             return self._routes.get(key_digest(token))

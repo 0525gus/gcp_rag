@@ -1,16 +1,3 @@
-"""Evaluate vector/body/title/bundle/metadata paths on the frozen Golden200 split.
-
-The output contract is deliberately flat: one row per query, with each channel's
-rank, latency, evidence recall, and ranked IDs stored in prefixed scalar columns.
-
-Examples:
-    $env:MCP_URL = "https://<rag-mcp-service>/mcp"
-    python scripts/eval_retrieval_channels.py --dept cs --split dev
-    python scripts/eval_retrieval_channels.py --dept cs --split holdout --top-k 20
-
-This calls the RAG MCP service directly.  It does not call FactChat.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -270,7 +257,7 @@ def write_flat_tables(out_dir: Path, rows: list[dict[str, Any]]) -> tuple[Path, 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Evaluate vector/body/title/bundle/metadata paths on the frozen Golden200 split.')
     parser.add_argument("--snapshot-dir", type=Path, default=DEFAULT_SNAPSHOT)
     parser.add_argument("--split", choices=tuple(SPLIT_FILES), default="dev")
     parser.add_argument("--base-url", help="RAG MCP service root; /mcp suffix is accepted")

@@ -28,7 +28,6 @@ def test_title_channel_is_opt_in_and_weighted_for_abcd_canary():
     bodies = ["수강신청 안내 본문", "수강신청 안내 본문"]
     titles = ["일반 학사 안내.hwp", "2026-1학기 수강신청.pdf"]
 
-    # A: current, B/C/D: title rank weight 1/2/3. The default remains A.
     assert rrf_rerank(query, bodies, titles=titles) == [0, 1]
     assert rrf_rerank(query, bodies, titles=titles, title_weight=1) == [0, 1]
     assert rrf_rerank(query, bodies, titles=titles, title_weight=2) == [0, 1]

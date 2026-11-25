@@ -1,15 +1,8 @@
-"""Presentation links for search citations; stored source identities stay intact."""
-
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 def citation_view_uri(uri: str | None, filename: str | None = None) -> str | None:
-    """Return the appropriate Drive citation link for the source file.
-
-    Google cannot preview HWP/HWPX reliably, so those citations point at Drive's
-    download endpoint. Other supported Google links continue to use the viewer.
-    """
     if not uri:
         return uri
     try:
@@ -30,7 +23,6 @@ def citation_view_uri(uri: str | None, filename: str | None = None) -> str | Non
         match = re.fullmatch(r"/file/d/([\w-]+)/(?:edit|view|preview)/?", parts.path)
     if not match:
         return uri
-    # Editor launch/account options (rtpof, ouid, sd, etc.) do not belong in citations.
     resource_keys = [
         (key, value)
         for key, value in parse_qsl(parts.query)

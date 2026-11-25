@@ -1,9 +1,3 @@
-"""Rebuild historical indexing reviews from persisted jobs and import evidence.
-
-Default is read-only. --apply writes only sync_run_reviews, never historical
-Workflow states, document states, task checkpoints, or RAG corpus contents.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -30,7 +24,7 @@ from shared.rag_import_result import parse_import_results
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Rebuild historical indexing reviews from persisted jobs and import evidence.')
     parser.add_argument("--project", required=True)
     parser.add_argument("--region", default="asia-northeast3")
     parser.add_argument("--database", default="rag-sync-state")
@@ -125,7 +119,6 @@ def main():
             == (job.get("fileVersions") or {}).get(fid)
             for fid, doc in docs.items()
         }
-        # Document names from another department must never leak into this view.
         docs = {fid: doc for fid, doc in docs.items() if doc.get("driveId") == job.get("driveId")}
         start = job.get("createdAt")
         end = run.get("endTime")

@@ -1,5 +1,3 @@
-"""Public MCP search contract. Counts describe returned evidence, not answerability."""
-
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -12,7 +10,6 @@ _KST = timezone(timedelta(hours=9))
 
 
 def current_date_kst() -> str:
-    """Return the server's current Korean date, not a document/retrieval date."""
     return datetime.now(_KST).date().isoformat()
 
 
@@ -69,7 +66,6 @@ def build_search_response(
 
 
 def response_documents(result: dict[str, Any]) -> list[dict[str, Any]]:
-    """Read both deployed v1 and v2 MCP results for benchmark/evaluation clients."""
     if result.get("isError"):
         raise ValueError("MCP search returned a tool error")
     structured = result.get("structuredContent")

@@ -1,9 +1,3 @@
-"""Measure sequential MCP searches; no retries, no answer generation.
-
-Use MCP_API_KEY from the environment, never from command-line arguments.
-Each question uses a fresh session; initialization and search are timed separately.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -72,7 +66,6 @@ async def measure(args: argparse.Namespace) -> None:
                                 row["chunk_count"] = structured.get("chunkCount")
                             phase = "close"
         except Exception as exc:
-            # Do not persist response bodies, authorization headers, or sensitive error text.
             row["status"] = "error"
             row["error_type"] = type(exc).__name__
             row["error_phase"] = phase
@@ -82,11 +75,11 @@ async def measure(args: argparse.Namespace) -> None:
         print(f"{row['id']}: {row['status']} search={row.get('search_s', '-')}s "
               f"total={row['elapsed_including_close_s']}s", flush=True)
         if row["status"] == "error":
-            break  # Do not repeat a broken connection six times.
+            break
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Measure sequential MCP searches; no retries, no answer generation.')
     parser.add_argument("--url", required=True)
     parser.add_argument("--questions", type=Path, default=ROOT / "tests/latency_questions.json")
     parser.add_argument("--out", type=Path, default=ROOT / "latency-results.json")

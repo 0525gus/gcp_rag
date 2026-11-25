@@ -1,5 +1,3 @@
-"""콘솔 환경 화면의 gcloud 로그아웃: 세션 필수, 자격 증명 철회, 이전 계정 캐시 제거."""
-
 from __future__ import annotations
 
 import pytest

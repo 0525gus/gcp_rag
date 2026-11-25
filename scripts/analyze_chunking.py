@@ -1,23 +1,3 @@
-"""청크 크기 실측 — 표/문서가 청크 경계에서 얼마나 잘리는지 센다.
-
-검색 품질을 직접 재려면 정답이 있는 질의 세트와 살아있는 코퍼스가 필요하다.
-대신 여기서는 **결정을 좌우하는 결정론적 변수**만 측정한다.
-
-  - 표가 청크 경계에 걸리는 비율  ← 잘리면 검색 시 표의 절반만 걸린다
-  - 문서 하나가 청크 하나에 들어가는 비율
-  - 문서당 청크 수 분포
-
-사용:
-    python scripts/analyze_chunking.py <코퍼스_디렉터리>
-    python scripts/analyze_chunking.py <디렉터리> --chars-per-token 1.8
-
-주의:
-  * Vertex 청킹은 토큰 기준인데 여기서는 문자 수 / chars-per-token 으로 근사한다.
-    기본값은 운영 코퍼스 실측치다(아래).
-  * 고정 크기 분할을 가정한다. Vertex 가 문단 경계를 존중한다면 실제 분할 지점은
-    다를 수 있으므로, 절대값보다 **크기 간 상대 비교**로 읽는 게 맞다.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -46,11 +26,10 @@ DEFAULT_CHARS_PER_TOKEN = 0.96
 class DocStats:
     name: str
     chars: int
-    tables: list[tuple[int, int]] = field(default_factory=list)  # (시작, 끝) 문자 오프셋
+    tables: list[tuple[int, int]] = field(default_factory=list)
 
 
 def find_gfm_tables(md: str) -> list[tuple[int, int]]:
-    """GFM 표 블록의 (시작, 끝) 문자 오프셋. 연속된 '|' 줄을 하나로 묶는다."""
     spans: list[tuple[int, int]] = []
     offset = 0
     start: int | None = None
@@ -65,7 +44,6 @@ def find_gfm_tables(md: str) -> list[tuple[int, int]]:
         offset += len(line)
     if start is not None:
         spans.append((start, offset))
-    # 한 줄짜리는 표가 아니라 오탐
     return [(s, e) for s, e in spans if md[s:e].count("\n") >= 2]
 
 
@@ -96,7 +74,6 @@ def load_docs(root: Path) -> list[DocStats]:
 
 
 def evaluate(docs: list[DocStats], chunk_tokens: int, chars_per_token: float) -> dict:
-    """고정 크기 분할을 가정하고 표 절단·문서 분할을 센다."""
     span = max(1, int(chunk_tokens * chars_per_token))
     total_tables = 0
     split_tables = 0
@@ -104,13 +81,12 @@ def evaluate(docs: list[DocStats], chunk_tokens: int, chars_per_token: float) ->
     chunk_counts: list[int] = []
 
     for doc in docs:
-        n_chunks = max(1, -(-doc.chars // span))  # ceil
+        n_chunks = max(1, -(-doc.chars // span))
         chunk_counts.append(n_chunks)
         if n_chunks == 1:
             single_chunk_docs += 1
         for start, end in doc.tables:
             total_tables += 1
-            # 표 내부에 청크 경계가 지나가면 잘린 것
             if start // span != (end - 1) // span:
                 split_tables += 1
 

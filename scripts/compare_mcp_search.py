@@ -1,5 +1,3 @@
-"""Compare deployed v1/v2 retrieval evidence without persisting document bodies or keys."""
-
 import argparse
 import asyncio
 import json
@@ -72,7 +70,7 @@ async def run(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Compare deployed v1/v2 retrieval evidence without persisting document bodies or keys.')
     parser.add_argument("--before", required=True)
     parser.add_argument("--after", required=True)
     parser.add_argument("--questions", type=Path, default=ROOT / "tests/latency_questions.json")

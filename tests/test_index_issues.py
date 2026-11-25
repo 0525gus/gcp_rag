@@ -1,4 +1,3 @@
-"""Department isolation, bounded paging and honest batch vs file error reporting."""
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 

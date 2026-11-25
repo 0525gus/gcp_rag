@@ -1,5 +1,3 @@
-"""Expand the audited Golden100 with 100 weakness-focused, source-grounded cases."""
-
 from __future__ import annotations
 
 import argparse
@@ -36,7 +34,6 @@ QUOTAS = {
     "distributed_evidence": 10,
 }
 SKIP_FILE_IDS = {
-    # The source has only one usable fact and repeatedly fails the multi-condition audit.
     "1MRmJajW44aRKf8wHJbM4olstAyJZ3tgj",
     "1rfwqOTJLS-R0s2BImODhNwy-kNMj_idX",
 }
@@ -370,7 +367,7 @@ def _create_audited_label(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Expand the audited Golden100 with 100 weakness-focused, source-grounded cases.')
     parser.add_argument("--golden100", type=Path, default=ROOT / "tests/golden100.json")
     parser.add_argument("--source100", type=Path, default=ROOT / "tests/_bench_out/golden100_sources.json")
     parser.add_argument("--out", type=Path, default=ROOT / "tests/golden200.json")

@@ -28,12 +28,11 @@ class StaleIndexTask(RuntimeError):
 
 
 class MutationOwnershipLost(StaleIndexTask):
-    """A superseded worker must not change its successor's task/job state."""
+    pass
 
 
 def document_version(state: DocState) -> str:
     data = state.to_firestore()
-    # INDEXED/PARSED transitions and timestamps do not create a new revision.
     for field in ("status", "lastSyncedAt", "error", "ragFileId"):
         data.pop(field, None)
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
@@ -87,8 +86,6 @@ def _uncertain(exc: BaseException | None) -> bool:
     return False
 
 
-# 색인 작업의 코퍼스별 part. 같은 문서라도 교직원·학생 part는 서로 다른 코퍼스를
-# 바꾸므로 동시에 돌 수 있다. 그 밖의 문서 변경(수집·삭제·복구)은 이 전부와 배타다.
 INDEX_PART_IDS = ("faculty", "student")
 # 두 part가 같은 문서 상태를 동시에 기록하면 트랜잭션이 경합으로 중단된다.
 # 실패로 올리기 전에 기본(5회)보다 넉넉히 다시 시도한다.
@@ -103,7 +100,6 @@ def _lock_name(fid: str, part_id: str | None = None) -> str:
 
 
 def mutation_lock_names(fid: str) -> list[str]:
-    """문서 하나에 걸릴 수 있는 모든 잠금 이름."""
     return [_lock_name(fid), *(_lock_name(fid, pid) for pid in INDEX_PART_IDS)]
 
 
@@ -135,8 +131,6 @@ class MutationLease:
         if part_id is not None and part_id not in INDEX_PART_IDS:
             raise ValueError(f"unknown index part: {part_id}")
         tokens = store._tokens
-        # 색인 part는 자기 part 잠금만 잡고, 일반 변경 잠금이 비었는지만 본다.
-        # 일반 변경은 일반 잠금을 잡고, 모든 part 잠금이 비었는지 본다.
         self.refs = [tokens.document(_lock_name(fid, part_id)) for fid in self.file_ids]
         self.blocking_refs = [
             tokens.document(name)
@@ -183,8 +177,6 @@ class MutationLease:
             if self.part_ref is not None:
                 txn.set(self.part_ref, {**payload, "status": "RUNNING"}, merge=True)
                 for fid in self.file_ids:
-                    # Reindexing an INDEXED document must not leave a success
-                    # status behind if deletion succeeds but import fails.
                     if (part.get("fileResults", {}).get(fid) or {}).get("status") != "DONE":
                         txn.update(self.store._col.document(fid), {"status": "PARSED"})
             return True
@@ -226,15 +218,9 @@ class MutationLease:
         self.pinned = True
 
     def checkpoint_file(self, file_id: str, result: dict[str, Any]) -> None:
-        """Persist one revision's corpus result before processing another document."""
         self.checkpoint_files({file_id: result})
 
     def checkpoint_files(self, file_results: dict[str, dict[str, Any]]) -> None:
-        """여러 문서의 코퍼스 결과를 트랜잭션 하나로 기록한다.
-
-        묶음 색인은 문서 수십 건을 한 번에 끝낸다. 문서마다 트랜잭션을 따로 열면
-        매번 전체 문서 버전을 다시 읽어 묶음의 이점을 기록 단계에서 잃는다.
-        """
         if self.part_ref is None or not file_results or any(
             fid not in self.file_ids for fid in file_results
         ):

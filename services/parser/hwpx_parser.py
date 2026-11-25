@@ -1,25 +1,3 @@
-"""HWPX → Markdown (python-hwpx).
-
-한글 문서 중 hwpx 포맷만 이 모듈이 담당한다. hwp(바이너리)는
-rhwp_parser 가 처리한다.
-
-HWPX 는 ZIP 안에 OWPML XML 이 들어 있는 형식 
-순수 파이썬 python-hwpx 로 연다. 
-(rhwp-python 은 PyO3 휠이라 libfreetype ABI 에 묶여 
-Cloud Run 이미지가 깨졌음 그래서 사용하지 않음)
-
-흐름:
-
-1. 해당 바이트를 HwpxDocument.open 으로 연다.
-2. export_markdown() 으로 GFM 을 뽑는다.
-3. 라이브러리 표 출력 결함(병합 셀 절단, 셀 안 개행으로 행이 찢어짐)이
-   있으면 _repair_tables 가 고친다. 멀쩡하면 원문을 한 글자도 안 바꾼다.
-4. OWPML 표 개수·텍스트 길이를 ParseMetrics 에 실어 품질 게이트가
-   조용한 표 소실을 잡게 한다.
-
-진입점은 parse_hwpx_bytes. 반환은 rhwp_parser.ParseOutput 과 같다.
-"""
-
 from __future__ import annotations
 
 import io
@@ -53,7 +31,6 @@ logging.getLogger("hwpx.opc.package").addFilter(_ManifestFallbackFilter())
 
 
 def parse_hwpx_bytes(data: bytes, *, filename: str = "doc.hwpx") -> ParseOutput:
-    """HWPX 바이트 → GFM Markdown."""
     import hwpx
 
     warnings: list[str] = []
@@ -67,8 +44,6 @@ def parse_hwpx_bytes(data: bytes, *, filename: str = "doc.hwpx") -> ParseOutput:
 
     table_count = _table_count(doc, warnings)
     if table_count is None:
-        # 기준값이 없으면 손실을 판정할 수 없다 — 마크다운 개수를 그대로 써서
-        # G2 를 무력화한다(근거 없이 실패로 몰지 않는다).
         table_count = count_markdown_tables(markdown)
         warnings.append("TABLE_COUNT_UNAVAILABLE")
 
@@ -105,8 +80,6 @@ def _canon(text: str) -> str:
 
 
 class _HtmlTableGrid(HTMLParser):
-    """``<table>`` 를 1x1 격자로 편다 (rhwp 쪽 _normalize_tables 와 같은 규칙)."""
-
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.cells: dict[tuple[int, int], str] = {}
@@ -132,7 +105,6 @@ class _HtmlTableGrid(HTMLParser):
             row_span, col_span = self._span
             for dr in range(row_span):
                 for dc in range(col_span):
-                    # rowspan 은 값을 세로로 복제, colspan 은 첫 칸에만
                     self.cells.setdefault(
                         (self._row + dr, self._col + dc), text if dc == 0 else ""
                     )
@@ -171,7 +143,6 @@ def _html_table_to_gfm(html: str) -> str:
 
 
 def _gfm_blocks(markdown: str) -> list[list[str]]:
-    """연속한 ``|`` 줄 뭉치 = GFM 표 하나."""
     lines = markdown.splitlines()
     blocks: list[list[str]] = []
     i = 0
@@ -188,7 +159,6 @@ def _gfm_blocks(markdown: str) -> list[list[str]]:
 
 
 def _broken_tables(markdown: str) -> int:
-    """구조가 깨진 GFM 표 수 — 열 수가 들쭉날쭉하거나 구분행이 없는 것."""
     return sum(1 for block in _gfm_blocks(markdown) if _is_broken(block))
 
 
@@ -217,7 +187,6 @@ def _rejoin_split_rows(markdown: str) -> str:
             i += 1
             continue
 
-        # 기대 열 수는 구분행이 정한다. 빈 줄 전까지만 찾는다.
         width = 0
         for line in lines[i:]:
             if not line.strip():
@@ -225,7 +194,7 @@ def _rejoin_split_rows(markdown: str) -> str:
             if "|" in line and "---" in line:
                 width = line.count("|")
                 break
-        if width < 2:  # 구분행이 없으면 추측하지 않는다
+        if width < 2:
             out.append(lines[i])
             i += 1
             continue
@@ -234,10 +203,8 @@ def _rejoin_split_rows(markdown: str) -> str:
         buf = ""
         while i < len(lines):
             line = lines[i]
-            # 행이 완결된 상태에서 '|' 로 시작하지 않으면 표가 끝난 것
             if not buf and not line.lstrip().startswith("|"):
                 break
-            # 빈 줄은 어떤 경우에도 표를 끝낸다 (덜 채워졌어도 삼키지 않는다)
             if not line.strip():
                 break
             buf = f"{buf} {line.strip()}".strip() if buf else line
@@ -296,7 +263,6 @@ def _repair_tables(doc: object, markdown: str) -> tuple[str, int, int]:
 
         base_lost, base_broken = score(markdown)
 
-        # 1단계: 찢어진 행 재조립. rich 를 부르지 않고 끝나는 경우가 많다.
         joined = _rejoin_split_rows(markdown)
         best, (best_lost, best_broken) = joined, score(joined)
         if (best_lost, best_broken) > (base_lost, base_broken):
@@ -304,7 +270,6 @@ def _repair_tables(doc: object, markdown: str) -> tuple[str, int, int]:
         if not best_lost and not best_broken:
             return best, base_lost - best_lost, base_broken - best_broken
 
-        # 2단계: 병합 셀 소실은 rich exporter 로만 되살릴 수 있다.
         rich = doc.export_rich_markdown()
         fixed = _rejoin_split_rows(
             _HTML_TABLE.sub(lambda m: _html_table_to_gfm(m.group(0)), rich)
@@ -326,7 +291,6 @@ def _repair_tables(doc: object, markdown: str) -> tuple[str, int, int]:
 
 
 def _table_count(doc: object, warnings: list[str]) -> int | None:
-    """OWPML 구조가 말하는 표 개수. 셀 수 없으면 None (파싱 자체는 살린다)."""
     try:
         get_table_map = getattr(doc, "get_table_map", None)
         if not callable(get_table_map):

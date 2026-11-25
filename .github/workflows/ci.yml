@@ -47,8 +47,6 @@ jobs:
       - name: Test
         run: pytest -q
 
-      # 기존 코드에 미해결 위반이 남아 있어 아직 게이트로 쓰지 않는다.
-      # 정리 후 continue-on-error를 제거할 것.
       - name: Lint (report only)
         continue-on-error: true
         run: ruff check . --output-format=github

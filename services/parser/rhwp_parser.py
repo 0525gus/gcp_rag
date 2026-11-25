@@ -1,24 +1,3 @@
-"""HWP(바이너리) → Markdown (rhwp-python).
-
-한글 문서 중 .hwp 만 이 모듈이 기본 담당한다. .hwpx 는
-hwpx_parser 가 처리하고, python-hwpx 가 없을 때만 여기로 내려온다.
-
-rhwp-python 은 PyO3 네이티브 휠이다. Cloud Run 이미지는 libfreetype
-ABI 에 맞춰 맞춰 두어야 한다.
-
-흐름:
-
-1. Document.from_bytes 로 연다. 실패하면 임시 파일에 쓰고 rhwp.parse.
-2. doc.to_ir() 로 중간 표현을 만든다.
-3. _normalize_tables 가 중첩 표를 문단으로 접고, 병합 셀을 1x1 격자로
-   펼친 뒤 빈 행·열을 걷어낸다. 그래야 렌더러가 HTML blob 대신 GFM 표를 낸다.
-   손댈 게 없으면 IR 을 그대로 둔다. 정규화 실패해도 파싱은 살린다.
-4. ir.to_markdown() 으로 GFM 을 뽑고, IR 표 개수·텍스트 길이를
-   ParseMetrics 에 실어 품질 게이트가 표 소실을 잡게 한다.
-
-진입점은 parse_hwp_bytes. ParseOutput 은 HWPX 경로와 같은 반환형이다.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -39,13 +18,11 @@ class ParseOutput:
 
 
 def parse_hwp_bytes(data: bytes, *, filename: str = "doc.hwp") -> ParseOutput:
-    """바이트 → GFM Markdown (rhwp-python)."""
     import rhwp
 
     suffix = ".hwpx" if filename.lower().endswith(".hwpx") else ".hwp"
     warnings: list[str] = []
 
-    # from_bytes 우선, 없으면 임시 파일
     doc = None
     if hasattr(rhwp, "Document") and hasattr(rhwp.Document, "from_bytes"):
         try:
@@ -72,8 +49,6 @@ def parse_hwp_bytes(data: bytes, *, filename: str = "doc.hwp") -> ParseOutput:
     markdown = ir.to_markdown()
     table_count = _count_tables_in_ir(ir)
     if table_count is None:
-        # IR 에서 못 세면 표 손실을 판정할 기준이 없다. 마크다운에 남은 수를 그대로
-        # 기준으로 삼아 G2 를 무력화한다 — 근거 없이 실패로 몰지 않는다.
         table_count = count_markdown_tables(markdown)
         warnings.append("TABLE_COUNT_UNAVAILABLE")
 
@@ -162,7 +137,6 @@ def _normalize_tables(ir: object) -> tuple[object, int, int]:
             return out
 
         def fold_blocks(cell: object) -> list[object]:
-            """셀 안 중첩 표를 문단으로 접는다."""
             blocks: list[object] = []
             for block in cell.blocks:
                 if isinstance(block, TableBlock):
@@ -186,17 +160,13 @@ def _normalize_tables(ir: object) -> tuple[object, int, int]:
                     for dc in range(col_span):
                         key = (cell.row + dr, cell.col + dc)
                         if key in grid:
-                            continue  # 겹치면 먼저 온 셀을 남긴다
+                            continue
                         grid[key] = cell.model_copy(
                             update={
                                 "row": key[0],
                                 "col": key[1],
                                 "row_span": 1,
                                 "col_span": 1,
-                                # colspan 은 첫 칸에만 값을 둔다 (같은 줄 = 중복).
-                                # list() 로 떠서 복제된 셀끼리 같은 리스트를 공유하지
-                                # 않게 한다 — 현재 렌더러는 읽기만 하지만
-                                # (rhwp/ir/_view.py `_md_table`), 공유는 남겨 둘 이유가 없다.
                                 "blocks": list(blocks) if dc == 0 else [],
                             }
                         )
@@ -208,7 +178,7 @@ def _normalize_tables(ir: object) -> tuple[object, int, int]:
             empty = next(iter(grid.values()))
             for r in range(rows):
                 for c in range(cols):
-                    if (r, c) not in grid:  # 원본에 구멍이 있으면 빈 셀로 메운다
+                    if (r, c) not in grid:
                         grid[(r, c)] = empty.model_copy(
                             update={
                                 "row": r,
@@ -224,17 +194,6 @@ def _normalize_tables(ir: object) -> tuple[object, int, int]:
             return any((getattr(b, "text", "") or "").strip() for b in cell.blocks)
 
         def trim(table: object, grid: dict, rows: int, cols: int) -> object | None:
-            """내용이 하나도 없는 행·열을 걷어낸다. 표 전체가 비면 None.
-
-            공문 서식은 빈 칸이 많고, colspan 을 첫 칸에만 두는 규칙 때문에 펼친 뒤
-            더 늘어난다 — 실측에서 셀의 60.3%가 빈 칸, 표 문자의 45.1%가 | 와
-            공백이었다. 전부 빈 행·열은 정보가 0인데 자리만 차지하므로 지운다
-            (실측: 빈 열 1,025개·빈 행 164개, 마크다운 8.0% 감소, 텍스트 손실 0).
-
-            빈 표를 통째로 없애는 것이 기준값과도 정합한다 — 여기서 None 을
-            돌려주면 body 에서 빠지고, _count_tables_in_ir 도 세지 않는다.
-            마크다운 레벨에서 지웠다면 기준값만 남아 G2 가 오탐했을 자리다.
-            """
             keep_rows = [r for r in range(rows) if any(has_text(grid[(r, c)]) for c in range(cols))]
             keep_cols = [c for c in range(cols) if any(has_text(grid[(r, c)]) for r in range(rows))]
             if not keep_rows or not keep_cols:
@@ -278,20 +237,6 @@ def _normalize_tables(ir: object) -> tuple[object, int, int]:
 
 
 def _count_tables_in_ir(ir: object) -> int | None:
-    """문서 구조가 말하는 표 개수. 셀 수 없으면 None.
-
-    마크다운을 세지 않는다 — 이 값은 '마크다운에 몇 개가 살아남았나'를 재는
-    기준값이므로, 마크다운에서 유도하면 손실이 항상 0 이 되어 판정이 무의미해진다.
-
-    scope="body", recurse=False 여야 한다. 렌더러가 표로 찍는 것과 같은 집합이다.
-
-      - furniture(머리말/꼬리말/각주)는 to_markdown() 출력에 안 들어간다.
-      - 중첩 표는 GFM 이 표 안 표를 표현하지 못해 별도 표로 안 나온다
-        (내용은 _recover_nested_tables 가 부모 셀 텍스트로 접어 살린다).
-
-    recurse=True(중첩 포함)로 세면 기준값이 실제 3배로 부풀어 G2 가 오탐한다 —
-    실측 코퍼스 146건에서 2183 vs 714, 85건이 근거 없이 손실 판정을 받았다.
-    """
     try:
         from rhwp.ir.nodes import TableBlock  # noqa: PLC0415
 
