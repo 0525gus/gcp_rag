@@ -1,6 +1,7 @@
 import base64
 import copy
 import json
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -101,6 +102,14 @@ def test_single_uri_scopes_and_cache_are_isolated_under_concurrent_requests(rout
     before = len(calls)
     rpc(client, "ee-student")
     assert len(calls) == before
+
+
+def test_search_log_names_the_authenticated_scope(routed, caplog):
+    _, client, _, _ = routed
+    with caplog.at_level(logging.INFO, logger="mcp_server"):
+        rpc(client, "ee-student", arguments={"query": "scope log"})
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("search query=")]
+    assert lines == ["search query='scope log' top_k=7 drive_id=None scope=ee/student"]
 
 
 def test_student_citations_link_the_post_and_keep_document_attachments(routed, monkeypatch):
