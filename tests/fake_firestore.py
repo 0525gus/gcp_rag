@@ -1,5 +1,3 @@
-"""Transactional in-memory backend using the SDK's real retry decorator."""
-
 from copy import deepcopy
 from threading import RLock
 from types import SimpleNamespace
@@ -24,6 +22,12 @@ class MemoryDb:
 
     def batch(self):
         return Transaction(self)
+
+    def get_all(self, refs, transaction=None):
+        for ref in refs:
+            snap = ref.get(transaction=transaction)
+            snap.id = ref.id
+            yield snap
 
 
 class Ref:

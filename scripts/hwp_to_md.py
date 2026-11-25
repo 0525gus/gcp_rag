@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""로컬: HWP/HWPX → Markdown (rhwp-python).
-
-Usage:
-  python scripts/hwp_to_md.py input.hwpx
-  python scripts/hwp_to_md.py input.hwp -o out.md
-"""
 
 from __future__ import annotations
 

@@ -1,5 +1,3 @@
-"""Rule-based metadata features used only to rerank an existing candidate set."""
-
 from __future__ import annotations
 
 import re

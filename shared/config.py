@@ -1,11 +1,9 @@
-"""환경 설정 (asia-northeast3 고정)."""
-
 from __future__ import annotations
 
 import json
 import logging
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from functools import lru_cache
 
 logger = logging.getLogger(__name__)
@@ -36,24 +34,11 @@ def _env_bool(key: str, default: bool = False) -> bool:
 
 
 class UnknownDriveError(RuntimeError):
-    """학과 맵이 있는데 이 드라이브가 거기 없다.
-
-    조용히 기본 코퍼스로 떨어뜨리면 **남의 학과 자료가 섞인다.** 그건 되돌리려면
-    코퍼스에서 파일을 골라 지워야 하는 사고라, 모르는 드라이브는 처리하지 않고
-    소리를 낸다. 호출부가 그 드라이브만 건너뛰고 나머지를 계속 돌리면 된다.
-    """
+    pass
 
 
 @dataclass(frozen=True)
 class Department:
-    """학과 하나. 공유 드라이브가 곧 학과 경계다.
-
-    드라이브가 학과마다 다르므로 `driveId` 가 학과 키가 된다 — doc_state 에
-    이미 driveId 가 있어서 문서에 학과 필드를 따로 둘 필요가 없다.
-    (같은 드라이브를 여러 학과가 나눠 쓰면 이 전제가 깨진다. 그때는
-    sync_tokens 커서도 드라이브 단위라 학과별 sync 자체가 성립하지 않는다.)
-    """
-
     code: str
     drive_ids: tuple[str, ...] = ()
     staff_corpus: str = ""
@@ -71,7 +56,6 @@ class Department:
 
 
 def _departments_from_json(raw: str) -> tuple[Department, ...]:
-    """명시된 학과 맵은 완전해야 한다. 오류를 단일 학과 모드로 바꾸지 않는다."""
     raw = (raw or "").strip()
     if not raw:
         return ()
@@ -186,18 +170,13 @@ class Settings:
     gcs_hwp_original_bucket: str = ""
     gcs_source_bucket: str = ""
     firestore_database: str = "rag-sync-state"
-    # 컬렉션 5종은 {이름}_COLLECTION 한 축으로 읽는다.
     doc_state_collection: str = "doc_state"
     sync_token_collection: str = "sync_tokens"
     rag_corpus_name: str = ""
 
-    # 학생 공개용 코퍼스. **비우면 분리 기능 자체가 꺼진다**(현행 단일 코퍼스 동작).
-    # rag_corpus_name 쪽은 전체(학생+교직원)를 담는 교직원용이므로 이름을 바꾸지
-    # 않는다 — 기존 배포·env 가 그대로 교직원용이 된다.
     rag_corpus_name_student: str = ""
     docai_processor_id: str = ""
     docai_location: str = "asia-northeast3"
-    # OCR_PROCESSOR 전용. Layout Parser 설정이나 GCP 기본 리전을 상속하지 않는다.
     docai_ocr_processor_id: str = ""
     docai_ocr_location: str = ""
     enable_image_ocr: bool = False
@@ -205,39 +184,30 @@ class Settings:
     enable_image_ocr_student: bool | None = None
     drive_ids: str = ""
 
-    # 공유 드라이브 내부에서 RAG/GCS 대상 폴더만. 배포는 필수(비우면 거부).
-    # 런타임에 비면 드라이브 전체 — 테스트/우회용이지 운영 기본이 아니다.
     sync_folder_ids: str = ""
 
-    # 완전한 학과 맵. sync 운영 이미지는 departments_required=True로 기동한다.
     departments: tuple[Department, ...] = ()
     departments_required: bool = False
 
-    # 이 폴더 트리 아래 문서만 학생 코퍼스에 실린다. sync_folder_ids 의 부분집합이며
-    # 여기 없는 문서는 전부 교직원 전용이다(판정 불가도 교직원 — 안전한 쪽).
     student_folder_ids: str = ""
 
     # 품질 게이트 — 실측 코퍼스 기준 완화 (이미지 많은 공문 G1 오탐 방지)
     # 예: 업적평가 안내 ~0.00085, 개인정보 캠페인 rhwp ~0.00090
     qg_density_threshold: float = 0.0005
-    # 문서 구조상 표 N개 중 마크다운에 남지 않은 비율의 허용 상한.
-    # (구 QG_TABLE_FAIL_RATIO 는 셀 단위 실패율이었으나 그 지표를 채우는 파서가
-    #  없어 발동한 적이 없다. 의미가 달라졌으므로 이름도 바꾼다.)
     qg_table_loss_ratio: float = 0.3
     qg_min_text_length: int = 20
 
-    # log: 경고만 / reject: 422·DLQ / fallback: Document AI(enable_docai_fallback 필요)
     qg_mode: str = "log"
-    top_k_default: int = 5
+    # top_k_default 와 search_fetch_multiplier 는 Golden 200 평가로 고정한 Arm 2 값이다
+    # (docs/verification/golden200-normalized-boundary-audit-2026-09-15.md).
+    top_k_default: int = 7
 
     # 검색 여유분 — retrieve 는 청크 단위인데 postprocess 가 '파일당 1청크' 로
     # 접으므로, k 개 문서를 채우려면 k 보다 많이 뽑아야 한다.
     # 실측(운영 코퍼스 1,209건): 청크 30개당 고유 문서 16.4개 = 문서당 청크 ~1.8개.
-    # 상한이 k*배수보다 작으면 여유분이 소리 없이 사라지므로
-    # search_fetch_max >= search_top_k_max * search_fetch_multiplier 를 지킬 것.
     # (Vertex retrieveContexts 는 topK=100 까지 허용, 200 은 거부)
     search_top_k_max: int = 20
-    search_fetch_multiplier: int = 3
+    search_fetch_multiplier: int = 9
     search_fetch_max: int = 60
 
     # 벡터 거리 상한 — 이 값보다 먼 청크는 버린다(값이 작을수록 유사).
@@ -249,37 +219,21 @@ class Settings:
     # 그 사이인 0.30 을 기본값으로 둔다. 0 이면 필터를 끈다(롤백용).
     search_distance_threshold: float = 0.30
 
-    # 어휘(BM25) 순위를 벡터 순위와 RRF 로 합쳐 상위를 다시 세운다.
-    # 점수가 아니라 **순위만** 쓰므로, 예전에 걷어낸 추측 기반 재정렬(83563ad)과
-    # 달리 score 의미를 몰라도 안전하다. 재검색이 아니라 이미 받은 후보만
-    # 다시 세우는 것이라 recall 은 그대로다.
-    # 실측(골든 15): hit@1 7/15 -> 11/15, MRR 0.647 -> 0.802. RRF 상수에는 둔감.
-    # 다만 골든 질의는 문서 어휘와 겹치게 쓰인 편향이 있고, 로그의 실사용 질의
-    # 10건에서는 top1 변화가 없었다(해롭지도 않았다).
     search_lexical_rerank: bool = True
-    # Additional RRF channel based on normalized file/title BM25. Zero preserves
-    # the current vector + body-BM25 behavior; canaries use 1, 2, and 3.
     search_title_rerank_weight: float = 0.0
-    # Regex-only period metadata match/penalty. Zero keeps the rule disabled.
     search_temporal_rank_weight: float = 0.0
     search_sequence_rank_weight: float = 0.0
     search_document_kind_rank_weight: float = 0.0
     search_revision_rank_weight: float = 0.0
-    # Optional final reranker. "rrf" fixes a larger candidate set without calling
-    # a model, enabling fair A/B/C benchmarks against cross_encoder and llm.
     search_reranker_mode: str = "none"
     search_reranker_candidate_k: int = 30
     search_cross_encoder_model: str = "semantic-ranker-default-004"
     search_llm_reranker_model: str = "gemini-2.5-flash-lite"
     search_reranker_timeout_seconds: float = 15.0
 
-    # 원문 검색은 항상 유지하고, 짧은 모델 재작성 질의를 추가 후보로만 쓴다.
-    # 재작성 실패·조건 손실은 원문 검색으로 즉시 되돌아간다.
     search_rewrite_enabled: bool = False
     search_rewrite_model: str = "gemini-2.5-flash-lite"
     search_rewrite_timeout_seconds: float = 2.0
-    # Rewritten queries improved first-rank precision in the measured corpus.
-    # Give their RRF list a modest preference while retaining raw-query recall.
     search_rewrite_weight: float = 2.0
 
     # 한 문서에서 이어 붙일 최대 청크 수. 1 이면 예전처럼 파일당 1청크만 준다.
@@ -291,7 +245,6 @@ class Settings:
     # 곱셈이라 그냥 두면 터진다: top_k=20 이면 최대 60청크 ≈ 6만 토큰이 한 번에
     # 나가고, 그게 호출마다 에이전트 컨텍스트에 쌓인다(실측: 한 질문에 7회 호출,
     # top_k 를 10→20 으로 스스로 올림).
-    # 기본 15 = top_k_default(5) × 3 이라 기본 호출의 동작은 그대로다.
     # 문서 다양성이 우선이라 top_k 보다 낮게는 못 내려간다(문서당 1청크는 보장).
     search_max_total_chunks: int = 15
 
@@ -302,18 +255,12 @@ class Settings:
     rag_chunk_size: int = 1024
     rag_chunk_overlap: int = 256
 
-    # RagFile resource-name mapping rollout switches.  Write/read are separate so
-    # production can accumulate and audit mappings before direct deletion trusts
-    # them.  A missing mapping falls back to the legacy corpus scan until coverage
-    # has been proven.
     rag_metadata_bucket: str = ""
-    rag_mapping_write_enabled: bool = False
-    rag_mapping_read_enabled: bool = False
+    rag_mapping_write_enabled: bool = True
+    rag_mapping_read_enabled: bool = True
     rag_mapping_fallback_scan_enabled: bool = True
 
-    # Cloud Tasks 기반 코퍼스 분리. 기능 플래그를 켜기 전에는 기존 동기
-    # /sync/index-gcs 경로를 그대로 쓴다.
-    cloud_tasks_enabled: bool = False
+    cloud_tasks_enabled: bool = True
     task_queue_location: str = "asia-northeast3"
     task_queue_faculty: str = "faculty-rag-sync-queue"
     task_queue_student: str = "student-rag-sync-queue"
@@ -348,11 +295,8 @@ class Settings:
     enable_docai_fallback_student: bool | None = None
     dlq_collection: str = "doc_dlq"
     split_queue_collection: str = "doc_split_queue"
-    # 장시간 작업 진행률.
     sync_job_collection: str = "sync_jobs"
 
-    # Drive→GCS ingest 병렬 워커 (무료/소형 인스턴스 기준 8 권장).
-    # HWP 뿐 아니라 FILE_COPY·GOOGLE_EXPORT 까지 전 라우트를 묶는다.
     ingest_concurrency: int = 8
     # /sync/changes 가 한 번에 반환할 최대 변경 건수.
     # Cloud Workflows 는 실행당 변수 누적 512KB 가 상한인데, 변경 1건이 응답·복사본·
@@ -379,11 +323,6 @@ class Settings:
 
     @property
     def audience_split_enabled(self) -> bool:
-        """학생/교직원 코퍼스 분리가 켜져 있는가.
-
-        둘 다 있어야 켠다. 코퍼스만 있고 폴더가 없으면 학생 코퍼스가 영원히
-        비고, 폴더만 있고 코퍼스가 없으면 판정 결과를 쓸 곳이 없다.
-        """
         return bool(self.rag_corpus_name_student and self.student_folder_id_list)
 
     def department_for_drive(self, drive_id: str) -> Department | None:
@@ -395,14 +334,6 @@ class Settings:
         return None
 
     def for_drive(self, drive_id: str) -> Settings:
-        """이 드라이브(=학과)용 설정으로 바꾼 사본.
-
-        핸들러 진입점에서 한 번만 갈아끼우면 그 아래 호출들(RagEngineClient,
-        GcsClient, 폴더 스코프)이 전부 학과 값을 쓴다 — 25곳을 각각 고치지
-        않아도 되는 이유다.
-
-        배포 시 병합을 마친 완전한 학과 맵만 받는다. 공용 설정을 상속하지 않는다.
-        """
         if not self.departments:
             return self
         dept = self.department_for_drive(drive_id)
@@ -426,110 +357,185 @@ class Settings:
         )
 
     def parser_option_for(self, option: str, audience: object) -> bool:
-        # Unknown audience follows the conservative staff classification.
         suffix = "student" if str(getattr(audience, "value", audience)).upper() == "STUDENT" else "staff"
         explicit = getattr(self, f"{option}_{suffix}")
         return explicit if explicit is not None else getattr(self, option)
 
     @classmethod
     def from_env(cls) -> Settings:
-        mode = os.environ.get("QG_MODE", "log").strip().lower()
+        d = {f.name: f.default for f in fields(cls)}
+        mode = os.environ.get("QG_MODE", d["qg_mode"]).strip().lower()
         if mode not in {"log", "reject", "fallback"}:
-            mode = "log"
+            mode = d["qg_mode"]
+        region = os.environ.get("GCP_REGION", d["gcp_region"])
         return cls(
             departments_required=(
                 _env_bool("DEPARTMENTS_REQUIRED") or "DEPARTMENTS_JSON" in os.environ
             ),
             gcp_project_id=_env("GCP_PROJECT_ID"),
-            gcp_region=os.environ.get("GCP_REGION", "asia-northeast3"),
+            gcp_region=region,
             gcs_hwp_original_bucket=_env("GCS_HWP_ORIGINAL_BUCKET"),
             gcs_source_bucket=_env("GCS_SOURCE_BUCKET"),
-            firestore_database=os.environ.get("FIRESTORE_DATABASE", "rag-sync-state"),
-            doc_state_collection=os.environ.get("DOC_STATE_COLLECTION", "doc_state"),
-            sync_token_collection=os.environ.get("SYNC_TOKEN_COLLECTION", "sync_tokens"),
+            firestore_database=os.environ.get("FIRESTORE_DATABASE", d["firestore_database"]),
+            doc_state_collection=os.environ.get("DOC_STATE_COLLECTION", d["doc_state_collection"]),
+            sync_token_collection=os.environ.get(
+                "SYNC_TOKEN_COLLECTION", d["sync_token_collection"]
+            ),
             rag_corpus_name=_env("RAG_CORPUS_NAME"),
             rag_corpus_name_student=os.environ.get("RAG_CORPUS_NAME_STUDENT", ""),
             docai_processor_id=os.environ.get("DOCAI_PROCESSOR_ID", ""),
-            docai_location=os.environ.get("DOCAI_LOCATION", "asia-northeast3"),
+            docai_location=os.environ.get("DOCAI_LOCATION", d["docai_location"]),
             docai_ocr_processor_id=os.environ.get("DOCAI_OCR_PROCESSOR_ID", ""),
             docai_ocr_location=os.environ.get("DOCAI_OCR_LOCATION", ""),
             drive_ids=os.environ.get("DRIVE_IDS", ""),
             sync_folder_ids=os.environ.get("SYNC_FOLDER_IDS", ""),
             student_folder_ids=os.environ.get("STUDENT_FOLDER_IDS", ""),
             departments=_departments_from_json(os.environ.get("DEPARTMENTS_JSON", "")),
-            qg_density_threshold=_env_float("QG_DENSITY_THRESHOLD", 0.0005),
-            qg_table_loss_ratio=_env_float("QG_TABLE_LOSS_RATIO", 0.3),
-            qg_min_text_length=_env_int("QG_MIN_TEXT_LENGTH", 20),
+            qg_density_threshold=_env_float("QG_DENSITY_THRESHOLD", d["qg_density_threshold"]),
+            qg_table_loss_ratio=_env_float("QG_TABLE_LOSS_RATIO", d["qg_table_loss_ratio"]),
+            qg_min_text_length=_env_int("QG_MIN_TEXT_LENGTH", d["qg_min_text_length"]),
             qg_mode=mode,
-            top_k_default=_env_int("TOP_K_DEFAULT", 5),
-            search_top_k_max=_env_int("SEARCH_TOP_K_MAX", 20),
-            search_fetch_multiplier=_env_int("SEARCH_FETCH_MULTIPLIER", 3),
-            search_fetch_max=_env_int("SEARCH_FETCH_MAX", 60),
-            search_distance_threshold=_env_float("SEARCH_DISTANCE_THRESHOLD", 0.30),
-            search_lexical_rerank=_env_bool("SEARCH_LEXICAL_RERANK", True),
+            top_k_default=_env_int("TOP_K_DEFAULT", d["top_k_default"]),
+            search_top_k_max=_env_int("SEARCH_TOP_K_MAX", d["search_top_k_max"]),
+            search_fetch_multiplier=_env_int(
+                "SEARCH_FETCH_MULTIPLIER", d["search_fetch_multiplier"]
+            ),
+            search_fetch_max=_env_int("SEARCH_FETCH_MAX", d["search_fetch_max"]),
+            search_distance_threshold=_env_float(
+                "SEARCH_DISTANCE_THRESHOLD", d["search_distance_threshold"]
+            ),
+            search_lexical_rerank=_env_bool("SEARCH_LEXICAL_RERANK", d["search_lexical_rerank"]),
             search_title_rerank_weight=max(
-                0.0, _env_float("SEARCH_TITLE_RERANK_WEIGHT", 0.0)
+                0.0, _env_float("SEARCH_TITLE_RERANK_WEIGHT", d["search_title_rerank_weight"])
             ),
             search_temporal_rank_weight=max(
-                0.0, _env_float("SEARCH_TEMPORAL_RANK_WEIGHT", 0.0)
+                0.0, _env_float("SEARCH_TEMPORAL_RANK_WEIGHT", d["search_temporal_rank_weight"])
             ),
             search_sequence_rank_weight=max(
-                0.0, _env_float("SEARCH_SEQUENCE_RANK_WEIGHT", 0.0)
+                0.0, _env_float("SEARCH_SEQUENCE_RANK_WEIGHT", d["search_sequence_rank_weight"])
             ),
             search_document_kind_rank_weight=max(
-                0.0, _env_float("SEARCH_DOCUMENT_KIND_RANK_WEIGHT", 0.0)
+                0.0,
+                _env_float(
+                    "SEARCH_DOCUMENT_KIND_RANK_WEIGHT", d["search_document_kind_rank_weight"]
+                ),
             ),
             search_revision_rank_weight=max(
-                0.0, _env_float("SEARCH_REVISION_RANK_WEIGHT", 0.0)
+                0.0, _env_float("SEARCH_REVISION_RANK_WEIGHT", d["search_revision_rank_weight"])
             ),
-            search_reranker_mode=os.environ.get("SEARCH_RERANKER_MODE", "none").strip().lower(),
+            search_reranker_mode=os.environ.get(
+                "SEARCH_RERANKER_MODE", d["search_reranker_mode"]
+            ).strip().lower(),
             search_reranker_candidate_k=max(
-                10, min(_env_int("SEARCH_RERANKER_CANDIDATE_K", 30), 30)
+                10,
+                min(_env_int("SEARCH_RERANKER_CANDIDATE_K", d["search_reranker_candidate_k"]), 30),
             ),
             search_cross_encoder_model=os.environ.get(
-                "SEARCH_CROSS_ENCODER_MODEL", "semantic-ranker-default-004"
+                "SEARCH_CROSS_ENCODER_MODEL", d["search_cross_encoder_model"]
             ).strip(),
             search_llm_reranker_model=os.environ.get(
-                "SEARCH_LLM_RERANKER_MODEL", "gemini-2.5-flash-lite"
+                "SEARCH_LLM_RERANKER_MODEL", d["search_llm_reranker_model"]
             ).strip(),
             search_reranker_timeout_seconds=max(
-                0.1, _env_float("SEARCH_RERANKER_TIMEOUT_SECONDS", 15.0)
+                0.1,
+                _env_float("SEARCH_RERANKER_TIMEOUT_SECONDS", d["search_reranker_timeout_seconds"]),
             ),
-            search_rewrite_enabled=_env_bool("SEARCH_REWRITE_ENABLED", False),
+            search_rewrite_enabled=_env_bool(
+                "SEARCH_REWRITE_ENABLED", d["search_rewrite_enabled"]
+            ),
             search_rewrite_model=os.environ.get(
-                "SEARCH_REWRITE_MODEL", "gemini-2.5-flash-lite"
+                "SEARCH_REWRITE_MODEL", d["search_rewrite_model"]
             ).strip(),
             search_rewrite_timeout_seconds=max(
-                0.1, _env_float("SEARCH_REWRITE_TIMEOUT_SECONDS", 2.0)
+                0.1,
+                _env_float("SEARCH_REWRITE_TIMEOUT_SECONDS", d["search_rewrite_timeout_seconds"]),
             ),
-            search_rewrite_weight=max(0.0, _env_float("SEARCH_REWRITE_WEIGHT", 2.0)),
-            search_max_chunks_per_file=max(1, _env_int("SEARCH_MAX_CHUNKS_PER_FILE", 3)),
-            search_max_total_chunks=max(1, _env_int("SEARCH_MAX_TOTAL_CHUNKS", 15)),
-            rag_chunk_size=_env_int("RAG_CHUNK_SIZE", 1024),
-            rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", 256),
+            search_rewrite_weight=max(
+                0.0, _env_float("SEARCH_REWRITE_WEIGHT", d["search_rewrite_weight"])
+            ),
+            search_max_chunks_per_file=max(
+                1, _env_int("SEARCH_MAX_CHUNKS_PER_FILE", d["search_max_chunks_per_file"])
+            ),
+            search_max_total_chunks=max(
+                1, _env_int("SEARCH_MAX_TOTAL_CHUNKS", d["search_max_total_chunks"])
+            ),
+            rag_chunk_size=_env_int("RAG_CHUNK_SIZE", d["rag_chunk_size"]),
+            rag_chunk_overlap=_env_int("RAG_CHUNK_OVERLAP", d["rag_chunk_overlap"]),
             rag_metadata_bucket=os.environ.get("RAG_METADATA_BUCKET", ""),
-            rag_mapping_write_enabled=_env_bool("RAG_MAPPING_WRITE_ENABLED", False),
-            rag_mapping_read_enabled=_env_bool("RAG_MAPPING_READ_ENABLED", False),
-            rag_mapping_fallback_scan_enabled=_env_bool("RAG_MAPPING_FALLBACK_SCAN_ENABLED", True),
-            cloud_tasks_enabled=_env_bool("CLOUD_TASKS_ENABLED", False),
-            task_queue_location=os.environ.get(
-                "TASK_QUEUE_LOCATION", os.environ.get("GCP_REGION", "asia-northeast3")
+            rag_mapping_write_enabled=_env_bool(
+                "RAG_MAPPING_WRITE_ENABLED", d["rag_mapping_write_enabled"]
             ),
-            task_queue_faculty=os.environ.get("TASK_QUEUE_FACULTY", "faculty-rag-sync-queue"),
-            task_queue_student=os.environ.get("TASK_QUEUE_STUDENT", "student-rag-sync-queue"),
+            rag_mapping_read_enabled=_env_bool(
+                "RAG_MAPPING_READ_ENABLED", d["rag_mapping_read_enabled"]
+            ),
+            rag_mapping_fallback_scan_enabled=_env_bool(
+                "RAG_MAPPING_FALLBACK_SCAN_ENABLED", d["rag_mapping_fallback_scan_enabled"]
+            ),
+            cloud_tasks_enabled=_env_bool("CLOUD_TASKS_ENABLED", d["cloud_tasks_enabled"]),
+            task_queue_location=os.environ.get("TASK_QUEUE_LOCATION", region),
+            task_queue_faculty=os.environ.get("TASK_QUEUE_FACULTY", d["task_queue_faculty"]),
+            task_queue_student=os.environ.get("TASK_QUEUE_STUDENT", d["task_queue_student"]),
             task_service_account=os.environ.get("TASK_SERVICE_ACCOUNT", ""),
             sync_task_base_url=os.environ.get("SYNC_TASK_BASE_URL", ""),
-            index_job_timeout_seconds=max(60, _env_int("INDEX_JOB_TIMEOUT_SECONDS", 900)),
-            rag_delete_pacing_seconds=_env_float("RAG_DELETE_PACING_SECONDS", 1.1),
-            rag_delete_concurrency=max(1, min(_env_int("RAG_DELETE_CONCURRENCY", 1), 16)),
-            max_gcs_bytes=_env_int("MAX_GCS_BYTES", 150 * 1024 * 1024),
-            enable_docai_fallback=_env_bool("ENABLE_DOCAI_FALLBACK", False),
-            dlq_collection=os.environ.get("DLQ_COLLECTION", "doc_dlq"),
-            split_queue_collection=os.environ.get("SPLIT_QUEUE_COLLECTION", "doc_split_queue"),
-            sync_job_collection=os.environ.get("SYNC_JOB_COLLECTION", "sync_jobs"),
-            ingest_concurrency=max(1, min(_env_int("INGEST_CONCURRENCY", 8), 32)),
-            sync_max_changes=max(1, min(_env_int("SYNC_MAX_CHANGES", 200), 2000)),
+            index_job_timeout_seconds=max(
+                60, _env_int("INDEX_JOB_TIMEOUT_SECONDS", d["index_job_timeout_seconds"])
+            ),
+            rag_delete_pacing_seconds=_env_float(
+                "RAG_DELETE_PACING_SECONDS", d["rag_delete_pacing_seconds"]
+            ),
+            rag_delete_concurrency=max(
+                1, min(_env_int("RAG_DELETE_CONCURRENCY", d["rag_delete_concurrency"]), 16)
+            ),
+            max_gcs_bytes=_env_int("MAX_GCS_BYTES", d["max_gcs_bytes"]),
+            enable_docai_fallback=_env_bool("ENABLE_DOCAI_FALLBACK", d["enable_docai_fallback"]),
+            dlq_collection=os.environ.get("DLQ_COLLECTION", d["dlq_collection"]),
+            split_queue_collection=os.environ.get(
+                "SPLIT_QUEUE_COLLECTION", d["split_queue_collection"]
+            ),
+            sync_job_collection=os.environ.get("SYNC_JOB_COLLECTION", d["sync_job_collection"]),
+            ingest_concurrency=max(
+                1, min(_env_int("INGEST_CONCURRENCY", d["ingest_concurrency"]), 32)
+            ),
+            sync_max_changes=max(
+                1, min(_env_int("SYNC_MAX_CHANGES", d["sync_max_changes"]), 2000)
+            ),
         )
+
+
+_FIELDS_NOT_FROM_ENV = frozenset({
+    "departments",
+    "departments_required",
+    "enable_image_ocr",
+    "enable_image_ocr_staff",
+    "enable_image_ocr_student",
+    "enable_docai_fallback_staff",
+    "enable_docai_fallback_student",
+})
+
+PER_DEPLOYMENT_ENV = frozenset({
+    "GCP_PROJECT_ID",
+    "GCS_HWP_ORIGINAL_BUCKET",
+    "GCS_SOURCE_BUCKET",
+    "RAG_CORPUS_NAME",
+    "RAG_CORPUS_NAME_STUDENT",
+    "DRIVE_IDS",
+    "SYNC_FOLDER_IDS",
+    "STUDENT_FOLDER_IDS",
+    "TASK_SERVICE_ACCOUNT",
+    "SYNC_TASK_BASE_URL",
+})
+
+
+def env_defaults(region: str | None = None) -> dict[str, object]:
+    values = {
+        f.name.upper(): f.default
+        for f in fields(Settings)
+        if f.name not in _FIELDS_NOT_FROM_ENV and f.name.upper() not in PER_DEPLOYMENT_ENV
+    }
+    if region:
+        values["GCP_REGION"] = region
+    values["TASK_QUEUE_LOCATION"] = values["GCP_REGION"]
+    return values
 
 
 @lru_cache

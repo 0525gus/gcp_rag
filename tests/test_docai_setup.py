@@ -1,11 +1,10 @@
-"""Setup uses metadata-only calls; no document processing or paid resources in tests."""
 from unittest.mock import MagicMock
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from scripts import dept_gui, docai_setup
+from scripts import common_config, dept_gui, docai_setup
 
 
 @pytest.fixture
@@ -160,10 +159,10 @@ def test_initial_setup_keeps_both_processors_optional_and_independent():
 
 
 def test_runtime_drift_detects_cleared_processor_and_deploy_location_default(monkeypatch):
-    monkeypatch.setattr(dept_gui, "_common", lambda: {
+    monkeypatch.setattr(dept_gui, "_common", lambda: common_config.resolve({
         "GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3",
         "DOCAI_PROCESSOR_ID": "", "DOCAI_LOCATION": "", "DOCAI_OCR_PROCESSOR_ID": "new-ocr",
-    })
+    }))
     monkeypatch.setattr(dept_gui, "_expected_runtime_env", lambda: ("cs", {}, "{}"))
     deployed = {"DOCAI_PROCESSOR_ID": "old-layout", "DOCAI_LOCATION": "asia-northeast3",
                 "DOCAI_OCR_PROCESSOR_ID": "old-ocr", "DEPARTMENTS_JSON": "{}"}

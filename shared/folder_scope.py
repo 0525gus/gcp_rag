@@ -1,5 +1,3 @@
-"""공유 드라이브 하위 폴더 allowlist 판별 (GCP 클라이언트 의존 없음)."""
-
 from __future__ import annotations
 
 import logging
@@ -15,10 +13,6 @@ def is_under_folder_allowlist(
     allowlist: set[str],
     resolve_parents: Callable[[str], list[str]],
 ) -> bool:
-    """file_id 또는 조상 폴더가 allowlist에 있으면 True.
-
-    allowlist가 비어 있으면 범위 제한 없음(True).
-    """
     if not allowlist:
         return True
     if file_id in allowlist:
@@ -37,8 +31,6 @@ def is_under_folder_allowlist(
         try:
             queue.extend(resolve_parents(pid))
         except Exception as exc:  # noqa: BLE001
-            # 다른 parent 경로가 allowlist에 닿을 수 있으므로 끝까지 확인하되,
-            # 어느 경로라도 조회하지 못했다면 '범위 밖'으로 단정하지 않는다.
             resolution_error = exc
             logger.warning("parent resolve failed id=%s: %s", pid, exc)
     if resolution_error is not None:

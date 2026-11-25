@@ -1,5 +1,3 @@
-"""동기화 커밋·색인 실패가 성공으로 위장되지 않는지 검증한다."""
-
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -24,15 +22,10 @@ class _Settings:
     gcs_source_bucket = "src-bkt"
     rag_chunk_size = 1024
     rag_chunk_overlap = 256
-    # 복구 경로가 이제 **이 설정으로** RagEngineClient 를 만든다.
-    # 예전에는 인자 없이 만들어 전역 기본 코퍼스를 봤다 — 학과를 갈라 놓고도
-    # 전부 한 코퍼스로 들어가던 원인이다.
     rag_corpus_name = "corpus-under-test"
 
 
 class _LockableStore:
-    """backfill-run 은 드라이브당 하나만 돌도록 잠금을 잡는다."""
-
     def try_acquire_lock(self, _name: str, *, ttl_seconds: int) -> bool:
         return True
 
@@ -77,12 +70,6 @@ class _BackfillDrive:
 
 
 class _NoopRag:
-    """백필 시작 시의 기존 청크 일괄 제거 (코퍼스 1회 순회).
-
-    백필은 이제 학과(=드라이브) 설정을 넘겨 클라이언트를 만든다
-    (`RagEngineClient(settings)`) — 안 넘기면 전역 기본 코퍼스를 보게 된다.
-    """
-
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         pass
 
@@ -97,7 +84,6 @@ def _wire_backfill(monkeypatch: pytest.MonkeyPatch) -> _BackfillStore:
     monkeypatch.setattr(sync_main, "DriveClient", _BackfillDrive)
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s=None: object())
     monkeypatch.setattr(sync_main, "RagEngineClient", _NoopRag)
-    # 백필은 클라이언트를 재사용하려고 _ingest_with 를 직접 부른다.
     monkeypatch.setattr(
         sync_main,
         "_ingest_with",
@@ -158,7 +144,6 @@ def test_backfill_index_failure_is_counted_and_token_is_not_committed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _wire_backfill(monkeypatch)
-    # 백필은 배치마다 _import_and_mark 로 (삭제 → import) 를 함께 수행한다.
     monkeypatch.setattr(
         sync_main,
         "_import_and_mark",
@@ -169,8 +154,6 @@ def test_backfill_index_failure_is_counted_and_token_is_not_committed(
         sync_main.BackfillRunBody(driveId="drive", indexBatchSize=3)
     )
 
-    # 색인 실패는 indexFailed 로 센다 — failed 에 더하면 그 파일이 gcsUploaded 와
-    # 겹쳐 reconcile 의 listed 항등식이 깨진다(unaccounted 음수).
     assert result["totals"]["indexFailed"] == 3
     assert result["totals"]["failed"] == 0
     assert result["totals"]["gcsUploaded"] == 3
@@ -248,11 +231,6 @@ def _indexes_everything(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_backfill_syncs_student_corpus_for_each_indexed_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """백필은 /sync/index-gcs 를 거치지 않는다.
-
-    학생 코퍼스를 여기서 안 맞추면 초기 적재 직후 학생 코퍼스가 통째로 비고,
-    그 문서들은 이미 INDEXED 라 이후 델타에도 안 걸려 영영 안 채워진다.
-    """
     store = _wire_backfill(monkeypatch)
     monkeypatch.setattr(sync_main, "get_settings", lambda: _SplitSettings())
     _indexes_everything(monkeypatch)
@@ -280,11 +258,6 @@ def test_backfill_syncs_student_corpus_for_each_indexed_batch(
 def test_backfill_student_sync_failure_blocks_token_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """학생 코퍼스 동기화 실패를 삼키면 안 된다.
-
-    교직원 import 만 성공한 채 토큰이 커밋되면, 그 배치는 다시 안 돌아
-    학생 코퍼스에 영구 구멍이 남는다.
-    """
     store = _wire_backfill(monkeypatch)
     monkeypatch.setattr(sync_main, "get_settings", lambda: _SplitSettings())
     _indexes_everything(monkeypatch)
@@ -306,16 +279,10 @@ def test_backfill_student_sync_failure_blocks_token_commit(
 def test_backfill_does_not_delete_chunks_of_documents_it_will_not_reimport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """재백필에서 UNCHANGED 로 빠지는 문서의 청크를 지우면 그대로 유실된다.
-
-    스냅샷 전체를 미리 지우던 시절, 3천 건 재백필은 코퍼스를 비우고도
-    totals.unchanged 로 세어 ok=true 로 보고했다 — ERROR 로그 한 줄 없이.
-    """
     deleted: list[list[str]] = []
     imported: list[list[str]] = []
 
     class _Rag:
-        # 백필이 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
         def __init__(self, *_a: object, **_kw: object) -> None:
             pass
 
@@ -333,7 +300,6 @@ def test_backfill_does_not_delete_chunks_of_documents_it_will_not_reimport(
     monkeypatch.setattr(sync_main, "DriveClient", _BackfillDrive)
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s=None: object())
     monkeypatch.setattr(sync_main, "RagEngineClient", _Rag)
-    # 이미 INDEXED 이고 modifiedTime 이 그대로면 ingest 는 UNCHANGED 를 돌려준다.
     monkeypatch.setattr(
         sync_main, "_ingest_with", lambda body, **_c: {"status": "UNCHANGED"}
     )
@@ -365,8 +331,6 @@ def test_rag_import_rejects_partial_failure(monkeypatch: pytest.MonkeyPatch) -> 
         ),
     )
 
-    # 예외가 아니라 outcome 으로 돌려준다 — 호출측이 배치를 PARSED 로 남겨
-    # 다음 주기에 회수할 수 있어야 하기 때문이다(_import_and_mark 참고).
     outcome = _rag_client().import_from_gcs(["gs://b/1", "gs://b/2", "gs://b/3"])
 
     assert outcome.ok is False
@@ -385,7 +349,6 @@ def test_rag_import_rejects_unaccounted_inputs(monkeypatch: pytest.MonkeyPatch) 
         ),
     )
 
-    # imported + skipped 가 보낸 수에 못 미치면 성공으로 세지 않는다.
     outcome = _rag_client().import_from_gcs(["gs://b/1", "gs://b/2"])
 
     assert outcome.ok is False
@@ -406,7 +369,6 @@ def test_rag_import_accepts_imported_and_deduplicated_files(
     )
     uris = ["gs://b/1", "gs://b/2"]
 
-    # skipped 는 이미 코퍼스에 있어 재사용된 정상 결과라 성공으로 센다.
     outcome = _rag_client().import_from_gcs(uris)
     assert outcome.ok is True
     assert outcome.uris == uris
@@ -416,7 +378,6 @@ def test_index_gcs_does_not_mark_state_on_incomplete_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeRag:
-        # index-gcs 가 학과(=드라이브)별 클라이언트를 만든다 — RagEngineClient(settings).
         def __init__(self, *_a: object, **_kw: object) -> None:
             pass
 
@@ -434,8 +395,6 @@ def test_index_gcs_does_not_mark_state_on_incomplete_result(
     monkeypatch.setattr(sync_main, "DocStateStore", FakeStore)
     monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
 
-    # 예외 대신 PARTIAL 로 돌려준다 — 배치는 PARSED 로 남아 다음 주기가 회수한다.
-    # 핵심 계약은 그대로다: 불완전한 결과로는 상태를 건드리지 않는다(FakeStore.get).
     result = sync_main.index_gcs(
         sync_main.IndexGcsBody(
             gcsUris=["gs://b/1", "gs://b/2"],
@@ -454,7 +413,6 @@ def test_index_gcs_stops_when_predelete_fails(
     calls: list[str] = []
 
     class FakeRag:
-        # index-gcs 가 학과(=드라이브)별 클라이언트를 만든다 — RagEngineClient(settings).
         def __init__(self, *_a: object, **_kw: object) -> None:
             pass
 
@@ -576,15 +534,12 @@ def test_reindex_failure_is_counted_for_threshold_and_final_flush(
         def import_from_gcs(self, _uris: list[str]) -> list[str]:
             raise RuntimeError("RAG unavailable")
 
-        # 복구·색인 경로가 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
-
         def __init__(self, *_a: object, **_kw: object) -> None:
 
             pass
 
 
         def delete_files_by_ids(self, _file_ids: list[str]) -> int:
-            # 사전 일괄 삭제는 성공하고 import 만 실패하는 상황을 만든다.
             return 0
 
     monkeypatch.setattr(sync_main, "get_settings", lambda: _Settings())
@@ -660,16 +615,9 @@ def test_reindex_replays_original_office_uri_with_sidecar(
     ]
 
 
-# ------------------------------------------------- 백필 단일 실행 잠금
 def test_backfill_rejects_a_second_concurrent_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """워크플로우 스텝 타임아웃이 Cloud Run 요청보다 짧으면 재시도가 겹친다.
-
-    첫 요청이 아직 살아 있는데 두 번째가 들어오면 같은 드라이브를 두 번 훑고
-    같은 코퍼스에 삭제·import 를 교차시킨다. 서버가 스스로 막아야 한다.
-    """
-
     class _Busy(_BackfillStore):
         def try_acquire_lock(self, _name: str, *, ttl_seconds: int) -> bool:
             return False
@@ -709,14 +657,7 @@ def test_backfill_releases_the_lock_even_when_it_fails(
     assert released == ["backfill:drive"], "실패해도 잠금은 풀려야 한다"
 
 
-# ------------------------------------------------- parked 는 커밋을 막지 않는다
 def test_parked_docs_are_accounted_and_do_not_break_reconcile() -> None:
-    """DLQ·분할 대기는 '처리를 마친 것'이라 accounted 에 들어가야 한다.
-
-    안 넣으면 그만큼 unaccounted 로 잡혀 reconcile 이 실패하고, 워크플로우는
-    drive_reconciled=false 로 pageToken 을 커밋하지 않는다 — parked 를 failed 에서
-    뺀 의미가 사라진다.
-    """
     body = sync_main.ReconcileBody(
         driveId="d",
         listed=5,
@@ -724,7 +665,7 @@ def test_parked_docs_are_accounted_and_do_not_break_reconcile() -> None:
         uris=2,
         indexed=2,
         failed=0,
-        parked=2,          # DLQ 1 + 분할 대기 1
+        parked=2,
         dlq=1,
         splitQueued=1,
         skipped=1,
@@ -740,20 +681,14 @@ def test_parked_docs_are_accounted_and_do_not_break_reconcile() -> None:
 
 
 def test_parked_and_failed_are_counted_once_each() -> None:
-    """parked 와 failed 는 서로 다른 문서다 — 한쪽을 다른 쪽에 겹쳐 세면 안 된다.
-
-    reconcile 이 보는 것은 '전부 설명됐는가'(항등식)뿐이고, 실패 때문에 커밋을
-    막는 판단은 워크플로우의 `drive_failed == 0` 이 한다. 그래서 failed 가 있어도
-    항등식이 맞으면 여기서는 ok 다 — 그 구분이 parked 분리의 전제다.
-    """
     body = sync_main.ReconcileBody(
         driveId="d",
         listed=3,
         gcsUploaded=1,
         uris=1,
         indexed=1,
-        failed=1,          # 진짜 일시 실패 — 커밋은 워크플로우가 막는다
-        parked=1,          # 처리를 마친 것 — 커밋을 막지 않는다
+        failed=1,
+        parked=1,
         skipped=0,
         deleted=0,
         unchanged=0,
@@ -761,7 +696,6 @@ def test_parked_and_failed_are_counted_once_each() -> None:
 
     r = sync_main.reconcile(body)
 
-    # 1(gcs) + 1(failed) + 1(parked) = 3 = listed
     assert r["unaccounted"] == 0
     assert (r["failed"], r["parked"]) == (1, 1)
 
@@ -769,7 +703,6 @@ def test_parked_and_failed_are_counted_once_each() -> None:
 def test_backfill_dlq_does_not_block_token_commit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """처리 불가 문서 1건이 백필의 pageToken 을 영구히 세우면 안 된다."""
     store = _wire_backfill(monkeypatch)
     monkeypatch.setattr(
         sync_main,

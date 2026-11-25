@@ -1,19 +1,3 @@
-"""XLSX 셀을 마크다운 표로 뽑는다.
-
-RAG Engine 기본 파서는 XLSX 를 읽지 못한다. 원본을 그대로 올려봐야 검색되지
-않으므로 지금까지는 경로 사이드카(`.meta.md`) 한 줄만 색인했는데, 그러면
-"그 표 안에 뭐가 있냐"는 질문에 구조적으로 답이 안 나온다. 실제로 운영 중
-그 질문이 들어와 9회 재질의 끝에 실패한 사례가 있다(2026-07-29 09:21).
-
-셀 좌표와 값은 파일에 그대로 들어 있어 추론할 것이 없다. HWP 처럼 레이아웃에서
-표를 알아내는 작업이 아니라, 읽어서 옮겨 적는 작업이다.
-
-측정(운영 코퍼스 xlsx 116건 전량):
-    89건  진짜 OOXML    → 87건 즉시 성공, 2건은 styles.xml 결함(아래 복구 경로)
-    27건  암호 걸린 파일 → 열 수 없음. XlsxParseError 로 알리고 호출측이
-                          사이드카만 남기던 기존 동작으로 떨어진다
-"""
-
 from __future__ import annotations
 
 import datetime as _dt
@@ -48,11 +32,10 @@ _CELL_STYLES_RE = re.compile(
 
 
 class XlsxParseError(RuntimeError):
-    """열 수 없는 XLSX — 암호, 손상 등."""
+    pass
 
 
 def _fmt(value: object) -> str:
-    """셀 값을 표에 넣을 문자열로. 숫자 1.0 이 '1.0' 으로 새는 것을 막는다."""
     if isinstance(value, bool):
         return "TRUE" if value else "FALSE"
     if isinstance(value, float) and value.is_integer():
@@ -60,7 +43,6 @@ def _fmt(value: object) -> str:
     if isinstance(value, (_dt.datetime, _dt.date)):
         return value.isoformat(sep=" ") if isinstance(value, _dt.datetime) else value.isoformat()
     text = str(value)
-    # 표가 깨지지 않도록. 셀 안 줄바꿈은 공백으로 편다.
     return text.replace("|", r"\|").replace("\r", " ").replace("\n", " ").strip()
 
 
@@ -88,7 +70,6 @@ def _load(data: bytes):
     try:
         return openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     except TypeError as exc:
-        # styles.xml 결함 — 스타일을 들어내고 한 번 더.
         logger.info("xlsx styles 복구 시도: %s", exc)
         try:
             repaired = _strip_named_styles(data)
@@ -169,10 +150,10 @@ def _vertical_merges(data: bytes) -> list[dict[int, list[int]]]:
                                 if ma and mb:
                                     r1, r2 = int(ma.group(2)), int(mb.group(2))
                                     col = _col_num(ma.group(1))
-                                    if r2 > r1:  # 세로로 걸친 것만
+                                    if r2 > r1:
                                         for r in range(r1 + 1, r2 + 1):
                                             spans.setdefault(r, []).append(col)
-                        elem.clear()  # 시트 본문을 메모리에 쌓지 않는다
+                        elem.clear()
                 result.append(spans)
     except Exception as exc:  # noqa: BLE001
         logger.info("xlsx 병합 정보 읽기 실패(전파 생략): %s", exc)
@@ -181,13 +162,8 @@ def _vertical_merges(data: bytes) -> list[dict[int, list[int]]]:
 
 
 def _sheet_rows(ws, budget: list[int], vmerge: dict[int, list[int]] | None = None) -> list[list[str]]:
-    """시트를 문자열 행 목록으로. 빈 행·오른쪽 빈 열은 떨군다.
-
-    세로 병합된 분류 값은 아래 행으로 복제한다 — 행이 스스로를 설명해야
-    청크가 잘려도 소속을 잃지 않는다(HWP 쪽 rowspan 처리와 같은 규칙).
-    """
     rows: list[list[str]] = []
-    carry: dict[int, str] = {}  # 1-based 열 -> 위에서 내려온 값
+    carry: dict[int, str] = {}
     start = getattr(ws, "min_row", 1) or 1
     for row_idx, raw in enumerate(ws.iter_rows(values_only=True), start=start):
         if budget[0] <= 0:
@@ -217,7 +193,6 @@ def _sheet_rows(ws, budget: list[int], vmerge: dict[int, list[int]] | None = Non
 
 
 def _to_table(rows: list[list[str]]) -> list[str]:
-    """행 목록 → 마크다운 표. 첫 행을 헤더로 쓴다."""
     width = max(len(r) for r in rows)
     padded = [r + [""] * (width - len(r)) for r in rows]
     head, *body = padded
@@ -232,14 +207,6 @@ def _to_table(rows: list[list[str]]) -> list[str]:
 def xlsx_to_markdown(
     data: bytes, *, max_cells: int = MAX_CELLS, max_bytes: int = MAX_BYTES
 ) -> str:
-    """XLSX 바이트를 마크다운으로. 열 수 없으면 XlsxParseError.
-
-    시트가 둘 이상이면 시트명을 소제목으로 단다. 하나뿐이면 파일명이 이미
-    제목으로 붙으므로 생략한다(`Sheet1` 같은 기본명이 본문에 섞이는 것 방지).
-
-    셀 수(max_cells)와 출력 바이트(max_bytes) 양쪽으로 자른다. 둘 중 하나만
-    막으면 나머지로 새어 한도를 넘긴다.
-    """
     if data[:4] == _OLE2_MAGIC:
         raise XlsxParseError(
             "OLE2 컨테이너 — 암호가 걸렸거나 구형 이진 포맷이라 열 수 없음"

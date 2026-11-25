@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""실데이터 HWP/HWPX: rhwp-python 품질·성능 검증.
-
-Usage:
-  PYTHONPATH=. python scripts/bench_hwp_corpus.py tests/2026_문서접수_test
-"""
 
 from __future__ import annotations
 
@@ -105,8 +100,6 @@ def main() -> int:
             row.table_count = out.metrics.table_count
             row.ok = True
             out.metrics.text_length = len(md)
-            # main.py 와 같은 값을 재야 한다 — 안 채우면 tables_rendered 가 0 으로
-            # 남아 표 있는 문서가 전부 G2(표 100% 손실) 오탐으로 잡힌다.
             out.metrics.tables_rendered = count_markdown_tables(md)
             row.tables_rendered = out.metrics.tables_rendered
             gate = evaluate_quality(out.metrics, settings)

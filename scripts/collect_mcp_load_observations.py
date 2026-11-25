@@ -1,5 +1,3 @@
-"""Add redacted Cloud Run request log and metric aggregates to a load report."""
-
 import json
 import sys
 from collections import Counter
@@ -43,7 +41,6 @@ def main():
                                "distinctInstances": len({e.get("labels", {}).get("instanceId") for e in selected
                                                           if e.get("labels", {}).get("instanceId")})})
         metrics = {}
-        # A minute of padding includes samples aggregating the final request burst.
         metric_end = min(datetime.now(UTC), datetime.fromisoformat(end) + timedelta(minutes=1)).isoformat()
         for metric in ("cpu/utilizations", "memory/utilizations", "instance_count"):
             response = client.get(f"https://monitoring.googleapis.com/v3/projects/{project}/timeSeries", params={

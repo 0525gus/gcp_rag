@@ -1,5 +1,3 @@
-"""Measure FactChat gateway latency without saving credentials or answer bodies."""
-
 import argparse
 import asyncio
 import json
@@ -39,7 +37,6 @@ async def run(args):
                         row["content_type"] = response.headers.get("content-type")
                         if response.status_code != 200:
                             row["status"] = "http_error"
-                            # Diagnostic error body is intentionally not persisted.
                             error = (await response.aread()).decode(errors="replace")
                             print("HTTP error:", error.replace(key, "[REDACTED]")[:600], flush=True)
                         elif "text/event-stream" in response.headers.get("content-type", ""):
@@ -97,7 +94,7 @@ async def run(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Measure FactChat gateway latency without saving credentials or answer bodies.')
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--out", type=Path, required=True)
     asyncio.run(run(parser.parse_args()))

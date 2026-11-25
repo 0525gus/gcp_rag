@@ -1,4 +1,3 @@
-"""Selected-file retries must preserve scope, receipts and mutation ownership."""
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,7 +10,7 @@ from starlette.exceptions import HTTPException
 from fastapi.testclient import TestClient
 
 from fake_firestore import MemoryDb
-from scripts import dept_gui
+from scripts import common_config, dept_gui
 from services.sync import main as sync
 from shared.firestore_state import DocStateStore
 from shared.models import DocState, DocStatus
@@ -160,7 +159,8 @@ def test_gui_rejects_overlapping_sync(gui, monkeypatch):
 
 def test_reprocess_history_only_returns_the_selected_departments_document(gui, monkeypatch):
     monkeypatch.setattr(dept_gui, "_index_issue_context", lambda code: (
-        {"name": "컴공"}, ["drive"], {"GCP_PROJECT_ID": "project"}, {"docState": "docs"}))
+        {"name": "컴공"}, ["drive"], common_config.resolve({"GCP_PROJECT_ID": "project"}),
+        {"docState": "docs"}))
     def execution(drive, file_id, state):
         return {"state": state, "name": "executions/id", "labels": {"department": "cs", "mode": "reprocess"},
                 "argument": json.dumps({"reprocessFile": {"driveId": drive, "fileId": file_id}})}

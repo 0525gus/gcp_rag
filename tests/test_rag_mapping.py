@@ -356,7 +356,7 @@ def test_backfill_endpoint_dry_run_then_writes(monkeypatch: pytest.MonkeyPatch) 
         sync_main.BackfillRagMappingsBody(driveId="drive", dryRun=False)
     )
     assert applied["totals"]["written"] == 1
-    assert len(writes) == 2  # 교직원 1회 + 비어 있는 학생 코퍼스 1회
+    assert len(writes) == 2
     assert writes[0][0].corpus_type == "FACULTY"
 
 

@@ -1,5 +1,3 @@
-"""Image OCR opt-in, validation, routing and RAG handoff; no paid API calls."""
-
 import io
 import json
 from dataclasses import replace

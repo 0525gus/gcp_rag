@@ -1,5 +1,3 @@
-"""Bounded production MCP search load test; never persist keys or evidence."""
-
 import argparse
 import asyncio
 import json
@@ -46,7 +44,7 @@ def rpc_body(response):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Bounded production MCP search load test; never persist keys or evidence.')
     parser.add_argument("--concurrency", type=int, nargs="+", default=[1, 10, 20, 40])
     parser.add_argument("--requests-per-worker", type=int, default=10)
     args = parser.parse_args()

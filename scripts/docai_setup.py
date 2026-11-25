@@ -1,4 +1,3 @@
-"""Read-before-create setup for the two supported pretrained Document AI processors."""
 from __future__ import annotations
 
 import re
@@ -113,7 +112,6 @@ class ProcessorSetup:
             token = self.token()
             if self.processors(base, plan["kind"], token):
                 raise ValueError("기존 프로세서가 발견됐습니다. 다시 조회해서 선택해 주세요.")
-            # Availability can change after the plan was prepared.
             status, body, _ = self.get(f"{base}/processorTypes/{KINDS[plan['kind']][0]}", token, timeout=20)
             body = self.checked(status, body)
             if body.get("allowCreation") is not True or not any(

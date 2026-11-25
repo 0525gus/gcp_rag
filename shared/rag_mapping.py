@@ -1,11 +1,3 @@
-"""Drive fileId -> Vertex RagFile resource-name mappings.
-
-A Drive document can produce more than one GCS object and can exist in both the
-staff and student corpora.  The old singular ``doc_state.ragFileId`` therefore
-cannot represent the real relationship.  Mappings live in a subcollection so
-the two corpus workers can update their own rows without overwriting each other.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -70,12 +62,6 @@ class RagFileMapping:
 
 
 class RagFileMappingStore:
-    """Firestore-backed 1:N mapping store.
-
-    ``replace_for_corpus`` is deliberately a batch: readers must never observe
-    a half-replaced generation after an import completes.
-    """
-
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self._db = firestore.Client(

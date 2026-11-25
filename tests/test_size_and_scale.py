@@ -1,10 +1,3 @@
-"""크기 한도·대량 경로 계약.
-
-RAG Engine 은 한도를 넘은 파일을 잘라 주지 않고 import 를 거부한다. 게이트가
-느슨하면 문서가 통과한 뒤 index 단계에서 배치 전체를 실패로 돌리고, 그 문서는
-PARSED 에 머물며 매일 재시도만 반복한다 — 로그 말고는 드러나지 않는다.
-"""
-
 from __future__ import annotations
 
 import os
@@ -17,8 +10,6 @@ import services.sync.main as sync_main
 from shared.rag_engine import ImportOutcome
 from shared.models import DocState, DocStatus
 
-# services.mcp_server.main 은 임포트 시점에 get_settings() 를 부른다.
-# 아래 검색 테스트가 그 모듈을 들여오므로 수집 시점에 필수 환경을 세워 둔다.
 for _key, _val in (
     ("GCP_PROJECT_ID", "test-project"),
     ("GCS_HWP_ORIGINAL_BUCKET", "raw"),
@@ -41,17 +32,16 @@ class _Settings:
     ingest_concurrency = 4
 
 
-# ------------------------------------------------------- 라우트별 RAG 상한
 @pytest.mark.parametrize(
     ("ext", "limit"),
     [
-        (".md", 10 * MB),  # HWP 파싱 결과 · 텍스트 FILE_COPY
+        (".md", 10 * MB),
         (".txt", 10 * MB),
         (".html", 10 * MB),
-        (".pptx", 10 * MB),  # Slides export · PPTX 복사
+        (".pptx", 10 * MB),
         (".docx", 50 * MB),
         (".pdf", 50 * MB),
-        (".xlsx", 10 * MB),  # 문서에 상한 없음 → 보수적으로 낮은 쪽
+        (".xlsx", 10 * MB),
         (".bin", 10 * MB),
     ],
 )
@@ -63,7 +53,6 @@ def test_operator_limit_can_only_tighten_never_loosen() -> None:
     class _Tight(_Settings):
         max_gcs_bytes = 5 * MB
 
-    # MAX_GCS_BYTES 는 운영 상한 — RAG 한도를 넘겨 올릴 수는 없어야 한다
     assert sync_main._effective_limit(_Tight(), ".pdf") == 5 * MB
     assert sync_main._effective_limit(_Settings(), ".pdf") == 50 * MB
 
@@ -72,7 +61,6 @@ def test_extension_lookup_is_case_insensitive() -> None:
     assert sync_main._effective_limit(_Settings(), ".PDF") == 50 * MB
 
 
-# ------------------------------------------------------- 실제 게이트 동작
 class _GateStore:
     def __init__(self) -> None:
         self.split: list[tuple[str, int]] = []
@@ -126,7 +114,6 @@ class _GateDrive:
 
 
 def test_20mb_text_is_rejected_because_it_uploads_as_markdown() -> None:
-    """텍스트는 breadcrumb 를 붙여 .md 로 올라간다 — 상한은 원본 MIME 이 아니라 .md 기준."""
     store, gcs = _GateStore(), _GateGcs()
     body = sync_main.IngestBody(
         fileId="f1", driveId="d", name="big.txt", mimeType="text/plain"
@@ -156,7 +143,6 @@ def test_20mb_pdf_passes_because_pdf_limit_is_50mb() -> None:
 
 
 def test_20mb_pptx_is_rejected_even_though_it_is_under_max_gcs_bytes() -> None:
-    # 구 구현은 단일 50MB 라 통과시킨 뒤 RAG import 에서 죽었다.
     store, gcs = _GateStore(), _GateGcs()
     body = sync_main.IngestBody(
         fileId="f1",
@@ -176,11 +162,9 @@ def test_20mb_pptx_is_rejected_even_though_it_is_under_max_gcs_bytes() -> None:
     assert gcs.uploaded == []
 
 
-# ------------------------------------------------------- #6 백필 스케일
 def test_backfill_reuses_one_drive_client_per_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """파일마다 DriveClient 를 만들면 인증·discovery 가 파일 수만큼 돈다."""
     built: list[int] = []
     files = 24
 
@@ -221,7 +205,6 @@ def test_backfill_reuses_one_drive_client_per_worker(
     monkeypatch.setattr(sync_main, "DriveClient", _Drive)
     monkeypatch.setattr(sync_main, "GcsClient", lambda _s=None: object())
     monkeypatch.setattr(
-        # 백필이 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
         sync_main,
         "RagEngineClient",
         lambda *_a, **_kw: type("R", (), {"delete_files_by_ids": lambda _s, _i: 0})(),
@@ -239,7 +222,6 @@ def test_backfill_reuses_one_drive_client_per_worker(
 
     sync_main.backfill_run(sync_main.BackfillRunBody(driveId="drive"))
 
-    # 스냅샷용 1개 + 워커당 1개. 파일당 1개(24개)여서는 안 된다.
     assert len(built) <= 1 + _Settings.ingest_concurrency
     assert len(built) < files
 
@@ -282,9 +264,6 @@ def test_backfill_scans_the_corpus_only_once(monkeypatch: pytest.MonkeyPatch) ->
     scans: list[int] = []
 
     class _Rag:
-        """실제 RagEngineClient 처럼 첫 삭제에서만 코퍼스를 순회한다."""
-
-        # 백필이 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
         def __init__(self, *_a: Any, **_kw: Any) -> None:
             self._scanned = False
 
@@ -317,18 +296,15 @@ def test_backfill_scans_the_corpus_only_once(monkeypatch: pytest.MonkeyPatch) ->
     )
 
     assert len(scans) == 1, f"코퍼스를 {len(scans)}회 순회했다 — 1회여야 한다"
-    # 삭제 대상은 그 배치가 실제로 import 하는 파일뿐이어야 한다.
     assert sorted(fid for batch in deletes for fid in batch) == sorted(
         f"f{i}" for i in range(6)
     )
     assert all(len(batch) <= 2 for batch in deletes)
 
 
-# ------------------------------------------------------- #8 search top_k
 def test_search_still_returns_top_k_after_filtering_hidden_docs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """자르고 거르면 결과가 모자란다 — 거르고 잘라야 한다."""
     import services.mcp_server.main as mcp_main
     from shared.models import SearchHit, SearchSource
 
@@ -340,7 +316,6 @@ def test_search_still_returns_top_k_after_filtering_hidden_docs(
         )
         for i in range(10)
     ]
-    # f0·f1 은 삭제/스킵된 문서 — 결과에서 빠져야 하지만 자리는 채워져야 한다
     hidden = {
         "f0": DocState(file_id="f0", drive_id="d", status=DocStatus.DELETED),
         "f1": DocState(file_id="f1", drive_id="d", status=DocStatus.SKIPPED),
@@ -354,6 +329,9 @@ def test_search_still_returns_top_k_after_filtering_hidden_docs(
             return hits[:top_k]
 
     class _Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def __init__(self, *_a: Any) -> None:
             pass
 
@@ -375,7 +353,6 @@ def test_search_still_returns_top_k_after_filtering_hidden_docs(
 def test_search_fills_top_k_at_the_maximum_too(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """k 가 상한이면 여유분이 0 이라 필터가 걷어낸 자리를 못 채운다."""
     import services.mcp_server.main as mcp_main
     from shared.models import SearchHit, SearchSource
 
@@ -401,6 +378,9 @@ def test_search_fills_top_k_at_the_maximum_too(
             return pool[:top_k]
 
     class _Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def __init__(self, *_a: Any) -> None:
             pass
 

@@ -268,7 +268,6 @@ def test_partial_batch_checkpoints_success_and_retries_only_failed_document(monk
 
     monkeypatch.setattr(sync_main, "_import_and_mark", importing)
     outcome = sync_main.index_gcs_task(body)
-    # 묶음으로 한 번 반입하고, 부분 실패면 그 묶음만 파일별로 다시 돌린다.
     assert calls == [(FILE_ID, second), (FILE_ID,), (second,)]
     calls.clear()
     assert outcome["partial"] is True
@@ -281,7 +280,7 @@ def test_partial_batch_checkpoints_success_and_retries_only_failed_document(monk
     assert results[second]["status"] == "FAILED"
     fail_second = False
     assert sync_main.index_gcs_task(body)["status"] == "DONE"
-    assert calls == []  # redelivery never replays the finished batch
+    assert calls == []
     assert store.get(second).status == DocStatus.PARSED
     assert store._col.document(second).collection("index_failures").document("job").get().exists
 
@@ -349,7 +348,6 @@ def _part_lease(store, job, body, part_id):
 
 
 def test_faculty_and_student_parts_of_one_document_run_concurrently(monkeypatch):
-    """두 코퍼스는 서로 다르므로 같은 문서라도 교직원·학생 part가 동시에 돈다."""
     store, job, body = setup_job(monkeypatch, parts=("faculty", "student"))
     faculty = _part_lease(store, job, body, "faculty")
     assert faculty.claim()
@@ -408,10 +406,9 @@ def test_index_groups_respect_vertex_uri_limit():
     batched = [g for g in groups if g not in (["empty"], ["huge"])]
     assert all(sum(len(uris[f]) for f in g) <= sync_main.MAX_IMPORT_URIS for g in batched)
     assert [f for g in batched for f in g] == ["f0", *[f"f{i}" for i in range(1, 14)]]
-    assert len(batched) == 2  # 28 URIs -> 24 + 4
+    assert len(batched) == 2
 
 def test_faculty_and_student_tasks_overlap_end_to_end(monkeypatch):
-    """두 task가 서로를 기다리지 않는다: 둘 다 반입 단계에 동시에 들어가야 끝난다."""
     store, job, body = setup_job(monkeypatch, parts=("faculty", "student"))
     both_inside = Barrier(2)
 
@@ -429,7 +426,6 @@ def test_faculty_and_student_tasks_overlap_end_to_end(monkeypatch):
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = [pool.submit(sync_main.index_gcs_task, b) for b in (body, student_body)]
         statuses = [r.result(timeout=10)["status"] for r in results]
-    # 먼저 끝난 쪽은 RUNNING, 나중에 끝난 쪽이 작업을 DONE으로 확정한다.
     assert "DONE" in statuses
     assert job.get().to_dict()["status"] == "DONE"
     assert store.get(FILE_ID).status == DocStatus.INDEXED

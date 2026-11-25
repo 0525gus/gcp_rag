@@ -1,5 +1,3 @@
-"""Conservative Vertex Gemini query rewriting for retrieval only."""
-
 from __future__ import annotations
 
 import logging
@@ -31,8 +29,6 @@ _CONTEXT_REFERENCES = (
     "이것",
     "저것",
 )
-# These are intentionally conservative. A false rejection only loses the expansion;
-# accepting a dropped negation, date, or comparison changes what the user asked for.
 _REQUIRED_MARKERS = ("아닌", "제외", "이전", "이후", "초과", "미만", "이상", "이하", "앞당")
 
 PROMPT = """# 역할
@@ -56,20 +52,16 @@ def _normalized(value: str) -> str:
 
 
 def should_rewrite_query(query: str) -> bool:
-    """Skip obvious standalone keyword searches before paying for an LLM call."""
     text = (query or "").strip()
     if not text:
         return False
     if any(reference in text for reference in _CONTEXT_REFERENCES):
         return True
     words = text.split()
-    # Short noun phrases such as "2026학년도 학사일정" already make strong
-    # retrieval queries. Questions and longer requests still get an expansion.
     return not (len(words) <= 4 and not _QUESTION_FORM.search(text))
 
 
 def safe_rewrite(original: str, rewritten: str) -> str | None:
-    """Return a usable expansion only when simple loss checks pass."""
     candidate = " ".join((rewritten or "").splitlines()).strip().strip("\"'")
     if not candidate or _normalized(candidate) == _normalized(original):
         return None
@@ -88,7 +80,6 @@ def safe_rewrite(original: str, rewritten: str) -> str | None:
 
 
 def rewrite_query(query: str, settings: Settings) -> str | None:
-    """Generate a validated search expansion; failure never blocks raw retrieval."""
     if (
         not settings.search_rewrite_enabled
         or not query.strip()

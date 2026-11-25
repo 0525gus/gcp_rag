@@ -1,15 +1,3 @@
-"""Measure the deployed MCP ``search`` baseline against frozen Golden200.
-
-This intentionally exercises the normal MCP search path, not FactChat and not
-the per-channel diagnostic routes.  Each case has one request:
-
-* ``top_k=20``: the current deployment returns at most 15 context documents;
-  record the gold rank within that observable list and Hit@1/3/5/10/15.
-
-Candidate Recall@20/@30 remains explicitly ``not_exposed``.  A 15-document
-context response must not be relabelled as a 20- or 30-document candidate pool.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -61,7 +49,6 @@ TAG_ALIASES = {
 
 
 def resolve_target_set(target_set: str) -> str:
-    """Resolve the public set name and keep final-validation data sealed."""
     if target_set not in TARGET_SETS:
         raise ValueError(f"unknown target set: {target_set}")
     if target_set != DEFAULT_SET and not os.environ.get("ALLOW_HOLDOUT_RUN"):
@@ -70,7 +57,6 @@ def resolve_target_set(target_set: str) -> str:
 
 
 def _registry_scope(department: str, audience: str) -> tuple[str, str]:
-    """Read the deployed scoped key via the same gcloud identity used by Phase-1."""
     from scripts.dept_gui import _mcp_registry_read
 
     record, configs = _mcp_registry_read()
@@ -85,7 +71,6 @@ def _registry_scope(department: str, audience: str) -> tuple[str, str]:
 
 
 def _index_identity(department: str, audience: str) -> tuple[int, str]:
-    """Snapshot the scoped corpus file inventory once before the baseline run."""
     from scripts.run_phase1_diagnosis import (
         _gcloud_access_credentials,
         _rag_file_counts,
@@ -255,7 +240,7 @@ def run(
         request_result = _request(
             url, key, golden_row["query"], request_top_k, retries
         )
-        if len(request_result) == 3:  # Compatibility with existing test doubles.
+        if len(request_result) == 3:
             documents, latency, error = request_result
             diagnostics: dict[str, Any] = {}
         else:
@@ -325,7 +310,7 @@ def run(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description='Measure the deployed MCP ``search`` baseline against frozen Golden200.')
     parser.add_argument("--snapshot-dir", type=Path, default=DEFAULT_SNAPSHOT)
     parser.add_argument("--target-set", choices=tuple(TARGET_SETS), default=DEFAULT_SET)
     parser.add_argument("--mcp-url", default=os.environ.get("MCP_URL", ""))

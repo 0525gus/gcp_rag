@@ -1,14 +1,3 @@
-"""학과 라우팅 — driveId → 코퍼스·버킷·폴더. GCP 호출 없음.
-
-학과 = 공유 드라이브 전제. `Settings.for_drive()` 를 핸들러 진입점에서 한 번
-갈아끼우면 그 아래 호출(RagEngineClient·GcsClient·폴더 스코프)이 전부 학과
-값을 쓴다. 그래서 이 파일이 지키는 것은 사실상 두 가지다.
-
-  1. **맵이 비면 지금까지와 똑같이 동작한다** — 기존 배포를 안 깨는 장치
-  2. **모르는 드라이브가 기본 코퍼스로 조용히 떨어지지 않는다** — 그건 남의
-     학과 자료가 섞이는 사고이고, 되돌리려면 코퍼스에서 파일을 골라 지워야 한다
-"""
-
 from __future__ import annotations
 
 import json
@@ -21,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from settings_presets import NO_LEASES_OR_MAPPINGS
 from shared.config import Department, Settings, UnknownDriveError, _departments_from_json
 from shared.rag_engine import ImportOutcome
 
@@ -31,6 +21,7 @@ BASE = {
     "rag_corpus_name": "corpus-default",
     "rag_corpus_name_student": "corpus-default-student",
     "sync_folder_ids": "SHARED_FOLDER",
+    **NO_LEASES_OR_MAPPINGS,
 }
 
 CS = Department(
@@ -43,16 +34,12 @@ CS = Department(
     student_folder_ids=("F_STU",),
     sync_folder_ids=("F_A", "F_B"),
 )
-# 공용 버킷을 쓰는 학과도 배포 시 해석된 값을 명시한다.
 EE = Department(code="ee", drive_ids=("D_EE",), staff_corpus="c-ee-staff",
                 hwp_bucket="shared-hwp", source_bucket="shared-src",
                 sync_folder_ids=("SHARED_FOLDER",))
 
 
-# --- 하위 호환 -------------------------------------------------------------
-
 def test_empty_map_keeps_current_behaviour():
-    """맵이 비면 for_drive 가 자기 자신을 준다 — 기존 배포가 안 바뀐다."""
     s = Settings(**BASE)
     assert s.for_drive("anything") is s
     assert s.department_for_drive("anything") is None
@@ -68,8 +55,6 @@ def test_optional_student_fields_do_not_inherit_shared_values():
     assert ee.sync_folder_ids == "SHARED_FOLDER"
 
 
-# --- 라우팅 ----------------------------------------------------------------
-
 def test_drive_selects_department_values():
     cs = Settings(**BASE, departments=(CS, EE)).for_drive("D_CS")
     assert cs.rag_corpus_name == "c-cs-staff"
@@ -83,12 +68,10 @@ def test_drive_selects_department_values():
 def test_departments_do_not_bleed_into_each_other():
     s = Settings(**BASE, departments=(CS, EE))
     assert s.for_drive("D_CS").rag_corpus_name != s.for_drive("D_EE").rag_corpus_name
-    # 원본은 그대로 — replace 사본이라 서로 오염되지 않는다
     assert s.rag_corpus_name == "corpus-default"
 
 
 def test_unknown_drive_raises_instead_of_defaulting():
-    """조용히 기본 코퍼스로 떨어지면 남의 학과 자료가 섞인다."""
     s = Settings(**BASE, departments=(CS,))
     with pytest.raises(UnknownDriveError, match="D_NOPE"):
         s.for_drive("D_NOPE")
@@ -98,8 +81,6 @@ def test_audience_split_follows_department():
     s = Settings(**BASE, departments=(CS,))
     assert s.for_drive("D_CS").audience_split_enabled is True
 
-
-# --- DEPARTMENTS_JSON 파싱 -------------------------------------------------
 
 def test_json_round_trip():
     raw = json.dumps(
@@ -122,7 +103,6 @@ def test_json_round_trip():
 
 
 def test_json_accepts_comma_strings():
-    """저장소 관례가 쉼표 구분이라 리스트/문자열 둘 다 받는다."""
     (dept,) = _departments_from_json(
         json.dumps({"cs": {"driveIds": "D_A, D_B", "staffCorpus": "c",
                            "hwpBucket": "raw", "sourceBucket": "source",
@@ -142,11 +122,7 @@ def test_partial_department_cannot_use_common_values():
         Settings(**BASE, departments=(Department(code="bad", drive_ids=("D",), staff_corpus="c"),))
 
 
-# --- sync 배선 헬퍼 ---------------------------------------------------------
-
 class _FakeStore:
-    """doc_state 대역. fileId -> driveId 만 있으면 된다."""
-
     def __init__(self, mapping: dict[str, str]) -> None:
         self._m = mapping
 
@@ -164,7 +140,6 @@ def _sync():
 
 
 def test_settings_for_drive_passes_through_without_map():
-    """맵이 없으면 driveId 가 없어도 그냥 통과한다 — 기존 동작."""
     m = _sync()
     base = Settings(**BASE)
     assert m._settings_for_drive(base, "whatever") is base
@@ -179,7 +154,6 @@ def test_settings_for_drive_requires_drive_when_map_exists():
 
 
 def test_settings_for_drive_tolerates_settings_without_the_field():
-    """테스트·스크립트가 넘기는 가벼운 설정 대역에는 departments 가 없다."""
     m = _sync()
     stub = object()
     assert m._settings_for_drive(stub, "any") is stub
@@ -207,13 +181,9 @@ def test_split_by_drive_groups_per_department():
 
 
 def test_split_by_drive_drops_documents_it_cannot_place():
-    """어느 학과인지 모르는 문서를 기본 코퍼스에 넣으면 남의 학과에 섞인다.
-
-    안 넣으면 다음 주기가 다시 집는다 — 그쪽이 싼 실패다.
-    """
     m = _sync()
     base = Settings(**BASE, departments=(CS,))
-    store = _FakeStore({"f1": "D_CS", "f2": "D_UNKNOWN"})  # f3 는 doc_state 자체가 없음
+    store = _FakeStore({"f1": "D_CS", "f2": "D_UNKNOWN"})
     groups = m._split_by_drive(
         store, ["gs://b/f1.md", "gs://b/f2.md", "gs://b/f3.md"], ["f1", "f2", "f3"], base
     )
@@ -224,16 +194,11 @@ def test_split_by_drive_drops_documents_it_cannot_place():
     assert ids == ["f1"]
 
 
-# 실제 Drive fileId 모양이어야 _clean_file_ids 를 통과한다.
 F1 = "1ZpC1Xnmkuk5S-1OGkHzrSqbtgBE4Fvas"
 F2 = "162LbSmsoKKtagl_otv83PW6TAz5AAYxS"
 
 
 def test_index_gcs_imports_into_each_department_corpus(monkeypatch):
-    """driveId 가 없는 유일한 엔드포인트. 학과별로 갈라 넣는지 본다.
-
-    안 가르면 전부 전역 기본 코퍼스로 들어가 학과가 둘 이상인 순간 섞인다.
-    """
     m = _sync()
     seen: list[tuple[str, list[str]]] = []
 
@@ -251,8 +216,6 @@ def test_index_gcs_imports_into_each_department_corpus(monkeypatch):
             )
 
     class _Store(_FakeStore):
-        """doc_state 대역 — 이 테스트가 보는 것은 '어느 코퍼스로 갔나' 뿐이다."""
-
         def mark_indexed(self, _fid):
             pass
 
@@ -277,13 +240,6 @@ def test_index_gcs_imports_into_each_department_corpus(monkeypatch):
 
 
 def test_reindex_pending_uses_each_department_corpus_and_bucket(monkeypatch):
-    """복구 경로도 학과별로 갈라야 한다.
-
-    복구 대상은 status 로만 뽑혀(list_by_status 에 드라이브 필터가 없다) 전 학과가
-    한 배치에 섞인다. 갈라지 않으면 두 가지가 동시에 깨진다.
-      - 코퍼스: 전부 전역 기본 하나로 들어간다 (섞임)
-      - 버킷:   전역 버킷에서 URI 를 못 찾아 전부 DLQ 로 간다 (유실)
-    """
     m = _sync()
     imported: list[tuple[str, list[str]]] = []
     buckets_queried: list[str] = []
@@ -342,20 +298,12 @@ def test_reindex_pending_uses_each_department_corpus_and_bucket(monkeypatch):
 
     by_corpus = dict(imported)
     assert by_corpus["c-cs-staff"] == [f"gs://b-cs-src/{F1}.md"]
-    assert by_corpus["c-ee-staff"] == [f"gs://shared-src/{F2}.md"]  # ee 는 공용 상속
-    # 버킷도 학과 것을 뒤져야 한다 — 아니면 URI 를 못 찾아 DLQ 로 간다
+    assert by_corpus["c-ee-staff"] == [f"gs://shared-src/{F2}.md"]
     assert set(buckets_queried) == {"b-cs-src", "shared-src"}
     assert result["totals"]["skippedNoUri"] == 0
 
 
 def test_retry_failed_reingests_into_each_department_bucket(monkeypatch):
-    """DLQ 회수도 학과별이어야 한다.
-
-    코퍼스 쪽은 flush() 가 index_gcs() 를 부르므로 이미 갈라진다. 남는 위험은
-    **쓰기 버킷**이다 — 전역 settings 로 _ingest_with 를 부르면 ee 문서의 원본과
-    변환 산출물이 cs 버킷에 저장된다. 그 뒤 재색인은 ee 버킷을 뒤지므로 못 찾고,
-    문서는 다시 DLQ 로 돌아온다(회수 장치가 무한 루프가 된다).
-    """
     m = _sync()
     seen: list[tuple[str, str]] = []
 
@@ -381,7 +329,7 @@ def test_retry_failed_reingests_into_each_department_bucket(monkeypatch):
 
     def _fake_ingest(body, *, store=None, settings=None, gcs=None, drive=None):
         seen.append((body.file_id, settings.gcs_source_bucket))
-        return {"status": "SKIPPED"}   # 색인 경로는 이 테스트의 관심사가 아니다
+        return {"status": "SKIPPED"}
 
     monkeypatch.setattr(m, "get_settings", lambda: Settings(**BASE, departments=(CS, EE)))
     monkeypatch.setattr(m, "DocStateStore", _Store)
@@ -392,16 +340,11 @@ def test_retry_failed_reingests_into_each_department_bucket(monkeypatch):
     m.retry_failed(m.RetryFailedBody())
 
     by_file = dict(seen)
-    assert by_file[F1] == "b-cs-src"      # cs 는 자기 버킷
-    assert by_file[F2] == "shared-src"    # ee 는 공용 상속
+    assert by_file[F1] == "b-cs-src"
+    assert by_file[F2] == "shared-src"
 
 
 def test_out_of_scope_cleanup_uses_the_given_settings_corpus(monkeypatch):
-    """범위 밖 정리가 전역 코퍼스를 지우면 실제 코퍼스에는 문서가 남는다.
-
-    같은 함수 안에서 학생 코퍼스는 settings 를 쓰는데 교직원 코퍼스만 인자 없이
-    만들고 있었다 — 학과를 갈라도 교직원 쪽은 전역을 지운다.
-    """
     m = _sync()
     corpora: list[str] = []
 
@@ -433,7 +376,6 @@ def test_out_of_scope_cleanup_uses_the_given_settings_corpus(monkeypatch):
 
 
 def test_delete_removes_from_the_department_corpus(monkeypatch):
-    """Drive 에서 지운 문서를 엉뚱한 코퍼스에서 지우면 계속 검색된다."""
     m = _sync()
     corpora: list[str] = []
     buckets: list[str] = []

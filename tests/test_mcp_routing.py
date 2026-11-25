@@ -42,12 +42,14 @@ def routed(monkeypatch):
         def retrieve(self, query, **kwargs):
             calls.append(self.scope)
             time.sleep(0.03)
-            # Return adversarial candidates too: another dept, other audience, missing metadata.
             return [SearchHit(fid, 0.1, SearchSource(fid))
                     for fid in [self.scope, self.scope.split("-")[0] + "-student",
                                 "cs-staff", "ee-student", "unknown"]]
 
     class Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def get(self, fid):
             if fid == "unknown":
                 return None
@@ -227,7 +229,7 @@ def test_registry_revocation_is_observed_at_ttl_without_cached_fallback(monkeypa
     assert registry.resolve("cs-staff")
     current["routesJson"] = "{}"
     now[0] = 104.9
-    assert registry.resolve("cs-staff")  # Explicit, bounded cache lifetime.
+    assert registry.resolve("cs-staff")
     now[0] = 105
     assert registry.resolve("cs-staff") is None
     assert reads == [100, 105]
@@ -321,7 +323,6 @@ def test_registry_activation_is_pinned_atomic_and_preserves_live_state_on_failur
                         {"name": f"projects/test-project/secrets/{SECRET_ID}/versions/42"})
 
     def get(url, **kwargs):
-        # A concurrent caller edit cannot change the configs captured for this publication.
         departments["cs"]["keys"]["staff"] = "modified-by-caller"
         return response(200, {})
 

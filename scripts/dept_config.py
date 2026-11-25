@@ -1,18 +1,3 @@
-"""Cloud 학과 등록 설정 → 환경변수 줄.
-
-학과 설정의 유일한 원본은 Secret Manager의 ``rag-mcp-departments``와 이를
-가리키는 Firestore ``mcp_registry/current``다. 로컬에는 학과 파일을 만들지 않는다.
-PowerShell 배포 스크립트에는 서비스가 읽는 ``KEY=VALUE`` 줄만 넘긴다.
-
-키 이름은 **서비스가 읽는 환경변수명 그대로** 낸다. 중간 번역 계층을 두면
-"yaml 엔 있는데 서비스엔 안 들어갔다" 가 조용히 생긴다.
-
-사용:
-    python scripts/dept_config.py --list
-    python scripts/dept_config.py --dept cs --audience staff
-    python scripts/dept_config.py --departments-json   # rag-sync 학과 맵(한 줄)
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -24,23 +9,20 @@ import subprocess
 import sys
 from pathlib import Path
 
-import yaml
-
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from scripts import common_config
 from scripts._env import force_utf8_stdout
+from shared.config import PER_DEPLOYMENT_ENV
 
 CONFIG_DIR = ROOT / "config"
 
 AUDIENCES = ("staff", "student")
 
-# 템플릿을 복사만 하고 안 채운 경우. 그대로 배포되면 키가 공개된 것과 같다.
 PLACEHOLDER_KEYS = {"CHANGE_ME", "changeme", "change-me", ""}
 
-# 사람이 지은 키를 걸러내기 위한 단어. ALLOW_UNAUTH=true 라 엔드포인트가 공개이므로
-# 추측 가능한 키는 유출 없이도 뚫린다. 막지는 않고 경고만 낸다 — 판단은 사람이 한다.
 _WEAK_HINTS = ("test", "demo", "sample", "staff", "student", "admin", "password", "key")
 _MIN_KEY_LEN = 24
 
@@ -54,7 +36,6 @@ def _warn_if_weak(dept: str, audience: str, key: str) -> None:
     if hit:
         reasons.append("사전 단어 포함: " + ", ".join(hit))
     if reasons:
-        # stdout 은 KEY=VALUE 전용이다. 경고는 stderr 로 내보낸다.
         print(
             f"!! {dept}/{audience} MCP 키가 약하다 — {' / '.join(reasons)}",
             file=sys.stderr,
@@ -62,11 +43,6 @@ def _warn_if_weak(dept: str, audience: str, key: str) -> None:
 
 
 def _fmt(value: object) -> str:
-    """YAML 값 → 환경변수 문자열.
-
-    bool 을 파이썬 표기(True)로 내보내면 Get-EnvOr 비교(`-ne "true"`)가 조용히
-    뒤집혀 ALLOW_UNAUTH 가 반대로 동작한다. 리스트는 이 저장소 관례대로 쉼표.
-    """
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (list, tuple)):
@@ -74,21 +50,21 @@ def _fmt(value: object) -> str:
     return str(value)
 
 
-def _load_yaml(path: Path) -> dict:
-    if not path.is_file():
-        raise SystemExit(f"없는 설정 파일: {path}")
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if not isinstance(data, dict):
-        raise SystemExit(f"최상위가 매핑이 아니다: {path}")
-    return data
+def _common() -> dict:
+    path = CONFIG_DIR / common_config.FILE_NAME
+    try:
+        return common_config.load_common(CONFIG_DIR)
+    except FileNotFoundError:
+        raise SystemExit(f"없는 설정 파일: {path}") from None
+    except TypeError:
+        raise SystemExit(f"최상위가 매핑이 아니다: {path}") from None
 
 
 def registry_configs() -> dict[str, dict]:
-    """현재 gcloud 계정으로 Cloud 학과 등록부를 읽는다."""
-    common = _load_yaml(CONFIG_DIR / "common.yaml")
+    common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "").strip()
-    region = str(common.get("GCP_REGION") or "asia-northeast3").strip()
-    database = str(common.get("FIRESTORE_DATABASE") or "rag-sync-state").strip()
+    region = str(common["GCP_REGION"]).strip()
+    database = str(common["FIRESTORE_DATABASE"]).strip()
     if not project:
         raise SystemExit("config/common.yaml에 GCP_PROJECT_ID가 없다")
     gcloud = shutil.which("gcloud")
@@ -137,7 +113,6 @@ def _deployment_metadata_b64(
     staff_corpus: str,
     student_corpus: str,
 ) -> str:
-    """다른 운영 환경이 YAML 없이 복원할 수 있는 전체 배포 설정."""
     drive = dept_cfg.get("drive") or {}
     metadata = {
         "schemaVersion": 2,
@@ -146,8 +121,6 @@ def _deployment_metadata_b64(
         "name": str(dept_cfg.get("name") or dept),
         "audience": audience,
         "corpusMode": "split" if student_corpus else "single",
-        # 필드별 allowlist를 두면 YAML에 옵션을 추가할 때 Cloud 쪽 사본에서
-        # 조용히 빠진다. 원본 매핑 전체를 함께 실어 새 필드와 keys까지 보존한다.
         "yaml": dept_cfg,
         "corpora": {"staff": staff_corpus, "student": student_corpus},
         "buckets": {
@@ -169,7 +142,6 @@ def _deployment_metadata_b64(
 
 
 def build_env(dept: str, audience: str) -> dict[str, str]:
-    """Cloud 등록부의 학과 설정 → 환경변수."""
     configs = registry_configs()
     if dept not in configs:
         raise SystemExit(f"Cloud 등록부에 없는 학과: {dept}")
@@ -177,22 +149,14 @@ def build_env(dept: str, audience: str) -> dict[str, str]:
 
 
 def build_env_from_config(dept: str, audience: str, dept_cfg: dict) -> dict[str, str]:
-    """학과 설정 매핑 → 환경변수. **파일을 읽지 않는다.**
-
-    Cloud 등록부에서 읽은 매핑을 환경변수 계약으로 변환한다. 파일 입출력 없이
-    이 함수만 검사에 사용할 수 있도록 설정 로딩과 변환을 분리했다.
-    """
     if audience not in AUDIENCES:
         raise SystemExit(f"audience 는 {AUDIENCES} 중 하나여야 한다: {audience}")
 
     env: dict[str, str] = {}
 
-    # 1) 공통. 키를 그대로 환경변수로 쓴다.
-    for key, val in _load_yaml(CONFIG_DIR / "common.yaml").items():
-        if val is not None:
-            env[key] = _fmt(val)
+    for key, val in _common().items():
+        env[key] = _fmt(val)
 
-    # 2) 학과. 같은 키는 학과가 이긴다.
     corpora = dept_cfg.get("corpora") or {}
     staff_corpus = str(corpora.get("staff") or "").strip()
     student_corpus = str(corpora.get("student") or "").strip()
@@ -211,20 +175,11 @@ def build_env_from_config(dept: str, audience: str, dept_cfg: dict) -> dict[str,
     if audience == "student" and not split_enabled:
         raise SystemExit(f"{dept}: 학생 코퍼스 분리를 사용하지 않는다")
     if split_enabled and staff_corpus == student_corpus:
-        # 같으면 학생 서비스가 교직원 전량을 검색하게 된다. 조용히 통과시키면 안 된다.
         raise SystemExit(f"{dept}: staff 와 student 코퍼스가 같다")
 
     env["RAG_CORPUS_NAME"] = staff_corpus if audience == "staff" else student_corpus
-    # 배포 검사(Require-McpDeployEnv)가 이 값으로 대상을 대조한다. 대상이
-    # 교직원이어도 넘겨야 "학생 코퍼스가 교직원 서비스에 실렸다" 를 잡아낸다.
     env["RAG_CORPUS_NAME_STUDENT"] = student_corpus
 
-    # 학과별 버킷. 없으면 common.yaml 값(=공용)을 그대로 쓴다.
-    # 객체 키가 Drive fileId 라 공용이어도 충돌은 없다 — 나누는 이유는 격리다:
-    # 학과에 GCS 권한을 줄 때 남의 원본까지 열리는 것을 막고, 학과 이탈 시
-    # 버킷 삭제 한 번으로 끝난다. 다만 **이미 적재된 학과를 옮기는 것은 비싸다**
-    # (코퍼스가 옛 gs:// URI 를 참조하므로 전량 삭제 후 재import 가 따라온다).
-    # 그래서 기존 학과는 쓰던 버킷을 그대로 두고, 새 학과부터 각자 갖는다.
     buckets = dept_cfg.get("buckets") or {}
     bucket_map = (
         ("hwpOriginal", "GCS_HWP_ORIGINAL_BUCKET"),
@@ -232,7 +187,6 @@ def build_env_from_config(dept: str, audience: str, dept_cfg: dict) -> dict[str,
     )
     named = [yk for yk, _ in bucket_map if buckets.get(yk)]
     if named and len(named) != len(bucket_map):
-        # 한쪽만 적으면 원본은 학과 버킷, 산출물은 공용으로 갈라진다.
         missing = [yk for yk, _ in bucket_map if not buckets.get(yk)]
         raise SystemExit(f"{dept}: buckets 는 짝이어야 한다 — 빠진 것: {missing}")
     for yaml_key, env_key in bucket_map:
@@ -250,30 +204,20 @@ def build_env_from_config(dept: str, audience: str, dept_cfg: dict) -> dict[str,
     min_instances = dept_cfg.get("minInstances") or {}
     env["MCP_MIN_INSTANCES"] = _fmt(min_instances.get(audience, 0))
 
-    # 3) MCP 키. Secret Manager의 학과 등록 설정에서만 읽는다.
     key = str(keys.get(audience) or "").strip()
     if not key:
         raise SystemExit(f"{dept}: keys.{audience} 가 비었다")
     if key in PLACEHOLDER_KEYS:
         raise SystemExit(f"{dept}: keys.{audience} 가 템플릿 값 그대로다")
     if split_enabled and str(keys.get("staff") or "") == student_key:
-        # 같으면 학생 키로 교직원 코퍼스가 열린다.
         raise SystemExit(f"{dept}: staff 와 student 키가 같다")
     env["MCP_API_KEY"] = key
-    # 대상이 아닌 쪽 키도 같이 내보낸다. 배포 검사가 **짝을 대조**하기 때문이다:
-    #   Require-McpDeployEnv   학생이 교직원 키를 재사용했나 (STAFF 필요)
-    #   Require-FullDeployEnv  분리가 켜졌는데 학생 키가 없나 (STUDENT 필요)
-    # 한쪽만 내보내면 그 검사가 **멀쩡한 설정을 거부**한다. 실제로 그랬다 —
-    # STUDENT 를 빠뜨려 deploy.ps1 이 첫 검증에서 죽었다(preflight 가 잡음).
-    # 배포 스크립트가 이 값을 얻으려고 같은 학과를 한 번 더 조회하지 않아도 되고,
-    # 약한 키 경고가 두 번씩 찍히지도 않는다.
     for other in AUDIENCES:
         other_key = str(keys.get(other) or "").strip()
         if other_key:
             env[f"MCP_API_KEY_{other.upper()}"] = other_key
     _warn_if_weak(dept, audience, key)
 
-    # 4) 규칙으로 만드는 값 — 파일에 저장하지 않는다(두 곳에 적으면 갈라진다).
     env["MCP_SERVICE_NAME"] = f"rag-mcp-{dept}-{audience}"
     env["MCP_AUDIENCE"] = audience
     env["DEPT_CODE"] = dept
@@ -288,14 +232,15 @@ def build_env_from_config(dept: str, audience: str, dept_cfg: dict) -> dict[str,
         student_corpus=student_corpus,
     )
 
+    for key in (*PER_DEPLOYMENT_ENV, *_OPTIONAL_DEPT_ENV):
+        env.setdefault(key, "")
+
     return env
 
 
-# --- rag-sync 학과 맵 ------------------------------------------------------
+_OPTIONAL_DEPT_ENV = ("MCP_API_KEY_STAFF", "MCP_API_KEY_STUDENT", "DEPT_NAME")
 
-# shared.config._departments_from_json 이 읽는 키 ← build_env 가 내는 환경변수명.
-# 왼쪽 이름을 바꾸면 파싱은 그대로 성공하고 그 필드만 조용히 비어버린다
-# (모르는 키는 무시된다). 그래서 이 표가 곧 계약이고, 아래 테스트가 대조한다.
+
 _MAP_FIELDS: tuple[tuple[str, str, bool], ...] = (
     ("driveIds", "DRIVE_IDS", True),
     ("staffCorpus", "RAG_CORPUS_NAME", False),
@@ -314,21 +259,12 @@ _SECRET_ENV_KEYS = ("MCP_API_KEY", "MCP_API_KEY_STAFF", "MCP_API_KEY_STUDENT")
 def departments_map_from_configs(
     configs: dict[str, dict],
 ) -> dict[str, dict[str, object]]:
-    """{학과코드: 학과 설정} → sync 라우팅 맵. **시크릿은 담지 않는다.**
-
-    값은 build_env_from_config 를 거쳐 뽑는다 — common.yaml + 학과 설정 병합
-    규칙과 거부 조건(코퍼스 동일·버킷 반쪽 등)을 한 벌만 두기 위해서다. 여기서
-    따로 설정을 해석하면 배포 env 와 sync 맵이 서로 다른 규칙으로 갈라진다.
-
-    설정을 **받아서** 쓰므로 Cloud 등록부 조회와 순수 변환·검증을 분리할 수 있다.
-    """
     if not configs:
         raise SystemExit("학과 설정이 하나도 없다")
 
     out: dict[str, dict[str, object]] = {}
     drive_owner: dict[str, str] = {}
     for code in sorted(configs):
-        # staff 로 한 번만 부른다 — 학생 코퍼스까지 같이 나온다.
         env = build_env_from_config(code, "staff", configs[code])
         entry: dict[str, object] = {}
         enabled = configs[code].get("enableDocaiFallback", False)
@@ -352,33 +288,26 @@ def departments_map_from_configs(
                 continue
             entry[field] = [v for v in raw.split(",") if v] if is_list else raw
 
-        # driveIds 가 없으면 그 학과 문서는 **영영 처리되지 않는다**: 맵이 비지
-        # 않은 이상 sync 는 맵에 없는 드라이브를 UnknownDriveError 로 건너뛴다.
         if not entry.get("driveIds"):
             raise SystemExit(f"{code}: drive.driveIds 가 없다 — sync 가 이 학과를 못 찾는다")
-        # syncFolderIds 가 없으면 for_drive 가 **공용 기본값을 그대로 둔다** —
-        # 그 학과가 남의 폴더를 훑게 된다. 배포도 예전부터 빈 값을 거부해 왔다.
         if not entry.get("syncFolderIds"):
             raise SystemExit(f"{code}: drive.syncFolderIds 가 없다 — 남의 폴더를 훑게 된다")
 
         for drive_id in entry["driveIds"]:  # type: ignore[union-attr]
             if drive_id in drive_owner:
-                # department_for_drive 는 첫 일치를 준다. 겹치면 뒤 학과 문서가
-                # 앞 학과 코퍼스로 들어가고, 되돌리려면 코퍼스에서 골라 지워야 한다.
                 raise SystemExit(
                     f"driveId 중복: {code} 와 {drive_owner[drive_id]} 가 {drive_id} 를 함께 쓴다"
                 )
             drive_owner[drive_id] = code
 
         leaked = [k for k in _SECRET_ENV_KEYS if k in entry]
-        if leaked:  # 표가 잘못 늘어난 경우. 배포 전에 죽는 편이 낫다.
+        if leaked:
             raise SystemExit(f"학과 맵에 시크릿이 섞였다: {leaked}")
         out[code] = entry
     return out
 
 
 def build_departments_map() -> dict[str, dict[str, object]]:
-    """Cloud 등록부 전 학과 → sync 라우팅 맵."""
     return departments_map_from_configs(registry_configs())
 
 
@@ -394,28 +323,14 @@ def _departments_json(mapping: dict[str, dict[str, object]]) -> str:
 
 
 def departments_json() -> str:
-    """Cloud 등록부 기준 DEPARTMENTS_JSON."""
     return _departments_json(build_departments_map())
 
 
 def departments_json_from_configs(configs: dict[str, dict]) -> str:
-    """받은 학과 설정 기준 DEPARTMENTS_JSON."""
     return _departments_json(departments_map_from_configs(configs))
 
 
-# --- 로컬 운영 스크립트용 Cloud 설정 로더 ---------------------------------
-
 def load_config_env(dept: str | None = None, audience: str = "staff") -> str:
-    """Cloud 등록값을 `os.environ` 에 채운다. 채운 학과 코드를 돌려준다.
-
-    `.env` 로더가 있던 자리다(scripts/_env). setdefault 인 이유도
-    같다 — 명령줄·셸에서 준 값이 Cloud 값보다 우선해야 한다. 학과를 순회하는
-    배포 스크립트(PowerShell `Set-DeptConfig`)는 반대로 **매번 비우고** 채운다:
-    거기서는 앞 학과 값이 남는 쪽이 사고이기 때문이다.
-
-    DEPARTMENTS_JSON 도 함께 넣는다. 그래야 로컬 도구가 `Settings.for_drive()`
-    로 학과를 고를 수 있고, 서비스와 같은 라우팅 코드를 쓰게 된다.
-    """
     configs = registry_configs()
     codes = sorted(configs)
     if not codes:
@@ -424,13 +339,13 @@ def load_config_env(dept: str | None = None, audience: str = "staff") -> str:
     if code not in codes:
         raise SystemExit(f"없는 학과: {code} (있는 것: {', '.join(codes)})")
     for key, val in build_env_from_config(code, audience, configs[code]).items():
-        os.environ.setdefault(key, val)
+        if val:
+            os.environ.setdefault(key, val)
     os.environ.setdefault("DEPARTMENTS_JSON", departments_json_from_configs(configs))
     return code
 
 
 def configured_audiences(dept: str) -> tuple[str, ...]:
-    """설정 검증을 거쳐 실제 배포할 MCP 범위를 반환한다."""
     configs = registry_configs()
     if dept not in configs:
         raise SystemExit(f"Cloud 등록부에 없는 학과: {dept}")

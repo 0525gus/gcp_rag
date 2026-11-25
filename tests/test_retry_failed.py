@@ -1,5 +1,3 @@
-"""DLQ 자동 회수(/sync/retry-failed) 계약 테스트."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -52,14 +50,10 @@ def _doc(file_id: str) -> DocState:
 
 @pytest.fixture
 def wire(monkeypatch):
-    """store/ingest/index_gcs를 가짜로 교체하고 호출 기록을 돌려준다."""
-
     def _wire(docs: list[DocState], ingest_results: dict[str, Any], attempts=None):
         store = _FakeStore(docs, attempts)
         indexed: list[list[str]] = []
 
-        # retry_failed 는 클라이언트를 run 당 하나만 만들려고 _ingest_with 를 직접
-        # 부른다(문서마다 ingest() 를 부르면 DriveClient discovery build 가 반복된다).
         def fake_ingest(body, **_clients):
             res = ingest_results[body.file_id]
             if isinstance(res, Exception):
@@ -96,7 +90,6 @@ def test_recovered_file_is_indexed_and_dequeued(wire) -> None:
 
 
 def test_attempt_is_recorded_before_ingest(wire) -> None:
-    # 재시도 중 프로세스가 죽어도 카운트가 남아야 무한 재시도를 막는다
     store, _ = wire([_doc("f1")], {"f1": RuntimeError("parser down")})
     res = retry_failed(RetryFailedBody())
 
@@ -117,8 +110,6 @@ def test_exhausted_files_are_skipped_not_retried(wire) -> None:
     assert res["totals"]["retried"] == 0
     assert store.recorded == []
     assert store.cleared == []
-    # 영구 보류(parked)는 '이번 실행의 실패'가 아니다 — ok 를 내리면 손상된 문서
-    # 1건 때문에 배치가 매일 실패로 보고돼 진짜 장애가 묻힌다. 별도 지표로 올린다.
     assert res["ok"] is True
     assert res["parked"] == 1
 
@@ -136,7 +127,6 @@ def test_under_cap_still_retries(wire) -> None:
 
 
 def test_terminal_statuses_count_as_recovered(wire) -> None:
-    # SKIPPED/UNCHANGED는 더 이상 실패가 아니므로 DLQ에서 빼야 한다
     store, indexed = wire(
         [_doc("f1"), _doc("f2")],
         {"f1": {"status": "SKIPPED"}, "f2": {"status": "UNCHANGED"}},
@@ -182,7 +172,6 @@ def test_index_failure_does_not_abort_remaining_files(wire, monkeypatch) -> None
 
     res = retry_failed(RetryFailedBody(indexBatchSize=1))
 
-    # 색인이 죽어도 두 파일 모두 ingest 재시도는 완료되어야 한다
     assert res["totals"]["retried"] == 2
     assert res["totals"]["indexed"] == 0
     assert res["totals"]["recovered"] == 0

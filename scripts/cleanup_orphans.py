@@ -1,32 +1,3 @@
-"""GCS 에 남은 잔존 객체를 doc_state 와 대조해 정리한다.
-
-배경 — 왜 이 스크립트가 필요한가
-
-`/sync/delete` 는 한동안 source 버킷 만, 그것도 손으로 적은 확장자 목록으로
-지웠다. hwp-original 버킷 는 아예 손대지 않았다. 그래서 Drive 에서 지운 문서의 **원본이
-GCS 에 영구 잔존**했다(2026-07-30 실측: DELETED 100건 중 52건의 `.hwp` 원본).
-hwp-original 버킷 에는 명단·인사발령 같은 원문이 그대로 있어(docs/DEV_SPEC.md 운영 체크리스트)
-삭제가 이행되지 않는 것 자체가 문제다.
-
-삭제 경로는 prefix 훑기로 고쳤으므로 앞으로 새 잔존물은 생기지 않는다. 이
-스크립트는 (1) 고치기 전에 쌓인 것을 한 번 걷어내고, (2) 일시 오류로 삭제가
-반쯤 끝난 경우를 나중에 다시 훑기 위한 것이다.
-
-지우는 것이 안전한 이유: 두 버킷 모두 **파생물**이다. hwp-original 버킷 는 ingest 마다
-Drive 에서 다시 받아 올리고(`_ingest_hwp`: download_file → upload_hwp_original), 그
-직후 파서가 한 번 읽는 것 외에는 아무도 읽지 않는다. source 버킷도 재색인
-경로가 다시 만든다. 원본은 Drive 다.
-
-사용:
-  python scripts/cleanup_orphans.py                 # 조회만 (기본)
-  python scripts/cleanup_orphans.py --csv out.csv   # 근거를 파일로
-  python scripts/cleanup_orphans.py --apply         # 실제 삭제
-  python scripts/cleanup_orphans.py --apply --only-deleted   # DELETED 만
-
-인증: gcloud application-default 자격증명이 필요하다
-      (`gcloud auth application-default login`).
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -52,18 +23,13 @@ from shared.search_postprocess import extract_file_id  # noqa: E402
 
 logger = logging.getLogger("cleanup_orphans")
 
-# 문서가 살아 있는 상태 — 이 상태의 객체는 절대 건드리지 않는다
 _LIVE_STATUSES = frozenset(
     {
         DocStatus.INDEXED.value,
         DocStatus.PARSED.value,
         DocStatus.PENDING.value,
         DocStatus.SKIPPED.value,
-        # FAILED 는 /sync/retry-failed 가 다시 집어가므로 산출물을 남겨 둔다
         DocStatus.FAILED.value,
-        # EXCLUDED 는 여기 없다 — 대상 폴더 밖으로 나간 문서의 GCS·코퍼스
-        # 잔존물은 회수해야 한다. SKIPPED 에 뭉쳐 있던 동안에는 '살아있는
-        # 문서'로 취급돼 아무도 정리하지 않았다.
     }
 )
 
@@ -83,10 +49,6 @@ class Candidate:
 def classify(
     blob_name: str, doc_status: dict[str, str], *, only_deleted: bool = False
 ) -> tuple[str, str] | None:
-    """(fileId, 삭제 이유). 지울 이유가 없으면 None.
-
-    GCP 의존이 없는 순수 함수 — 판정 규칙은 여기서만 바뀐다.
-    """
     file_id = extract_file_id(blob_name)
     if not file_id or file_id == "unknown":
         return None
@@ -96,12 +58,8 @@ def classify(
     if status == DocStatus.DELETED.value:
         return file_id, REASON_DELETED
     if status == DocStatus.EXCLUDED.value:
-        # 대상 폴더 밖으로 나간 문서 — 산출물을 남겨 둘 이유가 없다.
-        # --only-deleted 로 돌릴 때는 건드리지 않는다(보수적 실행용 스위치).
         return None if only_deleted else (file_id, REASON_EXCLUDED)
     if status is None:
-        # 상태를 모르는 객체. doc_state 를 날린 뒤라면 살아 있는 문서일 수도
-        # 있으므로 기본적으로는 지우되, --only-deleted 로 뺄 수 있게 둔다.
         return None if only_deleted else (file_id, REASON_UNKNOWN)
     return None
 
@@ -113,11 +71,6 @@ def _load_doc_status(settings: Settings) -> dict[str, str]:
 
 
 def dept_settings(base: Settings) -> list[tuple[str, Settings]]:
-    """(학과 코드, 그 학과 설정) 목록. 학과 맵이 비면 기본 설정 한 벌.
-
-    `for_drive` 를 그대로 쓴다 — 서비스가 버킷을 고르는 코드와 같은 경로여야
-    "정리 도구는 다른 버킷을 봤다" 가 생기지 않는다.
-    """
     if not base.departments:
         return [("", base)]
     return [(d.code, base.for_drive(d.drive_ids[0])) for d in base.departments if d.drive_ids]
@@ -164,7 +117,7 @@ def _report(candidates: list[Candidate], total_note: str) -> None:
 def main() -> int:
     force_utf8_stdout()
     setup_logging()
-    ap = argparse.ArgumentParser(description=__doc__ and __doc__.splitlines()[0])
+    ap = argparse.ArgumentParser(description='GCS 에 남은 잔존 객체를 doc_state 와 대조해 정리한다.')
     ap.add_argument(
         "--apply", action="store_true", help="실제로 삭제 (기본은 조회만)"
     )
@@ -177,11 +130,9 @@ def main() -> int:
     ap.add_argument("--dept", help="이 학과만 (기본: 전 학과)")
     args = ap.parse_args()
 
-    # parse_args 뒤에 부른다 — 앞에 두면 `--help`도 Cloud 인증을 요구한다.
     load_config_env()
 
     settings = get_settings()
-    # doc_state 는 학과 공용이라(fileId 키) 한 번만 읽는다. 버킷만 학과마다 다르다.
     doc_status = _load_doc_status(settings)
     live = sum(1 for s in doc_status.values() if s in _LIVE_STATUSES)
     print(f"doc_state {len(doc_status)}건 (살아 있는 문서 {live}건)")
@@ -193,7 +144,6 @@ def main() -> int:
             raise SystemExit(f"학과 맵에 없다: {args.dept}")
     candidates: list[Candidate] = []
     for code, dept in targets:
-        # 학과마다 버킷이 다르다 — 한 학과만 훑으면 나머지 잔존물이 그대로 남는다.
         found = collect(dept, doc_status, only_deleted=args.only_deleted)
         if code:
             print(f"  학과 {code:<10} {len(found)}건")
@@ -212,7 +162,6 @@ def main() -> int:
     if not args.apply or not candidates:
         return 0
 
-    # gs:// URI 로 지우므로 클라이언트는 한 벌이면 된다(버킷은 URI 에 들어 있다).
     gcs = GcsClient(settings)
     failed = 0
     for c in candidates:
@@ -220,7 +169,6 @@ def main() -> int:
             gcs.delete(c.uri)
             logger.info("deleted %s (%s)", c.uri, c.reason)
         except Exception:
-            # 한 건이 실패해도 나머지는 계속 — 마지막에 건수로 보고한다
             failed += 1
             logger.exception("삭제 실패 %s", c.uri)
     print(f"삭제 완료 {len(candidates) - failed}건 / 실패 {failed}건")

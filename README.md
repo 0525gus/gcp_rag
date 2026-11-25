@@ -145,8 +145,20 @@ Drive 권한은 GCP IAM 과 **별개 체계**다. 프로젝트 소유자여도 �
 
 ### 3. 설정 원본
 
-`config/common.yaml`에는 프로젝트·리전·Firestore·런타임 튜닝 같은 공통 배포값만
-둔다. 학과 설정은 로컬 파일을 사용하지 않는다. 관리 GUI가 Secret Manager의
+`config/common.yaml`에는 이 프로젝트에만 해당하는 값(프로젝트·리전·Artifact
+저장소·Firestore DB·메타데이터 버킷·Document AI 프로세서)과 **기본값을 일부러 바꾼
+값만** 둔다. 빠진 키의 기본값은 코드 한 곳에만 있다.
+
+| 종류 | 기본값 위치 |
+|---|---|
+| 런타임 값(Cloud Tasks, 매핑, 검색 튜닝 등) | `shared/config.py`의 `Settings` 필드 |
+| 배포 전용 값(Parser·Sync 동시성, MCP CPU, 공개 여부 등) | `scripts/common_config.py`의 `DEPLOY_DEFAULTS` |
+
+배포 스크립트와 관리 GUI는 `scripts/common_config.py`가 해석한 값만 읽는다. 기본값과
+같은 값을 `common.yaml`에 적으면 코드 기본값을 바꿔도 그 프로젝트만 옛 값에 남으므로
+테스트(`tests/test_common_config.py`)가 막는다.
+
+학과 설정은 로컬 파일을 사용하지 않는다. 관리 GUI가 Secret Manager의
 `rag-mcp-departments`와 Firestore `mcp_registry/current`에 직접 생성·수정한다.
 
 | 키 | 값 |
@@ -162,7 +174,7 @@ Drive 권한은 GCP IAM 과 **별개 체계**다. 프로젝트 소유자여도 �
 - GUI의 `단일 코퍼스`를 선택하면 `corpora.student`, `drive.studentFolderIds`, `keys.student`를 만들지 않는다
 - 학생 분리는 위 세 값을 모두 설정하며, `studentFolderIds` 는 `syncFolderIds` 의 부분집합이어야 한다
 - `minInstances` 는 학과당 상주 인스턴스 수. `1` 은 24시간 과금이다
-- `QG_MODE`(common.yaml)는 `log` 유지. `fallback` 은 parser 이미지에 LibreOffice 가 없어 런타임에 실패한다
+- `QG_MODE`는 기본값 `log` 유지. `fallback` 은 parser 이미지에 LibreOffice 가 없어 런타임에 실패한다
 
 MCP 키는 GUI가 생성하며 브라우저 응답이나 Cloud Run 환경변수에 싣지 않는다.
 검색 런타임은 Firestore의 키 해시 라우팅만 읽고, 관리 도구만 Secret Manager의

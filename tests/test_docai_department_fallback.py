@@ -1,5 +1,3 @@
-"""학과 설정이 실제 Parser 호출까지 격리되고 이전 호출은 호환되는지 검증한다."""
-
 import json
 import subprocess
 from dataclasses import replace
@@ -156,7 +154,7 @@ def test_audience_overrides_survive_mapping_and_do_not_leak_between_departments(
     configs["cs"].update(enableDocaiFallbackStaff=False,enableDocaiFallbackStudent=True,enableImageOcrStaff=False,enableImageOcrStudent=True)
     mapping=dept_config.departments_map_from_configs(configs)
     cs=Settings(gcp_project_id="p",departments=_departments_from_json(json.dumps(mapping))).for_drive("cs")
-    assert cs.enable_image_ocr  # changes/backfill must include possible student images
+    assert cs.enable_image_ocr
     for option in ["enable_docai_fallback","enable_image_ocr"]:
         assert not cs.parser_option_for(option,"STAFF")
         assert cs.parser_option_for(option,"STUDENT")

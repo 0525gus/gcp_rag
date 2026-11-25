@@ -1,16 +1,3 @@
-"""
-HWP/HWPX 파서 서비스 — rhwp-python → Markdown → GCS.
-
-POST /parse
-  Request:  { gcsUri, mimeType, fileId }
-  Response: { gcsMarkdownUri, route, contentHash, tableCount, warnings, engine, qualityGate }
-
-품질 게이트(QG_MODE):
-  log      — 기본. 미달해도 색인 진행, 로그만
-  reject   — 422 (Sync가 DLQ로 이관)
-  fallback — Document AI (ENABLE_DOCAI_FALLBACK=true 필요)
-"""
-
 from __future__ import annotations
 
 import logging
@@ -57,10 +44,7 @@ class ParseRequestBody(BaseModel):
     gcs_uri: str = Field(..., alias="gcsUri")
     mime_type: str = Field(..., alias="mimeType")
     file_id: str = Field(..., alias="fileId")
-    # 공용 Parser가 첫 학과 설정에 묶이지 않도록 Sync가 요청별 출력 버킷을 준다.
-    # 비우면 기존 직접 호출과 이전 Sync 버전을 위해 환경변수 버킷으로 폴백한다.
     source_bucket: str = Field(default="", alias="sourceBucket", max_length=222)
-    # 생략한 이전 호출만 환경변수를 따른다. 명시한 false는 공용 fallback도 끈다.
     enable_docai_fallback: bool | None = Field(
         default=None, alias="enableDocaiFallback", strict=True
     )
@@ -85,7 +69,6 @@ def ocr_image(req: ImageOcrRequestBody) -> JSONResponse:
     if not settings.docai_ocr_processor_id or not settings.docai_ocr_location:
         raise HTTPException(status_code=503, detail="OCR_NOT_CONFIGURED")
     gcs = GcsClient(settings)
-    # 원본 크기를 확인하지 못하면 읽지 않는다. 다운로드에도 상한을 적용한다.
     bucket, name = parse_gs_uri(req.gcs_uri)
     blob = gcs._client.bucket(bucket).get_blob(name)
     if blob is None:
@@ -98,7 +81,6 @@ def ocr_image(req: ImageOcrRequestBody) -> JSONResponse:
         text = extract_image_text(data, req.mime_type, settings)
     except ImageOcrError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    # Sync가 본문 검증과 해시 비교를 마친 후에만 기존 색인용 객체를 갱신한다.
     return JSONResponse({"text": text, "route": ParseRoute.IMAGE_DOCAI.value})
 
 
@@ -137,14 +119,11 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
         engine_name = "python-hwpx/rhwp" if is_hwpx_filename(filename) else "rhwp-python"
         raise HTTPException(status_code=503, detail=f"{engine_name} is not installed")
 
-    # sync 가 다운로드 전에 이미 걸러 주지만, 파서를 직접 부르는 경로(수동 재처리
-    # 등)에는 방어가 없다 — 원본을 통째로 메모리에 올리기 전에 막는다.
     try:
         bucket_name, blob_name = parse_gs_uri(req.gcs_uri)
         blob = gcs._client.bucket(bucket_name).get_blob(blob_name)
         size = getattr(blob, "size", None) if blob else None
     except Exception:  # noqa: BLE001
-        # 크기를 못 재면 통과시킨다 — 게이트가 아니라 방어선이다.
         size = None
     if size is not None and size > settings.max_gcs_bytes:
         raise HTTPException(
@@ -167,7 +146,6 @@ def parse_document(req: ParseRequestBody) -> JSONResponse:
         parsed = parse_document_bytes(raw, filename=filename)
         markdown = cleanup_markdown(parsed.markdown)
         parsed.metrics.text_length = len(markdown)
-        # 최종 본문 기준으로 잰다 — cleanup 이 표를 지웠다면 그것도 손실이다.
         parsed.metrics.tables_rendered = count_markdown_tables(markdown)
     except Exception as exc:  # noqa: BLE001
         logger.exception("parse failed for %s", req.file_id)

@@ -1,17 +1,4 @@
-﻿# 배포 전 GCP 실물 검사. 버킷·DB·코퍼스는 만들지 않는다(존재만 본다).
-# 예외 두 가지만 고친다 - 둘 다 "없으면 배포가 조용히 헛도는" 것들이다.
-#   1) 기본 컴퓨팅 SA 가 없으면 물어보고 compute.googleapis.com 을 켠다
-#      (SA 를 직접 만들 수는 없다 - API 를 켜야 Google 이 만든다)
-#   2) 공유드라이브에 그 SA 가 없으면 물어보고 뷰어로 초대한다(대화형일 때만)
-# 자동 조치를 끄려면 $env:PREFLIGHT_NO_FIX = "1"
-#
-# 사용: .\scripts\preflight.ps1
-# deploy.ps1 이 API enable 뒤에 호출한다. 건너뛰려면 $env:SKIP_PREFLIGHT = "1"
-#
-# _load_env.ps1 의 Require-FullDeployEnv 는 config 문자열만 본다.
-# 여기가 버킷·DB·코퍼스·(가능하면) Drive 공유의 실존을 본다.
-
-function Test-RagCorpusNameFormat {
+﻿function Test-RagCorpusNameFormat {
   param([string]$Name)
   if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
   return $Name -match '^projects/[^/]+/locations/[^/]+/ragCorpora/[^/]+$'
@@ -42,7 +29,7 @@ function Get-PreflightConfigErrors {
     $errs.Add("RAG_CORPUS_NAME_STUDENT: expected projects/.../locations/.../ragCorpora/... (got $student)")
   }
 
-  $qg = (Get-EnvOr QG_MODE "log").ToLower()
+  $qg = "$env:QG_MODE".ToLower()
   if ($qg -eq "fallback") {
     $proc = Get-EnvOr DOCAI_PROCESSOR_ID ""
     if ([string]::IsNullOrWhiteSpace($proc) -or (Test-PlaceholderValue $proc)) {
@@ -117,17 +104,12 @@ function Test-FirestoreNative {
 }
 
 function Test-PreflightCanFix {
-  <#
-    .SYNOPSIS
-      자동 조치를 해도 되는 상황인지. CI·비대화형에서는 묻지 않고 실패시킨다.
-  #>
   if ((Get-EnvOr PREFLIGHT_NO_FIX "") -eq "1") { return $false }
   if ($env:CI) { return $false }
   return [Environment]::UserInteractive
 }
 
 function Confirm-PreflightAction {
-  # 상태·결과 출력은 개조식, 사용자에게 묻는 문장만 경어체로 쓴다.
   param([string]$Question)
   if (-not (Test-PreflightCanFix)) { return $false }
   $ans = Read-Host "$Question [y/N]"
@@ -298,13 +280,6 @@ function Test-RagCorpusUsable {
 }
 
 function Get-RagCorpusFileCount {
-  <#
-    .SYNOPSIS
-      코퍼스에 실린 파일 수. 조회 실패는 -1 - 0 과 섞으면 멀쩡한 코퍼스에
-      전체 백필을 다시 걸게 된다.
-    .NOTES
-      용도는 "비었는가" 판정이라 상한($Max)까지만 센다.
-  #>
   param([string]$Name, [string]$Token, [int]$Max = 2000)
   $loc = Get-RagCorpusLocation $Name
   if (-not $loc) { return -1 }
@@ -371,15 +346,15 @@ function Assert-GcpPrereqs {
 
   $errs = [System.Collections.Generic.List[string]]::new()
   $project = Get-EnvOr GCP_PROJECT_ID ""
-  $region = Get-EnvOr GCP_REGION "asia-northeast3"
+  $region = $env:GCP_REGION
   $hwp = Get-EnvOr GCS_HWP_ORIGINAL_BUCKET ""
   $source = Get-EnvOr GCS_SOURCE_BUCKET ""
-  $fsDb = Get-EnvOr FIRESTORE_DATABASE "rag-sync-state"
+  $fsDb = $env:FIRESTORE_DATABASE
   $corpus = Get-EnvOr RAG_CORPUS_NAME ""
   $student = Get-EnvOr RAG_CORPUS_NAME_STUDENT ""
-  $qg = (Get-EnvOr QG_MODE "log").ToLower()
+  $qg = "$env:QG_MODE".ToLower()
   $docai = Get-EnvOr DOCAI_PROCESSOR_ID ""
-  $docaiLoc = Get-EnvOr DOCAI_LOCATION $region
+  $docaiLoc = $env:DOCAI_LOCATION
 
   $cfg = Get-GcloudText -GcloudArgs @("config", "set", "project", $project)
   if (-not $cfg.Ok) {
@@ -427,10 +402,6 @@ function Assert-GcpPrereqs {
   $sa = ""
   if ($numR.Ok -and $numR.Text) {
     $sa = "$($numR.Text.Trim())-compute@developer.gserviceaccount.com"
-    # 주소를 조립만 하고 ok 를 찍던 자리다. 기본 컴퓨팅 SA 는 Compute Engine API 를
-    # 켤 때 생기므로, 안 켠 프로젝트에는 **계정 자체가 없다**. 그런데도 ok 로 넘어가면
-    # 다음 Drive 단계에서 "Google 계정이 없는 이메일 주소" 라는 엉뚱한 메시지를 만나
-    # 공유 정책 문제로 오해하게 된다 - 실제로는 없는 계정을 공유하려 한 것이다.
     $saOk = Test-ServiceAccountExists -Project $project -Email $sa
     if (-not $saOk) {
       Write-Host "MISS Cloud Run SA $sa - 없다"
@@ -457,16 +428,13 @@ function Assert-GcpPrereqs {
   if ($driveToken -and $sa -and $driveIds.Count -gt 0) {
     foreach ($did in $driveIds) {
       $hit = $false
-      $conclusive = $false   # 판정을 신뢰할 수 있는가 (아니면 WARN 으로 남긴다)
+      $conclusive = $false
 
-      # 1순위: SA 를 가장해 실제로 읽어 본다. 사람 토큰에 Drive 스코프가 없어도 되고,
-      # 멤버 목록 조회와 달리 "봇이 읽을 수 있나" 를 직접 답한다.
       $probe = Test-SaDriveAccess -Sa $sa -DriveId $did -CallerToken $token
       if ($probe.Ok) {
         Write-Host "     SA 실접근 확인: $($probe.Name)"
         $hit = $true; $conclusive = $true
       } elseif ($probe.Stage -eq "delta") {
-        # 드라이브는 읽히는데 델타 진입점만 실패 = 공유드라이브가 아니라 폴더 ID.
         Write-Host "FAIL Drive $did : 파일은 읽히는데 델타 시작점이 없다 (HTTP $($probe.Code))"
         Write-Host "     DRIVE_IDS 가 공유드라이브가 아니라 폴더 ID 일 가능성이 높다"
         Write-Host "     폴더는 SYNC_FOLDER_IDS 로 옮기고 DRIVE_IDS 에는 0A... 형태를 넣을 것"
@@ -476,7 +444,6 @@ function Assert-GcpPrereqs {
         Write-Host "MISS Drive $did : SA 가 접근하지 못한다 (HTTP $($probe.Code))"
         $conclusive = $true
       } else {
-        # 가장 자체가 안 됨(Token Creator 없음 등). 멤버 목록 조회로 물러난다.
         $perm = Get-DrivePermissions -DriveId $did -Token $driveToken
         if ($perm.Ok) {
           foreach ($em in $perm.Emails) {
@@ -499,7 +466,6 @@ function Assert-GcpPrereqs {
             if ($again.Ok) {
               $hit = $true; $conclusive = $true
             } else {
-              # 가장이 막힌 환경이면 초대 성공 자체를 근거로 삼는다.
               $hit = $true
             }
           } else {
@@ -516,8 +482,6 @@ function Assert-GcpPrereqs {
           "Drive $did share($sa)" `
           "Cloud Run SA 가 접근하지 못함. .\scripts\share_drive.ps1 또는 공유드라이브 관리에서 $sa 를 뷰어 이상으로 초대"
       } else {
-        # 확인 경로가 둘 다 막혔다. 여기서 실패로 처리하면 Token Creator 도 Drive
-        # 스코프도 없는 정상 환경(예: CI)까지 배포가 막힌다 - 경고로 남긴다.
         Write-Host "WARN Drive $did share($sa) : 확인 불가. 콘솔에서 $sa 를 뷰어 이상으로 초대할 것"
       }
     }
@@ -534,7 +498,6 @@ function Assert-GcpPrereqs {
   Write-Host "== preflight done =="
 }
 
-# 직접 실행일 때만 돈다. deploy.ps1 은 dotsource 후 Assert-GcpPrereqs 를 호출.
 if ($MyInvocation.InvocationName -ne '.') {
   $ErrorActionPreference = "Stop"
   if ($PSVersionTable.PSVersion.Major -ge 7) {

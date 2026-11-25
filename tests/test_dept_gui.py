@@ -1,5 +1,3 @@
-"""로컬 학과 관리 GUI의 생성·검증·상태 API."""
-
 from __future__ import annotations
 
 import base64
@@ -21,8 +19,6 @@ from fastapi.testclient import TestClient
 
 from scripts import dept_config, dept_gui
 
-# These scenarios document the retired Cloud Run annotation and per-department
-# service model. Cloud-registry/shared-runtime coverage is in test_unified_console.py.
 _RETIRED_DEPLOYMENT_MODEL_TESTS = {
     "test_cloud_mcp_endpoint_restores_department_without_local_yaml",
     "test_cloud_config_can_be_edited_without_creating_local_yaml",
@@ -342,12 +338,6 @@ class _DeferredThread:
 
 
 class _DeferredThreading:
-    """dept_gui 가 보는 threading 만 갈아끼운다.
-
-    `threading.Thread` 자체를 덮으면 ThreadPoolExecutor 의 일꾼까지 안 떠서
-    학과 주석을 병렬로 읽는 코드가 as_completed 에서 영원히 멈춘다.
-    """
-
     Thread = _DeferredThread
 
 
@@ -356,7 +346,6 @@ def _stub_cloud_run(
     mcp_services: dict[str, dict],
     sync_env: dict[str, str] | None = None,
 ) -> list[list[str]]:
-    """rag-mcp-* 주석 조회와 rag-sync 갱신을 흉내낸다. 실행된 gcloud 인자를 준다."""
     calls: list[list[str]] = []
 
     def fake_gcloud(args, timeout=12):
@@ -370,7 +359,6 @@ def _stub_cloud_run(
         return True, {}
 
     def fake_run(args, timeout=12):
-        # 학과 맵은 명령줄이 아니라 flags-file 로 나간다. 테스트도 같은 자리를 본다.
         record: dict = {"args": list(args), "flags": {}}
         for arg in args:
             if arg.startswith("--flags-file="):
@@ -764,11 +752,6 @@ def test_common_runtime_deployment_tracks_steps_and_follow_up_department(
 def test_common_runtime_deploy_script_reuses_existing_images(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """공통 런타임 배포는 이미 있는 이미지·서비스를 다시 만들지 않는다.
-
-    없는 런타임을 세우는 흐름이라 코드는 그대로다. -ReuseExisting 이 빠지면
-    매번 이미지 두 벌을 다시 굽고 Cloud Run 두 개를 다시 올린다(수 분).
-    """
     captured: dict[str, list[str]] = {}
 
     class FakeProcess:
@@ -1143,11 +1126,20 @@ def test_missing_common_config_can_be_bootstrapped(
 
     assert created.status_code == 201
     saved = yaml.safe_load(common_path.read_text(encoding="utf-8"))
-    assert saved["GCP_PROJECT_ID"] == "project-test"
-    assert "GCS_HWP_ORIGINAL_BUCKET" not in saved
-    assert "GCS_SOURCE_BUCKET" not in saved
-    assert saved["TOP_K_DEFAULT"] == 5
-    assert saved["ALLOW_UNAUTH"] is True
+    assert saved == {
+        "GCP_PROJECT_ID": "project-test",
+        "GCP_REGION": "asia-northeast3",
+        "ARTIFACT_REPO": "rag-mcp",
+        "FIRESTORE_DATABASE": "rag-sync-state",
+    }
+    env = dept_config.build_env_from_config(
+        "cs", "staff", {"corpora": {"staff": "corpus/staff"}, "keys": {"staff": "S" * 30}}
+    )
+    assert env["CLOUD_TASKS_ENABLED"] == "true"
+    assert env["RAG_MAPPING_WRITE_ENABLED"] == "true"
+    assert env["TOP_K_DEFAULT"] == "7"
+    assert env["SEARCH_FETCH_MULTIPLIER"] == "9"
+    assert env["ALLOW_UNAUTH"] == "true"
     assert client.get("/api/v1/environment").json()["commonValid"] is True
 
     duplicate = client.post("/api/v1/common-config", headers=headers, json=payload)
@@ -1318,7 +1310,6 @@ def test_resource_plan_and_provision_run_create_selected_resources(
     assert planned.status_code == 201
     plan = planned.json()
     assert len(plan["resources"]) == 4
-    # 버킷도 코퍼스와 같이 학과 코드가 맨 앞이어야 한다.
     assert plan["resources"][0]["value"].startswith("cs-rag-hwp-")
     corpus_names = {
         item["key"]: item["displayName"]
@@ -2598,7 +2589,6 @@ def _bootstrap(monkeypatch: pytest.MonkeyPatch, project: str = "project-test") -
             "projects": [{"id": project, "name": project}],
         },
     )
-    # 접근 확인은 전량 목록 멤버십이 아니라 단건 조회다.
     monkeypatch.setattr(dept_gui, "_project_accessible", lambda pid: pid == project)
 
 
@@ -2638,7 +2628,6 @@ def _common_sa_ready(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_common_resource_plan_reports_missing_apis_without_touching_gcp(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """계획 단계는 **아무것도 바꾸지 않는다** — 켤 API 와 만들 리소스만 알려준다."""
     client, headers = _client()
     _bootstrap(monkeypatch)
     monkeypatch.setattr(dept_gui, "_gcloud_project_resources", _no_resources)
@@ -2655,7 +2644,6 @@ def test_common_resource_plan_reports_missing_apis_without_touching_gcp(
             "issues": ["tokenCreator"],
         },
     )
-    # 계획 단계에서 변경 계열 호출이 일어나면 즉시 실패시킨다.
     monkeypatch.setattr(
         dept_gui,
         "_run_command",
@@ -2682,7 +2670,6 @@ def test_common_resource_plan_reports_missing_apis_without_touching_gcp(
     assert resources["artifactRepo"]["displayName"] == "rag-mcp"
     assert resources["firestoreDatabase"]["displayName"] == "rag-sync-state"
     assert all(item["exists"] is False for item in resources.values())
-    # 위치 불가역 경고가 화면까지 전달돼야 한다.
     assert "변경할 수 없습니다" in resources["firestoreDatabase"]["warning"]
 
 
@@ -2725,7 +2712,6 @@ def test_common_resource_plan_marks_existing_resources_as_skipped(
 def test_common_resource_plan_rejects_default_firestore_database(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """(default) 는 Datastore 모드로 굳으면 못 되돌린다 — 계획 단계에서 막는다."""
     client, headers = _client()
     _bootstrap(monkeypatch)
 
@@ -2746,7 +2732,6 @@ def test_common_resource_plan_rejects_default_firestore_database(
 def test_common_provisioning_enables_apis_before_creating(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """API 를 먼저 켜야 생성이 된다. 순서가 뒤집히면 새 프로젝트에서 그냥 실패한다."""
     client, headers = _client()
     _bootstrap(monkeypatch)
     _common_sa_ready(monkeypatch)
@@ -2918,7 +2903,6 @@ def test_common_provisioning_grants_and_verifies_token_creator(
 def test_common_provisioning_skips_creation_when_api_enable_fails(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """API 를 못 켰으면 생성을 시도하지 않는다 — 실패 원인이 뒤에서 뭉개진다."""
     client, headers = _client()
     _bootstrap(monkeypatch)
     _common_sa_ready(monkeypatch)
@@ -2998,7 +2982,6 @@ def test_common_provisioning_plan_is_single_use(
     assert {item["status"] for item in first.json()["resources"]} == {"SKIPPED"}
     assert all("이미 존재" in item["detail"] for item in first.json()["resources"])
     run = _await_run(client, first.json())
-    # 이미 있는 것만이면 아무것도 만들지 않고 끝난다.
     assert {item["status"] for item in run["resources"]} == {"SKIPPED"}
 
     repeated = client.post(
@@ -3053,7 +3036,6 @@ def test_drive_sa_status_reports_ok_when_impersonation_succeeds(
 def test_drive_sa_status_flags_token_creator_when_impersonation_404(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """새 프로젝트에서 실제로 나온 증상 — SA 는 있는데 가장이 404 로 막힌다."""
     client, _ = _client()
     _sa_common(monkeypatch)
     monkeypatch.setattr(
@@ -3083,7 +3065,6 @@ def test_drive_sa_status_flags_token_creator_when_impersonation_404(
 def test_drive_sa_status_flags_compute_api_on_fresh_project(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Compute API 가 꺼져 있으면 기본 SA 자체가 없다 — 권한 문제와 구분해야 한다."""
     client, _ = _client()
     _sa_common(monkeypatch)
     monkeypatch.setattr(dept_gui, "_gcloud_enabled_services", lambda p: (True, set()))
@@ -3093,7 +3074,6 @@ def test_drive_sa_status_flags_compute_api_on_fresh_project(
 
     assert body["status"] == "FAIL"
     assert "computeApi" in body["issues"]
-    # SA 가 없는 원인이 Compute API 이면 'SA 없음' 을 따로 또 세지 않는다.
     assert "serviceAccountMissing" not in body["issues"]
 
 
@@ -3148,7 +3128,6 @@ def test_drive_sa_repair_plan_refuses_when_already_ok(
 def test_drive_sa_repair_applies_then_reverifies(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """조치 후 같은 방법으로 되읽어야 한다 — 명령 성공만 믿으면 안 된다."""
     client, headers = _client()
     _sa_common(monkeypatch)
     enabled: set[str] = set()
@@ -3233,11 +3212,6 @@ def test_drive_sa_repair_requires_local_session(isolated_config: Path) -> None:
 def test_session_reports_common_existence_without_touching_gcloud(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """부팅 첫 호출은 gcloud 를 타면 안 된다 — 여기서 막히면 화면이 통째로 늦다.
-
-    공통 설정 화면을 띄울지는 파일 존재 하나로 정해진다. 이 경로에 gcloud 왕복이
-    끼어들면 수 초짜리 흰 화면이 된다(실측 9.1s -> 0.01s 로 고친 지점).
-    """
     monkeypatch.setattr(
         dept_gui, "_run_command", lambda *a, **k: pytest.fail("세션 응답에 gcloud 가 끼면 안 된다")
     )
@@ -3258,7 +3232,6 @@ def test_session_reports_common_existence_without_touching_gcloud(
 def test_bootstrap_state_runs_independent_gcloud_calls_concurrently(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """독립 호출은 동시에 돌아야 한다. 순차면 gcloud 왕복이 그대로 더해진다."""
     monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud.cmd")
     overlap = {"peak": 0, "live": 0}
     lock = threading.Lock()
@@ -3285,7 +3258,6 @@ def test_bootstrap_state_runs_independent_gcloud_calls_concurrently(
     elapsed = time.time() - started
 
     assert state["authenticated"] is True
-    # 3건이 순차면 0.45s 이상 걸린다. 동시에 돌면 0.15s 언저리다.
     assert overlap["peak"] >= 2, "독립 호출이 순차로 돌고 있다"
     assert elapsed < 0.4, f"병렬이 아니다: {elapsed:.2f}s"
 
@@ -3293,7 +3265,6 @@ def test_bootstrap_state_runs_independent_gcloud_calls_concurrently(
 def test_bootstrap_state_discards_project_list_when_unauthenticated(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """projects list 를 인증 확인 전에 띄우더라도, 미인증이면 결과를 쓰면 안 된다."""
     monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud.cmd")
 
     def fake_json(args, timeout=12):
@@ -3313,7 +3284,6 @@ def test_bootstrap_state_discards_project_list_when_unauthenticated(
 def test_bootstrap_state_does_not_enumerate_every_project(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """프로젝트 전량 조회를 하면 안 된다 — 수천 개 계정에서 6초를 먹던 지점이다."""
     monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud.cmd")
 
     def fake_json(args, timeout=12):
@@ -3327,14 +3297,12 @@ def test_bootstrap_state_does_not_enumerate_every_project(
     state = dept_gui._gcloud_bootstrap_state(include_projects=True)
 
     assert state["authenticated"] is True
-    # 현재 프로젝트 하나만 싣는다. 나머지는 검색으로 찾는다.
     assert state["projects"] == [{"id": "proj-current", "name": "proj-current"}]
 
 
 def test_project_search_merges_id_and_name_matches(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """ID 와 표시 이름 중 어디에 맞을지 모르므로 둘 다 묻고 합친다."""
     monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "token")
     seen: list[str] = []
 
@@ -3405,7 +3373,6 @@ def test_project_search_skips_inactive_projects(
 def test_project_search_without_term_does_not_call_gcp(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """검색어 없이 상위 N개를 뿌리면 sys-* 가 앞을 채워 쓸모가 없다."""
     monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "token")
     monkeypatch.setattr(
         dept_gui, "_http_json", lambda *a, **k: pytest.fail("빈 검색어로 GCP 를 부르면 안 된다")
@@ -3420,7 +3387,6 @@ def test_project_search_without_term_does_not_call_gcp(
 def test_project_accessible_checks_one_project_not_the_whole_list(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """전량 목록 멤버십 대신 단건 확인 — 빠르고, 목록 누락으로 인한 오탐이 없다."""
     monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "token")
     calls: list[str] = []
 
@@ -3434,13 +3400,11 @@ def test_project_accessible_checks_one_project_not_the_whole_list(
 
     assert dept_gui._project_accessible("project-ok") is True
     assert dept_gui._project_accessible("project-no") is False
-    # 형식이 틀리면 왕복조차 하지 않는다.
     assert dept_gui._project_accessible("BAD ID") is False
     assert len(calls) == 2
 
 
 def _write_twin_department(dept_dir: Path, code: str) -> None:
-    """ee 와 코퍼스·버킷을 공유하는 학과 YAML 을 직접 만든다."""
     payload = _payload()
     (dept_dir / f"{code}.yaml").write_text(
         yaml.safe_dump(
@@ -3468,7 +3432,6 @@ def _wait_for_teardown(timeout: float = 5.0) -> None:
 
 
 def _stub_teardown_deletes(monkeypatch: pytest.MonkeyPatch, failures: set[str] | None = None) -> list[str]:
-    """실제 GCP 호출 대신 호출 순서만 기록한다. failures 에 든 이름은 터뜨린다."""
     calls: list[str] = []
     broken = failures or set()
 
@@ -3505,7 +3468,6 @@ def _stub_teardown_deletes(monkeypatch: pytest.MonkeyPatch, failures: set[str] |
 
 @pytest.fixture()
 def cloud_teardown_configs(isolated_config: Path, monkeypatch: pytest.MonkeyPatch):
-    """Use existing config samples as uploaded Cloud metadata for teardown tests."""
     monkeypatch.setattr(dept_gui, "_cloud_department_configs", lambda: {
         path.stem: yaml.safe_load(path.read_text(encoding="utf-8"))
         for path in isolated_config.glob("*.yaml")
@@ -3531,10 +3493,8 @@ def test_department_teardown_plan_lists_every_owned_resource(isolated_config: Pa
         "sync-env",
         "mcp-staff",
     ]
-    # Cloud 설정을 담은 MCP는 마지막에 삭제해 실패 시 재시도 정보를 남긴다.
     keys = [target["key"] for target in plan["targets"]]
     assert keys.index("mcp-staff") > keys.index("bucket-source")
-    # 라우팅 갱신이 성공한 후 Cloud 설정을 삭제한다.
     assert keys[-1] == "mcp-staff"
     assert not any(target["skipped"] for target in plan["targets"])
     assert all(target["selected"] for target in plan["targets"])
@@ -3544,11 +3504,6 @@ def test_department_teardown_plan_lists_every_owned_resource(isolated_config: Pa
 def test_teardown_plan_covers_firestore_history_and_shared_bucket_objects(
     isolated_config: Path,
 ) -> None:
-    """버킷·코퍼스만 지우면 동기화 이력과 공용 버킷 객체가 그대로 남는다.
-
-    남은 doc_state 는 조용하다 — 같은 드라이브를 다시 등록하면 contentHash 가
-    같아 전부 건너뛰고 새 코퍼스가 영원히 비어 있게 된다.
-    """
     (isolated_config.parent / "common.yaml").write_text(
         yaml.safe_dump(
             {
@@ -3567,7 +3522,6 @@ def test_teardown_plan_covers_firestore_history_and_shared_bucket_objects(
     by_key = {target["key"]: target for target in plan["targets"]}
 
     assert by_key["firestore-state"]["meta"]["driveIds"] == ["DRIVE-1"]
-    # 공용 메타데이터 버킷은 남기고 이 코퍼스 prefix 만 비운다.
     assert by_key["metadata-staff"]["name"] == (
         "gs://shared-metadata-test/import-results/staff-1/"
     )
@@ -3580,7 +3534,6 @@ def test_teardown_plan_covers_firestore_history_and_shared_bucket_objects(
 def test_teardown_plan_keeps_firestore_history_when_a_drive_is_shared(
     isolated_config: Path,
 ) -> None:
-    """doc_state 는 driveId 로만 학과를 가른다. 드라이브를 공유하면 지울 수 없다."""
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
     _write_twin_department(isolated_config, "me")
@@ -3597,14 +3550,8 @@ def test_teardown_plan_keeps_firestore_history_when_a_drive_is_shared(
 def test_teardown_plan_keeps_resources_shared_with_other_departments(
     isolated_config: Path,
 ) -> None:
-    """다른 학과가 같은 코퍼스·버킷을 가리키면 지우면 안 된다.
-
-    지워도 남은 학과의 MCP 는 오류를 내지 않는다 — 검색이 조용히 빈 결과가 된다.
-    """
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
-    # API 는 리소스 중복 등록을 막는다. 여기서 보려는 것은 "이미 그런 상태" 이므로
-    # 파일을 직접 둔다 — 손으로 편집한 YAML 이 실제로 이런 모양이 된다.
     _write_twin_department(isolated_config, "me")
 
     plan = client.get("/api/v1/departments/ee/teardown-plan").json()
@@ -3613,7 +3560,6 @@ def test_teardown_plan_keeps_resources_shared_with_other_departments(
     assert by_key["corpus-staff"]["skipped"] is True
     assert by_key["corpus-staff"]["sharedWith"] == ["me"]
     assert by_key["bucket-source"]["skipped"] is True
-    # 학과 전용인 것은 그대로 지운다.
     assert by_key["mcp-staff"]["skipped"] is False
     assert "config" not in by_key
 
@@ -3657,7 +3603,6 @@ def test_teardown_deletes_owned_resources_and_cloud_metadata_last(
         "bucket:rag-ee-hwp-project-test",
         "bucket:rag-ee-source-project-test",
         "firestore:DRIVE-1",
-        # Cloud 라우팅을 먼저 갱신하고 설정을 담은 staff MCP를 마지막에 지운다.
         "syncEnv:rag-sync",
         "run:rag-mcp-ee-staff",
     ]
@@ -3668,7 +3613,6 @@ def test_teardown_deletes_owned_resources_and_cloud_metadata_last(
 def test_teardown_keeps_cloud_metadata_when_a_gcp_delete_fails(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """GCP 쪽이 남았는데 설정을 지우면 고아 리소스를 콘솔에서 못 찾는다."""
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
     _stub_teardown_deletes(monkeypatch, failures={"rag-ee-source-project-test"})
@@ -3693,8 +3637,6 @@ def test_teardown_skips_shared_resources_when_running(
 ) -> None:
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
-    # API 는 리소스 중복 등록을 막는다. 여기서 보려는 것은 "이미 그런 상태" 이므로
-    # 파일을 직접 둔다 — 손으로 편집한 YAML 이 실제로 이런 모양이 된다.
     _write_twin_department(isolated_config, "me")
     calls = _stub_teardown_deletes(monkeypatch)
     plan = dept_gui.department_teardown_plan("ee")
@@ -3713,7 +3655,6 @@ def test_teardown_skips_shared_resources_when_running(
 def test_teardown_runs_only_the_targets_that_were_selected(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """리소스를 남긴 채 학과만 접는 경우가 실제로 있다 — 코퍼스는 재사용하고 서비스만 내린다."""
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
     calls = _stub_teardown_deletes(monkeypatch)
@@ -3729,7 +3670,6 @@ def test_teardown_runs_only_the_targets_that_were_selected(
     by_key = {target["key"]: target for target in run["targets"]}
 
     assert calls == ["run:rag-mcp-ee-student", "bucket:rag-ee-source-project-test"]
-    # 고르지 않은 것은 목록에서 사라지지 않는다 — 무엇을 남겼는지가 보여야 한다.
     assert by_key["corpus-staff"]["status"] == "SKIPPED"
     assert by_key["corpus-staff"]["detail"] == "선택하지 않아 남깁니다"
     assert "config" not in by_key
@@ -3759,11 +3699,6 @@ def test_teardown_refuses_an_empty_selection(
 def test_selecting_a_shared_resource_still_does_not_delete_it(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """화면이 무엇을 보내든 다른 학과가 쓰는 리소스는 지우지 않는다.
-
-    선택 UI 가 생기면서 '체크하면 지워진다' 가 공유 검사보다 위에 오면
-    남은 학과의 검색이 오류 없이 빈 결과가 된다.
-    """
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
     _write_twin_department(isolated_config, "me")
@@ -3932,7 +3867,6 @@ def test_firestore_client_uses_active_gcloud_token(
 def test_firestore_teardown_removes_history_for_this_departments_drives_only(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """하위 컬렉션은 부모를 지워도 남는다 — rag_files 를 따로 지우지 않으면 고아가 된다."""
     store = {
         "doc_state/file-a": {"fileId": "file-a", "driveId": "DRIVE-1"},
         "doc_state/file-a/rag_files/m1": {"corpus": "staff"},
@@ -3975,7 +3909,6 @@ def test_firestore_teardown_commits_at_configured_batch_size(
         ["DRIVE-1"], "project-test", progress=progress.append
     )
 
-    # 문서마다 queue 두 건 + doc_state 한 건, 마지막 sync token 한 건.
     assert firestore.commit_sizes == [200, 200, 51]
     assert progress and "문서 150건" in progress[-1]
     assert not store
@@ -4010,7 +3943,6 @@ def test_common_runtime_status_reports_each_service(
     assert body["status"] == "DEGRADED"
     assert by_key["sync"]["state"] == "READY"
     assert by_key["sync"]["revision"] == "rag-sync-00007"
-    # 미배포와 조회 실패는 화면에서 다른 행동으로 이어진다 — 구분해야 한다.
     assert by_key["parser"]["state"] == "MISSING"
     assert by_key["workflow"]["state"] == "READY"
     assert by_key["workflow"]["displayName"] == "rag-daily-sync · Workflow"
@@ -4021,7 +3953,6 @@ def test_common_runtime_status_reports_each_service(
 def test_common_runtime_status_flags_a_revision_that_never_became_ready(
     isolated_config: Path,
 ) -> None:
-    """Ready=True 만 보면 새 리비전이 못 뜬 채 옛 리비전이 도는 상태가 정상으로 보인다."""
     service = {
         "metadata": {},
         "status": {
@@ -4039,11 +3970,6 @@ def test_common_runtime_status_flags_a_revision_that_never_became_ready(
 
 @pytest.mark.usefixtures("cloud_teardown_configs")
 def test_every_teardown_kind_has_a_label_in_the_console(isolated_config: Path) -> None:
-    """계획의 kind 는 여기서 만들고 이름은 app.js 가 붙인다 — 둘이 어긋나기 쉽다.
-
-    빠진 kind 는 오류를 내지 않는다. 삭제 창의 그 줄만 "firestoreState" 같은
-    내부 이름으로 뜬다 — 되돌릴 수 없는 화면에서 읽을 수 없는 라벨이 나온다.
-    """
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
     plans = (dept_gui.department_teardown_plan("ee"), dept_gui.common_runtime_teardown_plan())
@@ -4071,7 +3997,6 @@ def test_common_runtime_teardown_plan_warns_about_remaining_departments(
 
     assert plan["confirmWord"] == "project-test"
     assert plan["remainingDepartments"] == ["ee"]
-    # Scheduler → Workflow → Cloud Run 순. 거꾸로 지우면 잡이 죽은 워크플로를 부른다.
     assert [target["key"] for target in plan["targets"]] == [
         "scheduler",
         "workflow",
@@ -4111,11 +4036,6 @@ def _sync_common() -> dict:
 def test_sync_check_defers_to_the_deploy_failure_that_caused_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """공통 런타임이 안 떠 있으면 동기화 실패는 그 사고의 그림자다.
-
-    두 줄로 세면 어느 쪽을 고쳐야 하는지 흐려진다 — SYNC 는 SKIP 으로 물러나고
-    배포 버튼을 그대로 달아 준다.
-    """
     called: list[list[str]] = []
     monkeypatch.setattr(dept_gui, "_gcloud_json", lambda args, timeout=12: called.append(args) or (False, ""))
     deploy_checks = [
@@ -4129,7 +4049,6 @@ def test_sync_check_defers_to_the_deploy_failure_that_caused_it(
     assert checks[0]["status"] == "SKIP"
     assert checks[0]["actionType"] == "COMMON_RUNTIME_DEPLOY"
     assert checks[0]["blockedBy"] == ["parser"]
-    # 원인이 앞에 있으면 gcloud 를 아예 부르지 않는다.
     assert called == []
 
 
@@ -4174,12 +4093,6 @@ def test_deployed_workflow_without_runs_points_at_manual_sync(
 def test_missing_scheduler_job_is_reported_instead_of_a_bare_workflow_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """배포가 Scheduler 단계에서 죽으면 잡이 없다 — 그게 진짜 원인이다.
-
-    예전에는 어느 검사에도 안 잡혀서 "최근 실행 없음" 한 줄로만 드러났고,
-    화면에서는 고칠 방법이 보이지 않았다.
-    """
-
     def fake_gcloud(args, timeout=12):
         if args[:2] == ["workflows", "describe"]:
             return True, {"name": "rag-daily-sync"}
@@ -4194,7 +4107,6 @@ def test_missing_scheduler_job_is_reported_instead_of_a_bare_workflow_error(
 
     assert by_name["scheduler-job"]["status"] == "WARN"
     assert by_name["scheduler-job"]["actionType"] == "COMMON_RUNTIME_DEPLOY"
-    # 실행 이력 쪽은 원인이 아니므로 오류로 세지 않는다.
     assert by_name["latest-workflow"]["status"] == "SKIP"
     assert by_name["latest-workflow"]["blockedBy"] == ["scheduler-job"]
 
@@ -4216,7 +4128,6 @@ def test_paused_scheduler_job_shows_the_resume_command(
 
     assert job["status"] == "WARN"
     assert "PAUSED" in job["detail"]
-    # 재배포로는 못 고친다 — 명령을 그대로 보여준다.
     assert "actionType" not in job
     assert "jobs resume" in job["action"]
 
@@ -4224,8 +4135,6 @@ def test_paused_scheduler_job_shows_the_resume_command(
 def test_execution_lookup_failure_stays_an_error_with_the_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """조회 자체가 깨진 것은 배포로 고칠 수 없다 — 버튼 대신 사유를 남긴다."""
-
     def fake_gcloud(args, timeout=12):
         if args[:2] == ["workflows", "describe"]:
             return True, {"name": "rag-daily-sync"}
@@ -4297,11 +4206,6 @@ def _sync_service(env: dict[str, str]) -> dict:
 def test_runtime_env_drift_catches_stale_buckets_after_a_department_rebuild(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """학과를 다시 만들면 버킷 이름이 바뀐다. 서비스는 살아 있고 env 만 낡는다.
-
-    이 상태의 rag-sync 는 없어진 버킷에 업로드해 전량 404 → DLQ 로 보낸다.
-    로그를 뒤지기 전에는 안 보이므로 여기서 잡아야 한다.
-    """
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
 
@@ -4326,7 +4230,6 @@ def test_runtime_env_drift_catches_stale_buckets_after_a_department_rebuild(
     stale_keys = {item["key"] for item in by_service["rag-sync"]["staleKeys"]}
     assert "GCS_HWP_ORIGINAL_BUCKET" in stale_keys
     assert "DEPARTMENTS_JSON" in stale_keys
-    # 코퍼스는 그대로이므로 드리프트로 세지 않는다.
     assert "RAG_CORPUS_NAME" not in stale_keys
 
 
@@ -4341,6 +4244,9 @@ def test_runtime_env_reports_ok_when_deployment_matches_config(
         "GCS_SOURCE_BUCKET": expected["GCS_SOURCE_BUCKET"],
         "RAG_CORPUS_NAME": expected["RAG_CORPUS_NAME"],
         "DEPARTMENTS_JSON": dept_config.departments_json(),
+        **{key: expected[key] for key in (
+            "DOCAI_PROCESSOR_ID", "DOCAI_LOCATION", "DOCAI_OCR_PROCESSOR_ID", "DOCAI_OCR_LOCATION",
+        )},
     }
     monkeypatch.setattr(
         dept_gui, "_gcloud_json", lambda args, timeout=12: (True, _sync_service(deployed))
@@ -4355,7 +4261,6 @@ def test_runtime_env_reports_ok_when_deployment_matches_config(
 def test_missing_service_is_not_reported_as_drift(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """서비스가 없는 것은 드리프트가 아니라 미배포다 — DEPLOY 층이 잡는다."""
     client, headers = _client()
     assert client.post("/api/v1/departments", headers=headers, json=_payload()).status_code == 201
     monkeypatch.setattr(dept_gui, "_gcloud_json", lambda args, timeout=12: (False, "NOT_FOUND"))
@@ -4369,7 +4274,6 @@ def test_missing_service_is_not_reported_as_drift(
 def test_env_only_run_skips_build_workflow_and_scheduler_steps(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """env 갱신은 이미지·Workflow·Scheduler 를 건드리지 않는다."""
     captured: dict[str, list[str]] = {}
 
     class FakeProcess:
@@ -4404,20 +4308,9 @@ def test_env_only_run_skips_build_workflow_and_scheduler_steps(
     assert [step["key"] for step in run["steps"]] == ["config", "cloudRun", "ready"]
 
 
-# ---- rag-sync 학과 라우팅 맵 -------------------------------------------------
-# MCP 주석과 rag-sync 의 DEPARTMENTS_JSON 이 갈라지면 그 학과는 동기화 탭에
-# 나타나지도 않고 실행해도 UnknownDriveError 로 건너뛴다. 조용히 어긋나는 값이라
-# 배포가 끝날 때마다 맞추고, 어긋난 상태는 드리프트로 보이게 한다.
-
-
 def test_mcp_deployment_refreshes_the_sync_department_map(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """학과를 올리면 rag-sync 라우팅 맵도 같이 갱신된다.
-
-    MCP 만 올리고 끝내던 시절에는 rag-sync 가 새 학과의 드라이브를 몰라
-    동기화 대상에서 통째로 빠졌다. 사람이 기억해야 하는 수동 절차였다.
-    """
     config, service = _cloud_v2_service()
     monkeypatch.setattr(dept_gui, "threading", _DeferredThreading)
     run = dept_gui.start_mcp_deployment("ee", cloud_config=config)
@@ -4460,10 +4353,7 @@ def test_mcp_deployment_refreshes_the_sync_department_map(
         call for call in calls if call["args"][1:4] == ["run", "services", "update"]
     )
     assert update["args"][4] == dept_gui.SYNC_SERVICE
-    # --set-env-vars 는 env 를 통째로 치환한다. 여기서 그것을 쓰면 버킷·코퍼스·
-    # Cloud Tasks 설정이 한꺼번에 사라진다.
     assert not any(arg.startswith("--set-env-vars=") for arg in update["args"])
-    # 값이 명령줄에 실리면 Windows 의 gcloud.cmd 가 콤마마다 끊어 죽는다.
     assert not any("DEPARTMENTS_JSON" in arg for arg in update["args"])
     departments = json.loads(update["flags"]["--update-env-vars"]["DEPARTMENTS_JSON"])
     assert departments["ee"]["driveIds"] == ["DRIVE-1"]
@@ -4474,7 +4364,6 @@ def test_mcp_deployment_refreshes_the_sync_department_map(
 def test_sync_department_map_is_left_alone_when_it_already_matches(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """같은 값을 다시 씌우면 쓸데없는 리비전만 하나 더 뜬다."""
     _config, service = _cloud_v2_service()
     expected = dept_config.departments_json_from_configs({"ee": _cloud_v2_service()[0]})
     calls = _stub_cloud_run(
@@ -4492,7 +4381,6 @@ def test_sync_department_map_is_left_alone_when_it_already_matches(
 def test_sync_department_map_refuses_to_drop_a_department_without_v2_metadata(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """v1 학과를 빼고 맵을 씌우면 그 학과 문서가 조용히 처리되지 않는다."""
     _config, service = _cloud_v2_service()
     calls = _stub_cloud_run(
         monkeypatch,
@@ -4510,11 +4398,6 @@ def test_sync_department_map_refuses_to_drop_a_department_without_v2_metadata(
 def test_runtime_env_drift_sees_a_stale_department_map_without_local_yaml(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """로컬 YAML 이 없어도 학과 맵이 낡았으면 드리프트로 보여야 한다.
-
-    로컬 YAML 만 보던 시절에는 이 환경에서 검사가 통째로 UNKNOWN 으로 빠져,
-    rag-sync 에 학과가 빠져 있어도 경고 한 줄 없었다.
-    """
     _config, service = _cloud_v2_service()
     mcp_services = {"rag-mcp-ee-staff": service}
 
@@ -4542,7 +4425,6 @@ def test_runtime_env_drift_sees_a_stale_department_map_without_local_yaml(
 def test_env_only_refresh_without_local_yaml_updates_the_department_map(
     isolated_config: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """YAML 없는 환경에서 deploy.ps1 -EnvOnly 는 학과 맵을 만들지 못해 죽는다."""
     _config, service = _cloud_v2_service()
     monkeypatch.setattr(dept_gui, "threading", _DeferredThreading)
     run = dept_gui.start_common_runtime_deployment(env_only=True)

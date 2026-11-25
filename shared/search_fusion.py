@@ -1,5 +1,3 @@
-"""Fuse independently ranked retrieval candidates without interpreting score meaning."""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -12,7 +10,6 @@ _RRF_K = 60.0
 def rrf_merge_hit_lists(
     rankings: Sequence[Sequence[SearchHit]], *, weights: Sequence[float] | None = None
 ) -> list[SearchHit]:
-    """Merge ranked lists using reciprocal-rank fusion, retaining original hit scores."""
     if weights is None:
         weights = [1.0] * len(rankings)
     if len(weights) != len(rankings) or any(weight < 0 for weight in weights):

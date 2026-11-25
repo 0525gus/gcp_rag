@@ -53,6 +53,9 @@ def test_authenticated_http_paths_expose_each_channel(monkeypatch):
             return hits
 
     class Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def get(self, file_id):
             return DocState(
                 file_id=file_id,

@@ -79,8 +79,6 @@
     syncDetailRequest: 0,
   };
 
-  // 상태 검사는 학과별로 병렬 완료된다. 짧은 간격으로 완료 결과를 가져와
-  // 각 행이 전체 실행 종료를 기다리지 않고 바로 갱신되게 한다.
   const STATUS_RUN_POLL_MS = 200;
 
   const statusLabels = {
@@ -143,8 +141,6 @@
     window.setTimeout(() => item.remove(), 4300);
   }
 
-  // 화면별 조회가 언제 마지막으로 성공했는지 기록한다. 각 조회 함수가 시작·성공·실패를
-  // 알리고, 화면 상단의 갱신 표시는 이 기록만 보고 그린다.
   const REFRESH_TTL_MS = 60 * 1000;
   const freshness = {};
 
@@ -185,8 +181,6 @@
     });
   }
 
-  // 로그인이 확인되면 바로 모든 조회 화면을 뒤에서 채워 둔다. 화면을 열 때는 이미
-  // 받아 둔 결과를 보여 주고, 오래된 것만 다시 조회한다.
   function prefetchViews() {
     if (needsRefresh("syncRuns")) loadSyncRuns(true);
     if (needsRefresh("commonRuntime")) loadCommonRuntimeState(true);
@@ -315,8 +309,6 @@
     </button>`).join("") : `<div class="issue-empty"><span class="issue-empty-mark" aria-hidden="true">${indexIssueState.loading ? "…" : "≡"}</span><b>${indexIssueState.loading ? "문서 상태를 확인하고 있습니다" : !$("#indexIssuesDepartment").value ? "학과를 선택해 주세요" : indexIssueState.loaded ? "표시할 문서가 없습니다" : "문서를 불러오지 못했습니다"}</b><p>${indexIssueState.loading || !$("#indexIssuesDepartment").value ? "" : indexIssueState.loaded ? indexIssueState.cursor ? "현재까지 조회한 범위에 조건과 일치하는 문서가 없습니다." : "조건과 일치하는 보류·오류 문서가 없습니다." : "새로고침을 눌러 다시 확인해 주세요."}</p></div>`;
   }
 
-  // background 는 이미 보이는 목록을 지우지 않고 전체 집계가 끝났을 때 한 번에 바꾼다.
-  // 직접 새로고침·학과 변경은 지금처럼 비우고 받는 대로 보여 준다.
   async function loadIndexIssues(more = false, { background = false } = {}) {
     if (more) { indexIssueState.visible += 25; renderIndexIssues(); return; }
     const code = $("#indexIssuesDepartment").value;
@@ -465,13 +457,13 @@
     const select = $("#corpusDepartment");
     if (!select) return;
     const current = select.value;
-    const localDepartments = state.departments.filter((dept) => !dept.cloudOnly);
-    select.innerHTML = '<option value="">학과 선택</option>' + localDepartments.map((dept) =>
+    const departments = state.departments;
+    select.innerHTML = '<option value="">학과 선택</option>' + departments.map((dept) =>
       `<option value="${escapeHtml(dept.code)}">${escapeHtml(dept.name)} · ${escapeHtml(dept.code)}</option>`
     ).join("");
-    if (localDepartments.some((dept) => dept.code === current)) select.value = current;
-    else if (localDepartments.length === 1) select.value = localDepartments[0].code;
-    select.disabled = localDepartments.length === 0;
+    if (departments.some((dept) => dept.code === current)) select.value = current;
+    else if (departments.length === 1) select.value = departments[0].code;
+    select.disabled = departments.length === 0;
     updateCorpusChatTarget();
   }
 
@@ -816,8 +808,6 @@
     setFreshness("departments", "loading");
     renderDepartments();
     try {
-      // Cloud 조회는 로컬 YAML과 동시에 시작하되, 느린 gcloud 왕복 때문에 로컬 목록
-      // 표시까지 늦어지지 않게 먼저 렌더한다.
       const cloudRequest = api("/api/v1/cloud-mcp-services")
         .then((value) => ({ ok: true, value }), (error) => ({ ok: false, error }));
       const local = (await api("/api/v1/departments")).departments || [];
@@ -1390,7 +1380,6 @@
     }
     grid.innerHTML = services.map((service) => {
       const tone = runtimeStateTone[service.state] || "warn";
-      // 미배포는 지울 것이 없다. 살아 있는 것에만 삭제를 건다.
       const deletable = service.state !== "MISSING";
       const extra = service.pendingRevision
         ? `대기 중인 리비전 ${service.pendingRevision}`
@@ -1422,7 +1411,6 @@
       setFreshness("commonRuntime", "ok");
     } catch (error) {
       setFreshness("commonRuntime", "fail");
-      // 백그라운드 갱신 실패는 직전 결과를 남겨 두고 표시만 바꾼다.
       if (!quiet) {
         state.commonRuntime = null;
         toast("공통 런타임 상태를 읽지 못했습니다", error.message, "fail");
@@ -1524,7 +1512,6 @@
         </ul>` : ""}`;
   }
 
-  // 첫 클릭은 확인 단계로만 바꾼다. 4초 안에 한 번 더 눌러야 실제로 로그아웃한다.
   async function logoutGcloud(button) {
     if (button.dataset.confirming !== "true") {
       button.dataset.confirming = "true";
@@ -1568,7 +1555,6 @@
       if (state.environment) renderEnvironment(state.environment);
       renderDriveSaStatus(status);
       if (status.status !== "OK") {
-        // 자동 조치가 가능한 문제일 때만 확인 버튼을 연다.
         const fixable = (status.issues || []).some((key) =>
           ["computeApi", "iamCredentialsApi", "serviceAccountMissing", "tokenCreator"].includes(key));
         if (fixable) {
@@ -1637,7 +1623,6 @@
   }
 
   async function confirmDriveSaAction() {
-    // 1단계: 계획 보기 → 2단계: 실제 적용
     if (!state.driveSaPlan) {
       await planDriveSaRepair();
       return;
@@ -1656,7 +1641,6 @@
       const banner = $("#driveSaError");
       banner.textContent = error.message;
       banner.classList.remove("hidden");
-      // 계획은 1회용이라 실패하면 처음부터 다시 확인해야 한다.
       state.driveSaPlan = null;
       button.disabled = false;
       button.textContent = "조치 내용 확인";
@@ -1667,7 +1651,6 @@
     const button = event.target.closest("[data-copy-value]");
     if (!button) return;
     const value = button.dataset.copyValue || "";
-    // 원래 라벨로 되돌린다. "복사" 로 고정하면 URL 복사 버튼이 눌린 뒤 이름을 잃는다.
     const label = button.textContent;
     try {
       await navigator.clipboard.writeText(value);
@@ -1774,7 +1757,6 @@
       docaiElement(kind, "processor").innerHTML = '<option value="">연결하지 않음</option>' + result.processors.map((item) => `<option value="${escapeHtml(item.id)}" ${item.state !== "ENABLED" ? "disabled" : ""}>${escapeHtml(item.name)} · ${escapeHtml(item.id)} · ${escapeHtml(item.state)}</option>`).join("");
       if (result.processors.some((item) => item.id === previous && item.state === "ENABLED")) docaiElement(kind, "processor").value = previous;
       else if (previous) {
-        // A failed recheck must not silently clear a saved connection on the next save.
         docaiElement(kind, "processor").innerHTML += `<option value="${escapeHtml(previous)}" selected>${escapeHtml(previous)} · 사용 가능 여부 확인 필요</option>`;
         docaiElement(kind, "processor").value = previous;
       }
@@ -1891,12 +1873,10 @@
       const next = [{ id, name: name || id }, ...recentProjects().filter((item) => item.id !== id)];
       window.localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(next.slice(0, RECENT_PROJECTS_MAX)));
     } catch {
-      /* 기억 못 해도 기능은 그대로 — 검색으로 찾으면 된다 */
     }
   }
 
   function projectSuggestions(found = []) {
-    // 현재 -> 최근 -> 검색 결과 순. 사람이 실제로 고를 확률 순서다.
     const current = state.environment?.gcloudProject || "";
     const rows = [];
     const seen = new Set();
@@ -1975,7 +1955,6 @@
       const result = await api(`/api/v1/projects/search?q=${encodeURIComponent(trimmed)}`);
       if (requestId !== state.projectSearchRequest) return;
       const found = result.projects || [];
-      // 입력값과 정확히 같은 항목이 있으면 이미 고른 셈이라 목록을 닫는다.
       if (found.length === 1 && found[0].id === trimmed) {
         closeProjectCombo();
         hint.textContent = `${trimmed} 선택됨`;
@@ -2028,8 +2007,6 @@
   function renderCommonBootstrap(env) {
     const form = $("#commonSetupForm");
     const authBox = $("#setupAuth");
-    // 프로젝트 목록 유무로 준비 상태를 판단하지 않는다 — 전량 조회를 없앴고,
-    // 기본 프로젝트가 없는 계정도 검색해서 고르면 되기 때문이다.
     const ready = Boolean(env?.gcloudInstalled && env?.gcloudAuthenticated);
     authBox.dataset.status = ready ? "ready" : "required";
 
@@ -2040,7 +2017,6 @@
       $("#setupAuthTitle").textContent = "gcloud 로그인이 필요합니다";
       $("#setupAuthDetail").textContent = "터미널에서 gcloud auth login 실행 후 ‘다시 확인’을 눌러 주세요.";
     } else {
-      // 프로젝트 개수는 더 이상 세지 않는다 — 전량 조회를 없앴다.
       $("#setupAuthTitle").textContent = "gcloud 로그인 확인됨";
       $("#setupAuthDetail").textContent = env.gcloudProject
         ? `${env.gcloudAccount} · 현재 프로젝트 ${env.gcloudProject}`
@@ -2200,7 +2176,6 @@
       toast("리소스 생성을 시작하지 못했습니다", error.message, "fail");
       button.disabled = false;
       button.textContent = "확인하고 진행";
-      // 계획은 1회용이라 실패하면 다시 떠야 한다.
       state.commonResourcePlan = null;
       $("#setupProvisionPlan").classList.add("hidden");
       $("#setupProvisionCallout").classList.remove("hidden");
@@ -2255,7 +2230,6 @@
         ? `Docker 저장소 ${repositories.length}개 · Firestore DB ${databases.length}개 확인됨`
         : "필요한 리소스가 없습니다. 아래에서 바로 만들 수 있습니다.";
       $("#createCommonConfig").disabled = !ready;
-      // 없을 때만 생성 안내를 띄운다 — 있으면 굳이 또 만들 이유가 없다.
       $("#setupProvisionCallout").classList.toggle("hidden", ready);
     } catch (error) {
       if (requestId !== state.setupResourceRequest) return;
@@ -2265,7 +2239,6 @@
   }
 
   function showCommonSetupShell() {
-    // 첫 HTML부터 보이는 확인 화면을 재시도 때도 같은 상태로 돌린다.
     const gate = $("#setupGate");
     gate.classList.remove("hidden");
     gate.dataset.mode = "checking";
@@ -2285,8 +2258,6 @@
     $("#createCommonConfig").disabled = true;
   }
 
-  // 첫 실행 설정과 로그인 요구를 같은 화면으로 처리한다. create 는 common.yaml 을
-  // 만들어야 하는 상태, login 은 설정은 있고 gcloud 로그인만 없는 상태다.
   function applySetupMode(mode) {
     state.setupMode = mode;
     const loginOnly = mode === "login";
@@ -2307,8 +2278,6 @@
   }
 
   function needsCommonSetup(env) {
-    // 로그인이 없으면 콘솔의 모든 조회가 412 로 떨어진다. 설정 파일이 이미 있어도
-    // 빈 화면 대신 로그인 화면을 세운다.
     return Boolean(env) && (!env.commonExists || !env.gcloudAuthenticated);
   }
 
@@ -2336,14 +2305,11 @@
     if (ready) loadSetupResources();
   }
 
-  // login 모드는 저장할 것이 없다. 로그인이 확인되면 화면을 닫고 평소 부팅의
-  // 남은 절차(재연결)를 그대로 이어간다.
   async function closeLoginOnlySetup(env) {
     if (!await showPendingDocaiSetup(env)) {
       $("#setupGate").classList.add("hidden");
       applySetupMode("create");
     }
-    // 다른 계정으로 바뀌었을 수 있으니 받아 둔 결과를 모두 오래된 것으로 본다.
     Object.values(freshness).forEach((entry) => { entry.at = 0; });
     prefetchViews();
     await loadDepartments().then(prefetchIndexIssues);
@@ -2423,7 +2389,6 @@
       return;
     }
     if (run.status === "FAILED") return failGcloudInstall(run.message || "설치 중 오류가 발생했습니다.");
-    // 공식 설치 프로그램은 사용자가 창을 오래 열어 둘 수 있어 넉넉히 30분까지 기다린다.
     if (Date.now() - startedAt > 30 * 60 * 1000) {
       return failGcloudInstall("설치 완료를 확인하지 못했습니다. 설치를 마쳤다면 ‘다시 시도’를 눌러 주세요.");
     }
@@ -2992,9 +2957,6 @@
     syncEnv: "env 갱신",
   };
 
-  // 계획 단계에서는 같은 목록을 체크박스로 보여 준다. 실행이 시작되면
-  // renderTeardownTargets 의 읽기 전용 진행 목록으로 갈아탄다 — 돌고 있는
-  // 작업 옆에 켤 수 있는 체크박스가 남아 있으면 취소로 읽힌다.
   function renderTeardownSelection() {
     const plan = state.teardownPlan;
     if (!plan) return;
@@ -3019,8 +2981,6 @@
       .map((target) => target.key);
   }
 
-  // 고른 조합이 만드는 사고를 미리 말한다. 막지는 않는다 — 서버도 같은 판단을
-  // 실행 기록에 남기므로 여기 문구는 그 거울이다.
   function teardownImpactMessages() {
     const plan = state.teardownPlan;
     if (!plan || plan.kind !== "department") return [];
@@ -3119,8 +3079,6 @@
     try {
       const plan = await api(url);
       if (kind === "department") plan.targets.forEach((target) => { target.selected = false; });
-      // 특정 리소스 한 개에서 들어온 삭제(예: 운영 환경의 rag-parser 카드)는
-      // 그것만 켠 채로 연다. 목록은 그대로 보여 준다 — 무엇을 안 지우는지가 보인다.
       if (onlyKeys) {
         const wanted = new Set(onlyKeys);
         plan.targets.forEach((target) => { target.selected = target.selectable && wanted.has(target.key); });
@@ -3155,8 +3113,6 @@
     const running = run.status === "RUNNING";
     const done = run.status === "COMPLETED";
     renderTeardownTargets(run.targets);
-    // 실행이 시작되면 확인 입력과 삭제 버튼은 할 일이 없다. 끝난 창에 죽은
-    // 버튼이 남아 있으면 "또 눌러야 하나" 로 읽힌다.
     $("#teardownConfirmField").classList.add("hidden");
     $("#teardownSelectBar").classList.add("hidden");
     $("#teardownImpact").classList.add("hidden");
@@ -3538,7 +3494,6 @@
     }
   }
 
-  // 탭 진입에서는 설정 차이만 알린다. 배포는 사용자의 명시적인 실행으로 시작한다.
   async function refreshRuntimeEnvIfStale() {
     if (state.runtimeEnvChecking) return;
     if (state.commonRuntimeDeployment?.status === "RUNNING") return;
@@ -3551,7 +3506,6 @@
         return;
       }
       const signature = JSON.stringify(report.services || []);
-      // 같은 설정 차이를 탭 이동마다 반복해서 알리지 않는다.
       if (state.runtimeEnvSignature === signature) return;
       state.runtimeEnvSignature = signature;
       const stale = (report.services || [])
@@ -4683,7 +4637,6 @@
     $("#refreshCommonRuntime").addEventListener("click", () => loadCommonRuntimeState());
     $("#commonRuntimeGrid").addEventListener("click", (event) => {
       const remove = event.target.closest("[data-runtime-delete]");
-      // 공통 런타임 계획은 4종을 다 담고 있다. 카드에서 들어오면 그 한 줄만 켠다.
       if (remove) return openTeardown("commonRuntime", "", [remove.dataset.runtimeDelete]);
       return copyEnvironmentValue(event);
     });
@@ -4757,7 +4710,6 @@
     $$('[data-close-teardown]').forEach((item) => item.addEventListener("click", closeTeardownModal));
     $("#teardownConfirmInput").addEventListener("input", syncTeardownConfirmState);
     $("#startTeardown").addEventListener("click", startTeardown);
-    // 남은 것만 다시 지운다. 계획을 새로 받아야 이미 지워진 항목이 빠진다.
     $("#retryTeardown").addEventListener("click", () => {
       const plan = state.teardownPlan;
       if (plan) openTeardown(plan.kind, plan.code);
@@ -4791,7 +4743,6 @@
       renderDepartments();
       pollRun(run.runId);
     } catch (_) {
-      // 재연결 실패는 새 실행을 막지 않는다.
     }
   }
 
@@ -4803,7 +4754,6 @@
         pollMcpDeployment(run.runId);
       });
     } catch (_) {
-      // 재연결 실패가 새 배포나 다른 콘솔 기능을 막으면 안 된다.
     }
   }
 
@@ -4815,7 +4765,6 @@
       renderCommonRuntimeDeployment(run);
       pollCommonRuntimeDeployment(run.runId);
     } catch (_) {
-      // 재연결 실패가 새 배포나 다른 콘솔 기능을 막으면 안 된다.
     }
   }
 

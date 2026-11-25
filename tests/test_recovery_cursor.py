@@ -1,5 +1,3 @@
-"""복구 상태 조회의 영속 라운드로빈 커서 회귀 테스트."""
-
 from __future__ import annotations
 
 from typing import Any
@@ -104,7 +102,6 @@ class _RecoveryStore(DocStateStore):
         statuses: dict[str, DocStatus],
         attempts: dict[str, int] | None = None,
     ) -> None:
-        # 실제 Firestore 클라이언트를 만들지 않고 쿼리/커서 동작만 모사한다.
         self._col = _Collection(
             {
                 file_id: {
@@ -165,7 +162,6 @@ def test_retry_failed_moves_past_exhausted_first_page(monkeypatch) -> None:
         return {"status": "SKIPPED"}
 
     monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
-    # retry_failed 는 클라이언트를 run 당 하나만 만들려고 _ingest_with 를 직접 부른다.
     monkeypatch.setattr(sync_main, "get_settings", lambda: object())
     monkeypatch.setattr(sync_main, "GcsClient", lambda *a, **k: object())
     monkeypatch.setattr(sync_main, "DriveClient", lambda *a, **k: object())
@@ -190,15 +186,12 @@ def test_reindex_pending_moves_past_no_uri_first_page(monkeypatch) -> None:
             imported.extend(uris)
             return uris
 
-        # 복구·색인 경로가 학과(=드라이브) 설정을 넘겨 만든다 — RagEngineClient(settings).
-
         def __init__(self, *_a: object, **_kw: object) -> None:
 
             pass
 
 
         def delete_files_by_ids(self, _file_ids: list[str]) -> int:
-            # 재색인 전 기존 청크 일괄 제거 (스테일 방지). 여기서는 검증 대상 아님.
             return 0
 
     monkeypatch.setattr(sync_main, "DocStateStore", lambda: store)
@@ -224,7 +217,6 @@ def test_reindex_pending_moves_past_no_uri_first_page(monkeypatch) -> None:
 def test_retry_failed_builds_no_clients_when_there_is_nothing_to_retry(
     monkeypatch,
 ) -> None:
-    """회수할 문서가 없는 날(대부분)에 인증 + discovery build 를 치르면 안 된다."""
     built: list[str] = []
 
     class _EmptyStore:

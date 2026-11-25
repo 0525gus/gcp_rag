@@ -1,11 +1,3 @@
-"""One-shot deployed-MCP context capture and evidence-recall diagnosis for dev150.
-
-This script deliberately reads only the frozen dev split and invokes the normal
-MCP ``search`` tool once per query.  It never calls FactChat, never reads the
-holdout split, and does not serialize credentials.  The JSONL context artifact
-contains the complete decoded structured context returned for each request.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -43,12 +35,10 @@ _BARE_SEMESTER = re.compile(r"(?<![\d가-힣])(?:제\s*)?([12])\s*학기")
 
 
 def legacy_normalize(value: str) -> str:
-    """The baseline scorer's case/whitespace-only behavior."""
     return _WS.sub(" ", html.unescape(value or "").casefold()).strip()
 
 
 def normalized_evidence(value: str) -> str:
-    """Comparable evidence form including repo Phase-1 date/money conventions."""
     text = unicodedata.normalize("NFC", html.unescape(value or "")).casefold()
 
     def date(match: re.Match[str]) -> str:
@@ -66,18 +56,11 @@ def normalized_evidence(value: str) -> str:
     text = _SEMESTER.sub(semester, text)
     text = _BARE_SEMESTER.sub(lambda m: f" semester{m.group(1)} ", text)
     text = re.sub(r"(?<![\da-z])(\d(?:[\d, ]*\d){3,})(?![\da-z])", lambda m: re.sub(r"[, ]", "", m.group(1)), text)
-    # Punctuation differences (including Korean/ASCII punctuation) are not evidence differences.
     text = "".join(" " if unicodedata.category(ch).startswith("P") else ch for ch in text)
     return _WS.sub(" ", text).strip()
 
 
 def layout_normalized_evidence(value: str) -> str:
-    """Corrected v2 matcher: layout symbols are separators, never evidence text.
-
-    NFKC is intentional here: returned table/Markdown glyph variants should not
-    make a long textual evidence anchor fail.  Alphanumeric content is retained;
-    every other run becomes one separator before whitespace collapse.
-    """
     text = unicodedata.normalize("NFKC", html.unescape(value or "")).casefold()
 
     def date(match: re.Match[str]) -> str:
@@ -96,7 +79,6 @@ def layout_normalized_evidence(value: str) -> str:
     text = _BARE_SEMESTER.sub(lambda m: f" semester{m.group(1)} ", text)
     text = re.sub(r"(?<![\da-z])(\d(?:[\d, ]*\d){3,})(?![\da-z])", lambda m: re.sub(r"[, ]", "", m.group(1)), text)
     text = re.sub(r"[^\w]+", " ", text, flags=re.UNICODE)
-    # Python \w retains underscore; layout separators should include it as well.
     return _WS.sub(" ", text.replace("_", " ")).strip()
 
 
@@ -150,7 +132,6 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def _write_offline_metrics(
     golden: list[dict[str, Any]], excluded: dict[int, str], out: Path, context_path: Path
 ) -> None:
-    """Re-score a prior one-shot context capture without making network calls."""
     contexts = {
         int(json.loads(line)["query_id"]): json.loads(line)
         for line in context_path.read_text(encoding="utf-8").splitlines() if line.strip()
@@ -175,7 +156,6 @@ def _write_offline_metrics(
             row[f"{method}_evidence_found"] = count
             row[f"{method}_all_expected_present"] = count == total
             row[f"{method}_query_outcome"] = "all" if count == total else ("partial" if count else "none")
-        # Backward-compatible primary aliases now point at the corrected matcher.
         row["normalized_evidence_found"] = found["layout_normalized"]
         row["normalized_all_expected_present"] = row["layout_normalized_all_expected_present"]
         row["normalized_query_outcome"] = row["layout_normalized_query_outcome"]
@@ -230,7 +210,6 @@ def main() -> int:
     with (out / "01_context_capture.jsonl").open("w", encoding="utf-8") as context_file:
         for position, item in enumerate(golden, 1):
             documents, response_sha = call_search_once(url, key, item["query"])
-            # Full decoded search context, plus compact hashes for downstream joins.
             context_file.write(json.dumps({
                 "query_id": item["n"], "query": item["query"], "capture_utc": captured_at,
                 "request": {"tool": "search", "top_k": 20}, "response_sha256": response_sha,

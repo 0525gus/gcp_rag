@@ -1,5 +1,3 @@
-"""Deterministic Korean period metadata extraction and compatibility scoring."""
-
 from __future__ import annotations
 
 import re
@@ -25,7 +23,6 @@ _YEAR = re.compile(r"(?<!\d)((?:19|20)\d{2})\s*(학년도|년도|년)?(?!\d)")
 
 
 def extract_period_metadata(text: str) -> PeriodMetadata:
-    """Extract explicit period markers only; bare small numbers are ignored."""
     value = text or ""
     year_matches = _YEAR.findall(value)
     semesters = set(_numbers(r"(?<!\d)([12])\s*학기", value))
@@ -50,12 +47,6 @@ _FIELDS = ("years", "semesters", "halves", "months")
 
 
 def temporal_compatibility(query: PeriodMetadata, document: PeriodMetadata) -> float:
-    """Return match boosts minus explicit-conflict penalties.
-
-    Missing document metadata is neutral. A disjoint value for a field explicitly
-    present in both query and document is a conflict. Year/semester/half conflicts
-    are stronger because those values define mutually exclusive periods.
-    """
     score = 0.0
     strong = {"years", "semesters", "halves"}
     for field in _FIELDS:

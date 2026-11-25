@@ -1,5 +1,3 @@
-"""Parser for Vertex RAG ``import_result_sink`` NDJSON output."""
-
 from __future__ import annotations
 
 import json

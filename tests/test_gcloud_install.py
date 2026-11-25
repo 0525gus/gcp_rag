@@ -1,5 +1,3 @@
-"""콘솔의 gcloud 원클릭 설치: 설치 경로 탐지, 중복 실행 방지, 서명 검증 실패 시 미실행."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -89,7 +87,7 @@ def test_status_reports_done_once_gcloud_appears(monkeypatch: pytest.MonkeyPatch
 
 
 def test_unsigned_installer_is_deleted_and_never_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dept_gui.shutil, "which", lambda name: None)  # winget 없음 → 공식 설치 파일 경로
+    monkeypatch.setattr(dept_gui.shutil, "which", lambda name: None)
     monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: None)
     monkeypatch.setattr(dept_gui.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
 

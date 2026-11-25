@@ -1,9 +1,3 @@
-"""HTML to readable evidence without scripts, layout attributes or hidden controls.
-
-Uses only the standard library so ingestion and MCP use the same conversion.
-Full tables expand row/column spans; incomplete retrieved rows remain readable.
-"""
-
 from __future__ import annotations
 
 import html
@@ -33,7 +27,6 @@ class _Parser(HTMLParser):
         self.stack = [self.root]
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # HTML permits omitted </td>, </th>, </tr>, </li>, </p> tags.
         if tag in {"td", "th", "tr", "li", "p"}:
             targets = {"td", "th"} if tag in {"td", "th"} else {tag}
             for i in range(len(self.stack) - 1, 0, -1):
@@ -95,7 +88,6 @@ def _table(node: _Node) -> str:
     collect(node)
     if not rows:
         return "".join(_render(c) for c in node.children)
-    # Repeat a spanned cell so each resulting row retains its classification.
     pending: dict[int, tuple[str, int]] = {}
     lines = []
     notes = []
@@ -112,8 +104,6 @@ def _table(node: _Node) -> str:
             value = re.sub(r"\s+", " ", "".join(_render(c) for c in cell.children)).strip()
             value = value.replace("|", "\\|")
             if len(value) > 120 and (_span(cell, "rowspan") > 1 or _span(cell, "colspan") > 1):
-                # Long common conditions belong to every spanned row, but repeating
-                # the paragraph in each row inflates both indexing and model input.
                 label = f"공통셀{len(notes) + 1}"
                 notes.append(f"이 표의 {label}: {value}")
                 value = f"[{label}]"
@@ -147,7 +137,7 @@ def _render(node: _Node | str) -> str:
             return f"[{body.strip()}]({href})"
     if node.tag == "li":
         return "\n- " + body.strip() + "\n"
-    if node.tag in {"td", "th"}:  # partial table chunks without opening <table>
+    if node.tag in {"td", "th"}:
         return body.strip() + " | "
     if node.tag in _BLOCK or node.tag == "tr":
         return "\n" + body + "\n"
@@ -164,7 +154,6 @@ def html_to_text(text: str) -> str:
 
 
 def clean_html_evidence(text: str) -> str:
-    """Clean legacy indexed HTML only when markup is present (new MD is untouched)."""
     markup = r"</?(?:html|head|body|div|span|table|tr|td|th|p|br|h[1-6])(?:\s|/?>)"
     if re.search(markup, text, re.IGNORECASE):
         return html_to_text(text)

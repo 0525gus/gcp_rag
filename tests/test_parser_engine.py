@@ -1,9 +1,3 @@
-"""포맷별 엔진 디스패치 계약 테스트.
-
-HWP(바이너리)와 HWPX(ZIP+XML)는 다른 포맷이다. HWPX는 순수 파이썬 엔진으로 빼서
-rhwp 네이티브 확장의 ABI 리스크에서 분리한다.
-"""
-
 from __future__ import annotations
 
 import pytest
@@ -16,8 +10,6 @@ from services.parser.rhwp_parser import ParseOutput
 
 @pytest.fixture
 def engines(monkeypatch):
-    """두 엔진의 가용성과 호출 여부를 조작/기록한다."""
-
     def _setup(*, hwpx: bool = True, hwp: bool = True):
         calls: list[str] = []
 
@@ -69,7 +61,6 @@ def test_hwp_goes_to_rhwp(engines) -> None:
 
 
 def test_hwpx_falls_back_to_rhwp_when_engine_missing(engines) -> None:
-    # python-hwpx 미설치 배포에서도 HWPX가 파싱 불가가 되면 안 된다
     calls = engines(hwpx=False)
     out = engine_mod.parse_document_bytes(b"x", filename="doc.hwpx")
     assert calls == ["rhwp"]
@@ -77,7 +68,6 @@ def test_hwpx_falls_back_to_rhwp_when_engine_missing(engines) -> None:
 
 
 def test_hwp_never_routes_to_hwpx_engine(engines) -> None:
-    # python-hwpx는 .hwp 바이너리를 읽지 못한다 — hwpx 엔진만 있어도 넘기면 안 됨
     calls = engines(hwpx=True, hwp=False)
     engine_mod.parse_document_bytes(b"x", filename="doc.hwp")
     assert calls == ["rhwp"]
@@ -86,12 +76,12 @@ def test_hwp_never_routes_to_hwpx_engine(engines) -> None:
 
 def test_can_parse_reflects_engine_availability(engines) -> None:
     engines(hwpx=False, hwp=True)
-    assert can_parse("a.hwpx") is True  # rhwp가 HWPX도 읽으므로
+    assert can_parse("a.hwpx") is True
     assert can_parse("a.hwp") is True
 
     engines(hwpx=True, hwp=False)
     assert can_parse("a.hwpx") is True
-    assert can_parse("a.hwp") is False  # rhwp 없이는 .hwp 불가
+    assert can_parse("a.hwp") is False
 
     engines(hwpx=False, hwp=False)
     assert can_parse("a.hwpx") is False

@@ -1,14 +1,3 @@
-"""Cloud 학과 등록부 관리·배포 상태 확인용 로컬 웹 콘솔.
-
-실행:
-    python scripts/dept_gui.py
-
-보안 경계:
-- 127.0.0.1 에만 bind
-- MCP 키는 생성·저장만 하고 API/로그로 반환하지 않음
-- status 는 읽기 전용 gcloud 명령만 실행
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -46,14 +35,13 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts import dept_config, docai_setup, index_issues
+from scripts import common_config, dept_config, docai_setup, index_issues
 from shared.source_links import citation_view_uri
 from shared.search_postprocess import extract_file_id
 from shared.post_metadata import parse_post_metadata
 
 CONFIG_DIR = ROOT / "config"
 DEPLOYMENT_METADATA_ANNOTATION = "gcp-rag.dev/department-metadata"
-# 학과 라우팅 맵(DEPARTMENTS_JSON)을 들고 있는 공용 동기화 런타임.
 SYNC_SERVICE = "rag-sync"
 WEB_DIR = ROOT / "gui" / "public" / "console"
 
@@ -67,23 +55,6 @@ PROJECT_RE = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 REGION_RE = re.compile(r"^[a-z]+-[a-z]+[0-9]$")
 SECRET_FIELDS = {"keys", "MCP_API_KEY", "MCP_API_KEY_STAFF", "MCP_API_KEY_STUDENT"}
 STATUS_ORDER = {"FAIL": 4, "WARN": 3, "CHECKING": 2, "UNKNOWN": 1, "OK": 0, "SKIP": 0}
-COMMON_DEFAULTS: dict[str, Any] = {
-    "DOC_STATE_COLLECTION": "doc_state",
-    "QG_MODE": "log",
-    "INGEST_CONCURRENCY": 8,
-    "RAG_DELETE_CONCURRENCY": 1,
-    "RAG_DELETE_PACING_SECONDS": 1.1,
-    "PARSER_TIMEOUT": 540,
-    "PARSER_CONCURRENCY": 4,
-    "PARSER_MAX_INSTANCES": 10,
-    "SYNC_CONCURRENCY": 4,
-    "TOP_K_DEFAULT": 5,
-    "SEARCH_FETCH_MULTIPLIER": 3,
-    "SEARCH_FETCH_MAX": 60,
-    "MCP_CONCURRENCY": 40,
-    "ALLOW_UNAUTH": True,
-    "MCP_UNIFIED_ENABLED": True,
-}
 SETUP_REGIONS = [
     {"id": "asia-northeast3", "label": "서울"},
     {"id": "asia-northeast1", "label": "도쿄"},
@@ -126,6 +97,12 @@ _GCLOUD_INSTALL: dict[str, Any] = {"status": "IDLE"}
 _SYNC_AUTH_LOCK = threading.Lock()
 _SYNC_AUTH_TOKEN = ""
 _SYNC_AUTH_TOKEN_EXPIRES = 0.0
+_ACCESS_TOKEN_LOCK = threading.Lock()
+_ACCESS_TOKEN = ""
+_ACCESS_TOKEN_EXPIRES = 0.0
+# gcloud 는 남은 수명이 300초 이하인 토큰만 갱신해서 준다(core/credentials/store.py
+# _CREDENTIALS_EXPIRY_WINDOW). 받은 토큰은 최소 300초 유효하므로 그보다 짧게 쓴다.
+_ACCESS_TOKEN_TTL_SECONDS = 240
 _SYNC_TARGET_CACHE_LOCK = threading.Lock()
 _SYNC_TARGET_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _SYNC_TARGET_CACHE_TTL_SECONDS = 30
@@ -146,28 +123,24 @@ PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, str]] = {
     "corpusStudent": {"kind": "corpus", "label": "학생 코퍼스"},
 }
 
-# 공통(프로젝트 1회) 리소스. 학과별이 아니라 전 학과가 공유한다.
-# 켤 API 를 같이 적는다 — 새 프로젝트는 전부 꺼져 있어 생성이 그냥 실패한다.
 COMMON_PROVISION_RESOURCE_DEFINITIONS: dict[str, dict[str, Any]] = {
     "artifactRepo": {
         "kind": "artifactRepo",
         "label": "Artifact Registry (Docker)",
         "service": "artifactregistry.googleapis.com",
-        "defaultName": "rag-mcp",
+        "defaultName": common_config.defaults()["ARTIFACT_REPO"],
     },
     "firestoreDatabase": {
         "kind": "firestoreDatabase",
         "label": "Firestore (Native)",
         "service": "firestore.googleapis.com",
-        "defaultName": "rag-sync-state",
+        "defaultName": common_config.defaults()["FIRESTORE_DATABASE"],
     },
 }
 # Firestore 는 위치를 나중에 못 바꾼다. 만들기 전에 화면에서 반드시 알린다.
 COMMON_PROVISION_WARNINGS: dict[str, str] = {
     "firestoreDatabase": "생성 후 위치를 변경할 수 없습니다. 리전을 확인해 주세요.",
 }
-# 콘솔과 배포/동기화가 실제로 호출하는 프로젝트 API 전체. 공통 설정을 저장하기
-# 전에 이 순서대로 상태를 확인하고, 꺼진 항목만 활성화한다.
 COMMON_REQUIRED_SERVICES: tuple[dict[str, str], ...] = (
     {"name": "compute.googleapis.com", "label": "Compute Engine API"},
     {"name": "iamcredentials.googleapis.com", "label": "IAM Service Account Credentials API"},
@@ -198,7 +171,7 @@ SYNC_TOKEN_COLLECTION = "sync_tokens"
 
 
 class WorkflowNotFoundError(RuntimeError):
-    """동기화 Workflow가 아직 배포되지 않은 정상적인 빈 상태."""
+    pass
 
 
 
@@ -210,11 +183,10 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 
 def _common() -> dict[str, Any]:
-    return _read_yaml(CONFIG_DIR / "common.yaml")
+    return common_config.load_common(CONFIG_DIR)
 
 
 def _unified_mcp_enabled(common: dict[str, Any] | None = None) -> bool:
-    """통합 MCP만 지원한다. 인자는 이전 호출자 호환용이다."""
     return True
 
 
@@ -224,8 +196,8 @@ def _mcp_registry_admin() -> Any:
     common = _common()
     return RegistryAdmin(
         str(common.get("GCP_PROJECT_ID") or ""),
-        str(common.get("GCP_REGION") or "asia-northeast3"),
-        str(common.get("FIRESTORE_DATABASE") or "rag-sync-state"),
+        str(common["GCP_REGION"]),
+        str(common["FIRESTORE_DATABASE"]),
         _provision_access_token(),
     )
 
@@ -236,12 +208,10 @@ def _mcp_registry_read(
     common = _common()
     cache_key = (
         str(common.get("GCP_PROJECT_ID") or ""),
-        str(common.get("GCP_REGION") or "asia-northeast3"),
-        str(common.get("FIRESTORE_DATABASE") or "rag-sync-state"),
+        str(common["GCP_REGION"]),
+        str(common["FIRESTORE_DATABASE"]),
     )
     now = time.monotonic()
-    # 목록·상세 화면이 연달아 같은 등록부를 요청한다. 짧은 캐시를 잠금 안에서
-    # 채워 동시 요청도 Firestore/Secret Manager를 한 번만 호출하게 한다.
     with _MCP_REGISTRY_READ_CACHE_LOCK:
         cached = _MCP_REGISTRY_READ_CACHE.get(cache_key)
         if cached and now - float(cached["created"]) < _MCP_REGISTRY_READ_CACHE_TTL_SECONDS:
@@ -279,7 +249,7 @@ def _mcp_registry_mutate(method: str, *args: Any) -> Any:
 def _unified_mcp_service() -> dict[str, Any]:
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     cache_key = (project, region)
     now = time.monotonic()
     with _UNIFIED_MCP_SERVICE_CACHE_LOCK:
@@ -324,10 +294,11 @@ def _unified_mcp_servers(
 
 def validate_common_candidate(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     errors: dict[str, list[str]] = {}
+    defaults = common_config.defaults()
     project = str(payload.get("projectId") or "").strip()
-    region = str(payload.get("region") or "asia-northeast3").strip()
-    artifact_repo = str(payload.get("artifactRepo") or "rag-mcp").strip()
-    firestore = str(payload.get("firestoreDatabase") or "rag-sync-state").strip()
+    region = str(payload.get("region") or defaults["GCP_REGION"]).strip()
+    artifact_repo = str(payload.get("artifactRepo") or defaults["ARTIFACT_REPO"]).strip()
+    firestore = str(payload.get("firestoreDatabase") or defaults["FIRESTORE_DATABASE"]).strip()
 
     if not PROJECT_RE.fullmatch(project):
         _field_error(errors, "projectId", "유효한 GCP 프로젝트 ID를 입력해 주세요.")
@@ -343,7 +314,6 @@ def validate_common_candidate(payload: dict[str, Any]) -> tuple[dict[str, Any], 
         "GCP_REGION": region,
         "ARTIFACT_REPO": artifact_repo,
         "FIRESTORE_DATABASE": firestore,
-        **COMMON_DEFAULTS,
     }
     try:
         candidate.update(docai_setup.selection_fields(payload.get("docai", {})))
@@ -403,7 +373,6 @@ def _field_error(errors: dict[str, list[str]], field: str, message: str) -> None
 
 
 def _department_drive_conflicts(code: str, drive_ids: list[str]) -> list[dict[str, Any]]:
-    """Cloud 등록부의 다른 학과와 겹치는 공유드라이브 ID. 자기 자신은 제외."""
     wanted = set(drive_ids)
     if not wanted:
         return []
@@ -458,7 +427,6 @@ def _has_secret_input(value: Any) -> bool:
 
 
 def department_code_availability(code: str, *, current_code: str = "") -> dict[str, Any]:
-    """학과 코드 형식과 Cloud 등록부 충돌을 한 번에 확인한다."""
     normalised = str(code or "").strip().lower()
     current = str(current_code or "").strip().lower()
     if not DEPT_CODE_RE.fullmatch(normalised):
@@ -484,7 +452,6 @@ def department_code_availability(code: str, *, current_code: str = "") -> dict[s
 
 
 def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) -> tuple[dict, dict]:
-    """GUI 입력 정규화와 필드별 검증. secret은 입력으로 받지 않는다."""
     errors: dict[str, list[str]] = {}
     warnings: list[str] = []
     common = _common()
@@ -513,7 +480,7 @@ def validate_candidate(payload: dict[str, Any], *, check_existing: bool = True) 
         student_corpus = ""
         student_ids = []
     project = str(common.get("GCP_PROJECT_ID") or "").strip()
-    region = str(common.get("GCP_REGION") or "asia-northeast3").strip()
+    region = str(common["GCP_REGION"]).strip()
     corpus_values = [("staff", staff_corpus)]
     if split_enabled:
         corpus_values.append(("student", student_corpus))
@@ -654,7 +621,6 @@ def _render_yaml(
 def create_department(
     code: str, candidate: dict[str, Any], *, allow_duplicate_drives: bool = False
 ) -> dict[str, Any]:
-    """새 학과 설정과 키를 Cloud 등록부에 직접 만든다."""
     configs = _cloud_department_configs()
     if code in configs:
         raise FileExistsError(code)
@@ -696,7 +662,6 @@ def _decode_cloud_department_metadata(value: str) -> dict[str, Any] | None:
 
 
 def _cloud_department_yaml(metadata: dict[str, Any]) -> dict[str, Any]:
-    """v2의 YAML 전체 사본을 반환하고 기존 v1 주석도 계속 지원한다."""
     uploaded = metadata.get("yaml")
     if isinstance(uploaded, dict):
         return copy.deepcopy(uploaded)
@@ -710,7 +675,6 @@ def _cloud_department_yaml(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_cloud_yaml(value: Any) -> Any:
-    """브라우저용 Cloud 설정에서 키·토큰 계열 필드를 제거한다."""
     if isinstance(value, dict):
         return {
             key: _public_cloud_yaml(child)
@@ -727,7 +691,6 @@ def _public_cloud_yaml(value: Any) -> Any:
 def _load_cloud_department_config(
     code: str, *, require_full: bool
 ) -> tuple[dict[str, Any], str, bool]:
-    """교직원 MCP 주석에서 설정을 읽는다. v1은 상태 검사에만 허용한다."""
     normalised = str(code or "").strip().lower()
     if not DEPT_CODE_RE.fullmatch(normalised):
         raise FileNotFoundError(normalised)
@@ -739,7 +702,7 @@ def _load_cloud_department_config(
         config = configs[normalised]
         return config, _mapping_revision(config), True
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     cache_key = (project, region, normalised)
     now = time.monotonic()
     with _CLOUD_DEPARTMENT_CONFIG_CACHE_LOCK:
@@ -783,13 +746,11 @@ def _load_cloud_department_config(
 
 
 def cloud_department_config(code: str) -> tuple[dict[str, Any], str]:
-    """이전 Cloud Run 메타데이터에서 전체 학과 설정과 revision을 읽는다."""
     config, revision, _complete = _load_cloud_department_config(code, require_full=True)
     return config, revision
 
 
 def cloud_department_status_config(code: str) -> tuple[dict[str, Any], str, bool]:
-    """상태 검사용 설정. 전체 YAML이 없는 v1 메타데이터도 복원한다."""
     return _load_cloud_department_config(code, require_full=False)
 
 
@@ -847,8 +808,6 @@ def _cloud_run_management_annotation(service: dict[str, Any]) -> str:
 
 
 def _unified_department_records() -> list[dict[str, Any]]:
-    # 등록부(Firestore + Secret Manager)와 Cloud Run 상태는 서로 독립적이다.
-    # 직렬 조회하지 않고 동시에 시작해 첫 화면 지연을 둘 중 느린 쪽으로 제한한다.
     with ThreadPoolExecutor(max_workers=2) as pool:
         registry_future = pool.submit(_mcp_registry_read, allow_empty=True)
         service_future = pool.submit(_unified_mcp_service)
@@ -892,12 +851,11 @@ def _unified_department_records() -> list[dict[str, Any]]:
 
 
 def cloud_mcp_department_records() -> list[dict[str, Any]]:
-    """Cloud 등록부에서 관리 대상 학과를 재구성한다."""
     common = _common()
     if _unified_mcp_enabled(common):
         return _unified_department_records()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     ok, rows = _gcloud_json(
         [
             "run",
@@ -1039,8 +997,6 @@ def cloud_mcp_department_records() -> list[dict[str, Any]]:
         all_ready = bool(services) and all(item["status"] == "READY" for item in services)
         buckets_meta = record["metadata"].get("buckets") or {}
         corpora_meta = record["metadata"].get("corpora") or {}
-        # 실제 상태 확인(_resource_status)과 이름을 맞춰서 GCS 버킷 · 코퍼스를
-        # 뭉뚱그린 하나의 배지가 아니라 리소스별로 나눠 보여준다.
         resource_checks = [
             _check(
                 "RESOURCE",
@@ -1066,8 +1022,6 @@ def cloud_mcp_department_records() -> list[dict[str, Any]]:
                 _check("RESOURCE", "rag-corpus-student", "OK", corpora_meta.get("student")),
             )
         resource_ok = all(item["status"] == "OK" for item in resource_checks)
-        # DEPLOY·RUNTIME도 실제 상태 확인처럼 staff/student를 각자 나눠서 보여준다.
-        # cloudServices는 이미 audience별로 나뉘어 있으니 그대로 매핑만 하면 된다.
         deploy_checks = [
             _check(
                 "DEPLOY",
@@ -1122,7 +1076,6 @@ def cloud_mcp_department_records() -> list[dict[str, Any]]:
 
 
 def department_mcp_servers(code: str) -> dict[str, Any]:
-    """공통 MCP에서 학과별 교직원·학생 접근 범위와 URL을 조회한다."""
     normalised = str(code or "").strip().lower()
     if not DEPT_CODE_RE.fullmatch(normalised):
         raise FileNotFoundError(normalised)
@@ -1142,7 +1095,6 @@ def department_mcp_servers(code: str) -> dict[str, Any]:
 
 
 def department_mcp_key(code: str, audience: str) -> str:
-    """명시적인 복사 요청에만 Cloud 등록부의 MCP 키 하나를 반환한다."""
     normalised = str(code or "").strip().lower()
     if not DEPT_CODE_RE.fullmatch(normalised):
         raise FileNotFoundError(normalised)
@@ -1175,7 +1127,6 @@ def _overall(checks: list[dict[str, Any]]) -> str:
 def _cloud_config_status(
     code: str, data: dict[str, Any], *, complete: bool
 ) -> list[dict[str, Any]]:
-    """Cloud 등록부 설정을 검사한다."""
     started = time.perf_counter()
     checks = [
         _check(
@@ -1294,7 +1245,6 @@ def _gcloud_executable() -> str | None:
 
 
 def _sync_access_token() -> str:
-    """진행률 폴링이 매번 gcloud 프로세스를 띄우지 않도록 짧게 캐시한다."""
     global _SYNC_AUTH_TOKEN, _SYNC_AUTH_TOKEN_EXPIRES
     with _SYNC_AUTH_LOCK:
         if _SYNC_AUTH_TOKEN and time.time() < _SYNC_AUTH_TOKEN_EXPIRES:
@@ -1332,8 +1282,6 @@ def _default_compute_service_account(project: str) -> str:
 
 
 class _StatusRunCache:
-    """한 상태 실행 안에서 동일한 외부 명령을 한 번만 수행한다."""
-
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._gcloud_calls: dict[tuple[tuple[str, ...], int], Future[Any]] = {}
@@ -1388,9 +1336,6 @@ def _gcloud_bootstrap_state(*, include_projects: bool = True) -> dict[str, Any]:
     if not gcloud:
         return state
 
-    # 넷은 서로를 필요로 하지 않는다. gcloud 한 번이 1초 이상이라 순차로 돌면
-    # 그대로 부팅 지연이 된다. projects list 가 제일 느리므로 인증 확인을
-    # 기다리지 않고 같이 띄운다 — 미인증이면 결과를 그냥 버린다.
     with ThreadPoolExecutor(max_workers=4) as pool:
         auth_future = pool.submit(_gcloud_json, ["auth", "list", "--filter=status:ACTIVE"])
         token_future = pool.submit(
@@ -1415,9 +1360,6 @@ def _gcloud_bootstrap_state(*, include_projects: bool = True) -> dict[str, Any]:
     if current_ok:
         state["currentProject"] = current.strip()
 
-    # 프로젝트 **전량**은 싣지 않는다. 접근 가능한 프로젝트가 수천 개인 계정에서
-    # 이 한 번이 6초를 먹었고, 그 목록을 그대로 드롭다운에 부으면 고를 수도 없다.
-    # 화면은 현재 프로젝트로 시작하고 나머지는 /api/v1/projects/search 로 찾는다.
     if include_projects and state["authenticated"] and state["currentProject"]:
         state["projects"] = [
             {"id": state["currentProject"], "name": state["currentProject"]}
@@ -1491,11 +1433,17 @@ def _stop_gcloud_login_process() -> None:
     _AUTH_PROCESS = None
 
 
+def _forget_access_token() -> None:
+    global _ACCESS_TOKEN, _ACCESS_TOKEN_EXPIRES
+    with _ACCESS_TOKEN_LOCK:
+        _ACCESS_TOKEN, _ACCESS_TOKEN_EXPIRES = "", 0.0
+
+
 def _clear_cloud_caches() -> None:
-    """계정이 바뀌면 이전 계정의 토큰·조회 결과를 쓰면 안 된다."""
     global _SYNC_AUTH_TOKEN, _SYNC_AUTH_TOKEN_EXPIRES
     with _SYNC_AUTH_LOCK:
         _SYNC_AUTH_TOKEN, _SYNC_AUTH_TOKEN_EXPIRES = "", 0.0
+    _forget_access_token()
     for lock, cache in (
         (_SYNC_TARGET_CACHE_LOCK, _SYNC_TARGET_CACHE),
         (_CLOUD_DEPARTMENT_CONFIG_CACHE_LOCK, _CLOUD_DEPARTMENT_CONFIG_CACHE),
@@ -1541,7 +1489,6 @@ def _gcloud_install_view() -> dict[str, Any]:
 
 
 def _installer_signed_by_google(path: Path) -> bool:
-    """내려받은 설치 파일을 실행하기 전에 Authenticode 서명이 유효하고 Google 명의인지 확인한다."""
     script = (
         "$s = Get-AuthenticodeSignature -LiteralPath $env:RAG_INSTALLER;"
         "if ($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -match 'O=Google LLC') { 'OK' }"
@@ -1559,7 +1506,6 @@ def _installer_signed_by_google(path: Path) -> bool:
 
 
 def _run_gcloud_install() -> None:
-    """winget 무인 설치를 먼저 시도하고, 안 되면 Google 공식 설치 프로그램을 띄운다."""
     flags = subprocess.CREATE_NO_WINDOW
     winget = shutil.which("winget.exe") or shutil.which("winget")
     if winget:
@@ -1683,7 +1629,7 @@ def _http_post_json(
 
 def _department_resource_options(common: dict[str, Any]) -> dict[str, Any]:
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     gcloud = _gcloud_executable()
     if not gcloud:
         return {"corpora": [], "buckets": [], "error": "gcloud를 찾을 수 없습니다."}
@@ -1767,7 +1713,6 @@ def _provision_editing_code(payload: dict[str, Any], code: str) -> str:
 
 
 def create_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
-    """외부 리소스를 변경하지 않고 정확한 생성 이름과 옵션을 만든다."""
     code = str(payload.get("code") or "").strip().lower()
     name = str(payload.get("name") or "").strip()
     editing_code = _provision_editing_code(payload, code)
@@ -1791,13 +1736,11 @@ def create_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
 
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "").strip()
-    region = str(common.get("GCP_REGION") or "asia-northeast3").strip()
+    region = str(common["GCP_REGION"]).strip()
     if not PROJECT_RE.fullmatch(project) or not REGION_RE.fullmatch(region):
         raise ValueError("공통 프로젝트·리전 설정을 먼저 확인해 주세요.")
 
     suffix = secrets.token_hex(4)
-    # 학과 코드를 맨 앞에 둔다 — 코퍼스(`{code}-rag-corpus-*`)와 같은 순서라야
-    # 콘솔 목록에서 학과별로 붙어 보이고, 접두어 검색도 코드 하나로 끝난다.
     bucket_names = {
         "bucketHwp": f"{code}-rag-hwp-{suffix}",
         "bucketSource": f"{code}-rag-source-{suffix}",
@@ -1851,7 +1794,6 @@ def create_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
 def _apply_resource_plan_overrides(
     plan: dict[str, Any], overrides: dict[str, Any] | None
 ) -> dict[str, Any]:
-    """사용자가 계획 화면에서 수정한 이름을 생성 직전에 다시 검증한다."""
     if overrides is None:
         return plan
     if not isinstance(overrides, dict):
@@ -1886,13 +1828,19 @@ def _apply_resource_plan_overrides(
 
 
 def _provision_access_token() -> str:
-    gcloud = _gcloud_executable()
-    if not gcloud:
-        raise RuntimeError("gcloud를 찾을 수 없습니다.")
-    ok, token = _run_command([gcloud, "auth", "print-access-token", "--quiet"], timeout=20)
-    if not ok or not token.strip():
-        raise RuntimeError("gcloud 로그인이 필요합니다.")
-    return token.strip()
+    global _ACCESS_TOKEN, _ACCESS_TOKEN_EXPIRES
+    with _ACCESS_TOKEN_LOCK:
+        if _ACCESS_TOKEN and time.monotonic() < _ACCESS_TOKEN_EXPIRES:
+            return _ACCESS_TOKEN
+        gcloud = _gcloud_executable()
+        if not gcloud:
+            raise RuntimeError("gcloud를 찾을 수 없습니다.")
+        ok, token = _run_command([gcloud, "auth", "print-access-token", "--quiet"], timeout=20)
+        if not ok or not token.strip():
+            raise RuntimeError("gcloud 로그인이 필요합니다.")
+        _ACCESS_TOKEN = token.strip()
+        _ACCESS_TOKEN_EXPIRES = time.monotonic() + _ACCESS_TOKEN_TTL_SECONDS
+        return _ACCESS_TOKEN
 
 
 def _create_bucket_resource(name: str, project: str, region: str) -> str:
@@ -1998,7 +1946,6 @@ def _create_corpus_resource(display_name: str, project: str, region: str, token:
 
 
 def _gcloud_enabled_services(project: str) -> tuple[bool, set[str]]:
-    """프로젝트에 켜져 있는 API 목록. 조회 실패와 '하나도 없음' 을 구분한다."""
     ok, raw = _gcloud_json(
         ["services", "list", "--enabled", f"--project={project}"], timeout=30
     )
@@ -2013,11 +1960,6 @@ def _gcloud_enabled_services(project: str) -> tuple[bool, set[str]]:
 
 
 def create_common_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
-    """외부 리소스를 **바꾸지 않고** 무엇을 켜고 무엇을 만들지만 계산한다.
-
-    API 활성화가 계획에 드러나야 사용자가 모르고 켜는 일이 없다. 실제 변경은
-    확인 뒤 start_common_provision_run 에서만 일어난다.
-    """
     project = str(payload.get("projectId") or "").strip()
     region = str(payload.get("region") or "").strip()
     if not PROJECT_RE.fullmatch(project):
@@ -2035,7 +1977,6 @@ def create_common_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("유효한 Artifact Registry 저장소 이름이 필요합니다.")
     if not FIRESTORE_DB_RE.fullmatch(names["firestoreDatabase"]):
         raise ValueError("유효한 Firestore 데이터베이스 ID가 필요합니다.")
-    # (default) 는 Datastore 모드로 굳으면 되돌릴 수 없다 — preflight 가 금지하는 값이다.
     if names["firestoreDatabase"] == "(default)":
         raise ValueError("(default) 데이터베이스는 사용하지 않습니다. 다른 ID를 입력해 주세요.")
 
@@ -2072,7 +2013,6 @@ def create_common_resource_plan(payload: dict[str, Any]) -> dict[str, Any]:
         {
             "name": definition["name"],
             "label": definition["label"],
-            # 조회 실패 시엔 '켜져 있다' 고 단정하지 않는다 — 화면에 확인 필요로 뜬다.
             "enabled": bool(services_ok and definition["name"] in enabled),
             "known": services_ok,
         }
@@ -2208,7 +2148,6 @@ def _create_firestore_database_resource(name: str, project: str, region: str) ->
 
 
 def _corpus_post_metadata(raw_contexts, config, common, audience):
-    """Enrich every retrieved chunk by its Drive file identity, within this department."""
     buckets = set((config.get("buckets") or {}).values()) - {None, ""}
     ids = set()
     for context in raw_contexts:
@@ -2239,14 +2178,12 @@ def _corpus_post_metadata(raw_contexts, config, common, audience):
                                "driveUri": data.get("sourceUri"), "fileName": data.get("name")}
         return result
     except Exception:
-        # Original contexts remain available if optional metadata cannot be read.
         return {}
 
 
 def retrieve_department_corpus(
     code: str, audience: str, query: str, top_k: int = 5, *, generate: bool = False
 ) -> dict[str, Any]:
-    """로컬 콘솔에서 선택한 학과 코퍼스의 원문 컨텍스트를 조회한다."""
     normalised = str(code or "").strip().lower()
     if not DEPT_CODE_RE.fullmatch(normalised):
         raise FileNotFoundError(normalised)
@@ -2257,10 +2194,11 @@ def retrieve_department_corpus(
         raise ValueError("질문은 1~1000자로 입력해 주세요.")
     limit = max(1, min(int(top_k), 10))
 
+    started = time.perf_counter()
     config = cloud_department_public_config(normalised)
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     corpus = str((config.get("corpora") or {}).get(audience) or "")
     match = CORPUS_RE.fullmatch(corpus)
     if not match or match.group(1) != project or match.group(2) != region:
@@ -2271,7 +2209,6 @@ def retrieve_department_corpus(
         f"https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/"
         f"{region}:retrieveContexts"
     )
-    started = time.perf_counter()
     status, body, _ = _http_post_json(
         url,
         {
@@ -2307,6 +2244,7 @@ def retrieve_department_corpus(
                 "score": item.get("score"),
             }
         )
+    answer = _corpus_answer_fields(text, contexts, project, token) if generate else {}
     return {
         "code": normalised,
         "departmentName": config["name"],
@@ -2315,7 +2253,7 @@ def retrieve_department_corpus(
         "query": text,
         "contexts": contexts,
         "latencyMs": round((time.perf_counter() - started) * 1000),
-        **(_corpus_answer_fields(text, contexts, project, token) if generate else {}),
+        **answer,
     }
 
 
@@ -2352,7 +2290,6 @@ def _generate_corpus_answer(
     project: str,
     token: str,
 ) -> tuple[str, int]:
-    """검색된 원문만 근거로 Gemini 답을 만든다. gcloud access token을 재사용한다."""
     blocks: list[str] = []
     used = 0
     for item in contexts:
@@ -2546,7 +2483,6 @@ def _set_common_provision_service_account(run_id: str, **changes: Any) -> None:
 def _prepare_common_service_account(
     run_id: str, project: str, failed_services: set[str]
 ) -> None:
-    """Compute SA 가장 권한을 확인하고 필요할 때 현재 계정에 부여한다."""
     dependencies = {COMPUTE_SERVICE, IAM_CREDENTIALS_SERVICE}
     failed_dependencies = sorted(dependencies & failed_services)
     if failed_dependencies:
@@ -2626,7 +2562,6 @@ def _prepare_common_service_account(
 
 
 def _execute_common_provision_run(run_id: str) -> None:
-    """API 를 먼저 켜고 리소스를 만든다. API 가 꺼진 채로는 생성이 그냥 실패한다."""
     with _COMMON_PROVISION_LOCK:
         run = copy.deepcopy(_COMMON_PROVISION_RUNS[run_id])
     project = run["projectId"]
@@ -2740,17 +2675,12 @@ def start_common_provision_run(plan_id: str) -> dict[str, Any]:
     return copy.deepcopy(run)
 
 
-# Drive 확인용 Compute SA 가 막히는 두 가지 원인. 새 프로젝트는 둘 다 해당한다.
-#   1) Compute Engine API 가 꺼져 있어 기본 SA 자체가 아직 안 만들어졌다
-#   2) SA 는 있는데 현재 로그인 계정에 가장(impersonate) 권한이 없다
-# 둘은 조치가 다르므로 반드시 구분해서 알린다 — 뭉뚱그리면 엉뚱한 걸 누른다.
 SA_TOKEN_CREATOR_ROLE = "roles/iam.serviceAccountTokenCreator"
 COMPUTE_SERVICE = "compute.googleapis.com"
 IAM_CREDENTIALS_SERVICE = "iamcredentials.googleapis.com"
 
 
 def drive_service_account_status(project: str) -> dict[str, Any]:
-    """Drive 확인 SA 가 실제로 쓸 수 있는 상태인지 본다. 아무것도 바꾸지 않는다."""
     result: dict[str, Any] = {
         "projectId": project,
         "serviceAccount": "",
@@ -2768,8 +2698,6 @@ def drive_service_account_status(project: str) -> dict[str, Any]:
         result["detail"] = "gcloud 로그인이 필요합니다."
         result["issues"].append("gcloudAuth")
         return result
-    # bootstrap 응답의 account는 화면 표시용으로 마스킹되어 있다. IAM member에는
-    # 원문 계정이 필요하므로 활성 계정을 다시 읽고, 조회 실패 때만 기존 값을 쓴다.
     account_ok, active_accounts = _gcloud_json(
         ["auth", "list", "--filter=status:ACTIVE"], timeout=20
     )
@@ -2787,7 +2715,6 @@ def drive_service_account_status(project: str) -> dict[str, Any]:
 
     services_ok, enabled = _gcloud_enabled_services(project)
     if services_ok and COMPUTE_SERVICE not in enabled:
-        # 기본 Compute SA 는 Compute Engine API 를 켤 때 만들어진다.
         result["issues"].append("computeApi")
     if services_ok and IAM_CREDENTIALS_SERVICE not in enabled:
         result["issues"].append("iamCredentialsApi")
@@ -2803,7 +2730,6 @@ def drive_service_account_status(project: str) -> dict[str, Any]:
         result["detail"] = "기본 Compute 서비스 계정이 아직 없습니다."
         return result
 
-    # 실제로 가장 토큰을 받아본다 — 권한 표를 읽는 것보다 이게 정확하다.
     try:
         caller_token = _sync_access_token()
     except RuntimeError as exc:
@@ -2830,7 +2756,6 @@ def drive_service_account_status(project: str) -> dict[str, Any]:
 
 
 def create_sa_repair_plan(project: str) -> dict[str, Any]:
-    """무엇을 켜고 어떤 권한을 줄지만 계산한다. 외부는 바꾸지 않는다."""
     status = drive_service_account_status(project)
     if status["status"] == "OK":
         raise FileExistsError("서비스 계정이 이미 정상입니다.")
@@ -2860,9 +2785,6 @@ def create_sa_repair_plan(project: str) -> dict[str, Any]:
                 "detail": "서비스 계정 임시 접근 토큰 발급에 필요합니다.",
             }
         )
-    # SA 가 아직 없으면 가장을 시험해 볼 수 없어 권한 필요 여부를 알 수 없다.
-    # 바인딩은 멱등이므로 이미 있으면 무해하다 — 두 번 왕복시키는 것보다 낫다.
-    # 어차피 계획 화면에 그대로 뜨고 사용자가 확인한 뒤에만 적용된다.
     if service_account:
         member_type = (
             "serviceAccount" if account.endswith(".gserviceaccount.com") else "user"
@@ -2966,8 +2888,6 @@ def _execute_sa_repair_run(run_id: str) -> None:
         else:
             _set_sa_repair_step(run_id, key, status="COMPLETE", detail="완료")
 
-    # 조치가 실제로 통했는지 같은 방법으로 되읽는다. IAM 반영 지연 때문에
-    # 명령 성공 직후에는 잠시 403일 수 있으므로 약 30초 동안 재확인한다.
     verified: dict[str, Any] = {}
     with _SA_REPAIR_LOCK:
         grant_succeeded = any(
@@ -3055,11 +2975,6 @@ def _crm_projects(filter_expr: str, limit: int, token: str) -> list[dict[str, st
 
 
 def search_projects(term: str, limit: int = PROJECT_SEARCH_LIMIT) -> dict[str, Any]:
-    """프로젝트를 부분 일치로 찾는다. 전량(수천 건)을 받지 않는다.
-
-    ID 와 표시 이름 중 어디에 맞을지 모르므로 둘 다 묻는다 — REST 필터가 OR 를
-    지원하지 않아 두 번 물어 합친다. 동시에 던지면 왕복은 한 번 값이다.
-    """
     term = str(term or "").strip().lower()[:64]
     try:
         token = _sync_access_token()
@@ -3067,8 +2982,6 @@ def search_projects(term: str, limit: int = PROJECT_SEARCH_LIMIT) -> dict[str, A
         return {"projects": [], "term": term, "error": str(exc)[:200]}
 
     if not term:
-        # 검색어가 없으면 무작위 상위 20개는 의미가 없다(sys-* 가 앞을 채운다).
-        # 화면은 현재·최근 프로젝트를 대신 보여준다.
         return {"projects": [], "term": "", "error": ""}
 
     escaped = term.replace("*", "")
@@ -3084,17 +2997,11 @@ def search_projects(term: str, limit: int = PROJECT_SEARCH_LIMIT) -> dict[str, A
             continue
         seen.add(item["id"])
         projects.append(item)
-    # 접두어 일치를 위로 — 사람은 보통 앞부터 친다.
     projects.sort(key=lambda item: (not item["id"].startswith(escaped), item["id"]))
     return {"projects": projects[:limit], "term": term, "error": ""}
 
 
 def _project_accessible(project_id: str) -> bool:
-    """이 프로젝트 하나만 확인한다. 전량 목록을 받아 멤버십을 보던 것을 대체한다.
-
-    전량 조회는 프로젝트가 많은 계정에서 수 초가 걸리는 데다, 목록에 없다는
-    이유로 실제로는 접근 가능한 프로젝트를 막는 오탐도 났다.
-    """
     if not PROJECT_RE.fullmatch(project_id or ""):
         return False
     try:
@@ -3108,7 +3015,6 @@ def _project_accessible(project_id: str) -> bool:
 
 
 def _expected_runtime_env() -> tuple[str, dict[str, str], str]:
-    """Cloud 등록부에서 런타임 드리프트 기대값을 만든다."""
     configs = _cloud_sync_department_configs()
     if not configs:
         raise ValueError("활성 동기화 학과가 없습니다.")
@@ -3121,11 +3027,6 @@ def _expected_runtime_env() -> tuple[str, dict[str, str], str]:
 
 
 def _cloud_run_service_state(service: dict[str, Any]) -> dict[str, Any]:
-    """describe 응답에서 화면에 필요한 것만 뽑는다.
-
-    ``latestReady != latestCreated`` 는 새 리비전이 뜨지 못하고 옛 리비전이
-    트래픽을 받고 있다는 뜻이다. Ready=True 만 보면 이 상태가 정상으로 보인다.
-    """
     status = service.get("status") or {}
     metadata = service.get("metadata") or {}
     ready_condition = next(
@@ -3148,14 +3049,9 @@ def _cloud_run_service_state(service: dict[str, Any]) -> dict[str, Any]:
 
 
 def common_runtime_state() -> dict[str, Any]:
-    """운영 환경 화면이 읽는 공통 런타임 현황.
-
-    학과 화면의 DEPLOY 검사와 달리 **학과를 고르지 않고** 공통 4종만 본다. 학과가
-    하나도 없어도, 학과가 전부 고장 나 있어도 런타임 자체의 상태는 보여야 한다.
-    """
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     if not project:
         return {
             "status": "UNKNOWN",
@@ -3225,7 +3121,6 @@ def common_runtime_state() -> dict[str, Any]:
             "detail": f"{state}{' · ' + schedule if schedule else ''}",
         }
 
-    # 4번의 gcloud 왕복은 순차로 돌면 그대로 더해진다. 화면은 한 번에 뜬다.
     with ThreadPoolExecutor(max_workers=4) as pool:
         services = list(pool.map(_probe, definitions))
 
@@ -3246,19 +3141,9 @@ def common_runtime_state() -> dict[str, Any]:
 
 
 def runtime_env_drift(cache: _StatusRunCache | None = None) -> dict[str, Any]:
-    """배포된 Cloud Run env 가 지금 config 와 같은지 본다.
-
-    `--set-env-vars` 는 배포 때만 갱신된다. 학과를 추가·삭제하거나 버킷·코퍼스를
-    바꾸면 서비스는 살아 있는데 값만 낡는다. 그 상태의 rag-sync 는 없어진 버킷에
-    업로드를 시도해 전량 404 → DLQ 로 보낸다(실측 1445건). 오류 로그를 뒤지기
-    전에는 안 보이므로 여기서 먼저 잡는다.
-
-    DEPARTMENTS_JSON 하나에 전 학과의 버킷·코퍼스·폴더가 들어 있어 라우팅 드리프트는
-    그 값 하나로 판정된다. parser 는 그 값을 안 받으므로 기본 학과 값으로 대조한다.
-    """
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     if not project:
         return {"status": "UNKNOWN", "reason": "공통 설정이 없습니다.", "services": []}
 
@@ -3269,8 +3154,7 @@ def runtime_env_drift(cache: _StatusRunCache | None = None) -> dict[str, Any]:
 
     expected_by_service = {
         "rag-parser": {
-            **{key: str(common[key] or (region if key == "DOCAI_LOCATION" else "")) for keys in docai_setup.KINDS.values()
-               for key in keys[1:] if key in common},
+            **{key: str(common[key]) for keys in docai_setup.KINDS.values() for key in keys[1:]},
             "GCS_HWP_ORIGINAL_BUCKET": base_env.get("GCS_HWP_ORIGINAL_BUCKET", ""),
             "GCS_SOURCE_BUCKET": base_env.get("GCS_SOURCE_BUCKET", ""),
             "RAG_CORPUS_NAME": base_env.get("RAG_CORPUS_NAME", ""),
@@ -3298,7 +3182,6 @@ def runtime_env_drift(cache: _StatusRunCache | None = None) -> dict[str, Any]:
             ]
         )
         if not ok or not isinstance(data, dict):
-            # 서비스가 없으면 드리프트가 아니라 미배포다 — 그건 DEPLOY 층이 잡는다.
             services.append({"serviceName": service, "status": "UNKNOWN", "staleKeys": []})
             continue
         deployed = _cloud_run_env(data)
@@ -3406,12 +3289,8 @@ def _run_common_runtime_deploy_script(*, on_line: Any, env_only: bool = False) -
         str(ROOT / "scripts" / "deploy.ps1"),
     ]
     if env_only:
-        # 설정만 바뀐 경우다. 이미지·Workflow·Scheduler 를 건드리지 않고 env 만
-        # 새로 씌운다(리비전 하나, 수십 초).
         args.append("-EnvOnly")
     else:
-        # 런타임이 없어서 올리는 흐름이다. 이미 올라간 parser/sync 이미지와
-        # 이미 떠 있는 Cloud Run 서비스는 건너뛴다.
         args.extend(["-SkipMcp", "-ReuseExisting"])
     env = os.environ.copy()
     env.update(
@@ -3444,7 +3323,7 @@ def _run_common_runtime_deploy_script(*, on_line: Any, env_only: bool = False) -
 def _verify_common_runtime_deployment() -> list[dict[str, str]]:
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     services: list[dict[str, str]] = []
     failures: list[str] = []
     for service in ("rag-parser", "rag-sync"):
@@ -3563,7 +3442,7 @@ def start_common_runtime_deployment(
         raise FileNotFoundError(follow_up)
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     if not project:
         raise ValueError("공통 환경의 GCP 프로젝트가 설정되어 있지 않습니다.")
     with _COMMON_RUNTIME_DEPLOY_LOCK:
@@ -3590,8 +3469,6 @@ def start_common_runtime_deployment(
             "serviceNames": ["rag-parser", "rag-sync", "rag-daily-sync"],
             "services": [],
             "envOnly": bool(env_only),
-            # env 갱신은 이미지·Workflow·Scheduler 를 건드리지 않는다. 없는 단계를
-            # 회색으로 세워 두면 "안 돌았다" 로 읽히므로 아예 빼고 보여준다.
             "steps": [
                 {"key": "config", "label": "설정 확인", "status": "RUNNING", "detail": "학과 라우팅 및 공통 설정 확인 중"},
                 *(
@@ -3630,14 +3507,6 @@ def start_common_runtime_deployment(
     return copy.deepcopy(run)
 
 
-# ---- 리소스 철거 (학과 / 공통 런타임) --------------------------------------
-# 만드는 쪽과 달리 되돌릴 수 없다. 그래서 세 겹으로 막는다.
-#   1. 계획(plan)을 먼저 만들어 무엇이 지워지는지 그대로 보여준다.
-#   2. 학과 코드(공통은 프로젝트 ID)를 손으로 입력받는다.
-#   3. **다른 학과가 참조하는 코퍼스·버킷은 건너뛴다.** 이름만 보고 지우면 남은
-#      학과의 검색이 조용히 빈 결과를 낸다 — 오류도 안 난다.
-
-
 def _cleanup_teardown_runs() -> None:
     cutoff = time.time() - _TEARDOWN_TTL_SECONDS
     for run_id in [
@@ -3670,12 +3539,6 @@ def _teardown_target(
     meta: dict[str, Any] | None = None,
     selected: bool = True,
 ) -> dict[str, Any]:
-    """계획에 실을 삭제 대상 한 줄.
-
-    ``skipped`` 는 두 가지 이유로 켜진다 — 다른 학과가 쓰고 있어서(강제), 또는
-    화면에서 선택을 껐기 때문에(사용자). 두 경우 모두 실행은 건너뛰되 목록에는
-    남긴다. 지우지 **않은** 것이 무엇인지가 지운 것만큼 중요하다.
-    """
     return {
         "key": key,
         "kind": kind,
@@ -3684,7 +3547,6 @@ def _teardown_target(
         "note": note,
         "meta": meta or {},
         "sharedWith": shared,
-        # 다른 학과가 쓰는 것은 선택 자체를 막는다.
         "selectable": not shared,
         "selected": bool(selected) and not shared,
         "skipped": bool(shared),
@@ -3696,7 +3558,6 @@ def _teardown_target(
 
 
 def department_teardown_plan(code: str) -> dict[str, Any]:
-    """학과 하나를 지울 때 무엇이 사라지는지 한 벌로 만든다."""
     normalised = str(code or "").strip().lower()
     if not DEPT_CODE_RE.fullmatch(normalised):
         raise FileNotFoundError(normalised)
@@ -3706,7 +3567,7 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
     config = configs[normalised]
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     corpora = config.get("corpora") or {}
     buckets = config.get("buckets") or {}
     corpus_usage: dict[str, list[str]] = {}
@@ -3773,9 +3634,6 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
             )
         )
 
-    # 학과 버킷과 코퍼스만 지우면 **Firestore 에 동기화 이력이 그대로 남는다.**
-    # 같은 공유드라이브를 나중에 다시 등록하면 contentHash 가 같아 전부
-    # HASH_UNCHANGED 로 건너뛰고, 새 코퍼스는 영원히 비어 있게 된다.
     drive_ids = _normalise_ids((config.get("drive") or {}).get("driveIds"))
     if drive_ids:
         shared_drives = sorted(
@@ -3798,8 +3656,6 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
             )
         )
 
-    # 공용 메타데이터 버킷에는 코퍼스별 import 결과가 쌓인다. 버킷 자체는 공용이라
-    # 남기고 이 학과 코퍼스 prefix 만 지운다.
     metadata_bucket = str(common.get("RAG_METADATA_BUCKET") or "").removeprefix("gs://").strip()
     if metadata_bucket:
         for audience in ("staff", "student"):
@@ -3831,7 +3687,6 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
     )
 
     if _unified_mcp_enabled(common):
-        # Stop access and sync before data deletion; retain config for retries.
         sync_target = targets.pop()
         sync_target["label"] = "이 학과 동기화 중지"
         sync_target["note"] = "학과를 동기화 대상에서 제외하고 중지 상태를 Cloud 등록부에 저장합니다."
@@ -3841,7 +3696,6 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
             note="접근·동기화를 중지하고 선택 가능한 관련 리소스를 모두 정리한 후에만 삭제합니다.",
         ))
     else:
-        # Cloud 설정을 담은 staff 서비스는 마지막에 지워 재시도 정보를 유지한다.
         staff = next(target for target in targets if target["key"] == "mcp-staff")
         targets.remove(staff)
         staff["note"] += " 학과 Cloud 설정도 함께 삭제됩니다."
@@ -3861,14 +3715,9 @@ def department_teardown_plan(code: str) -> dict[str, Any]:
 
 
 def common_runtime_teardown_plan() -> dict[str, Any]:
-    """공통 런타임(parser/sync/Workflow/Scheduler)을 지울 때의 계획.
-
-    학과 리소스는 건드리지 않는다. 다만 **남아 있는 학과가 있으면 그 학과의
-    동기화가 통째로 멈춘다** — 목록을 계획에 실어 화면에서 보이게 한다.
-    """
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     if not project:
         raise ValueError("공통 환경의 GCP 프로젝트가 설정되어 있지 않습니다.")
     remaining = sorted(_cloud_department_configs())
@@ -3921,7 +3770,6 @@ def common_runtime_teardown_plan() -> dict[str, Any]:
 
 
 def _missing_resource_output(output: str) -> bool:
-    """없어서 실패한 것은 성공으로 본다 — 철거는 몇 번을 돌려도 같아야 한다."""
     lowered = str(output or "").lower()
     return any(
         marker in lowered
@@ -4015,7 +3863,6 @@ def _delete_rag_corpus(name: str, region: str, token: str) -> str:
     operation = str(body.get("name") or "") if isinstance(body, dict) else ""
     if not operation or (isinstance(body, dict) and body.get("done")):
         return "삭제 완료"
-    # 파일이 많으면 오래 걸린다. 끝을 못 봐도 삭제 자체는 서버에서 계속 진행된다.
     operation_url = f"https://{region}-aiplatform.googleapis.com/v1/{operation}"
     deadline = time.time() + 300
     while time.time() < deadline:
@@ -4032,7 +3879,6 @@ def _delete_rag_corpus(name: str, region: str, token: str) -> str:
 
 
 def _delete_bucket_resource(name: str) -> str:
-    """객체를 먼저 비우고 버킷을 지운다. 비어 있으면 첫 단계는 그냥 넘어간다."""
     gcloud = _gcloud_executable()
     if not gcloud:
         raise RuntimeError("gcloud를 찾을 수 없습니다.")
@@ -4054,21 +3900,16 @@ def _delete_bucket_resource(name: str) -> str:
 
 
 def _firestore_database_name() -> str:
-    return str(_common().get("FIRESTORE_DATABASE") or "rag-sync-state")
+    return str(_common()["FIRESTORE_DATABASE"])
 
 
 def _firestore_collection_names() -> dict[str, str]:
-    """common.yaml 이 비워 둔 값은 shared/config.py 의 기본값과 같아야 한다.
-
-    두 곳에서 따로 관리하면 GUI 는 ``doc_state`` 를 지우는데 런타임은
-    ``doc_state_v2`` 를 쓰는 상태가 조용히 생긴다.
-    """
     common = _common()
     return {
-        "docState": str(common.get("DOC_STATE_COLLECTION") or "doc_state"),
-        "syncTokens": str(common.get("SYNC_TOKEN_COLLECTION") or "sync_tokens"),
-        "dlq": str(common.get("DLQ_COLLECTION") or "doc_dlq"),
-        "splitQueue": str(common.get("SPLIT_QUEUE_COLLECTION") or "doc_split_queue"),
+        "docState": str(common["DOC_STATE_COLLECTION"]),
+        "syncTokens": str(common["SYNC_TOKEN_COLLECTION"]),
+        "dlq": str(common["DLQ_COLLECTION"]),
+        "splitQueue": str(common["SPLIT_QUEUE_COLLECTION"]),
     }
 
 
@@ -4077,7 +3918,7 @@ def _firestore_client(project: str):
 
     ADC는 gcloud 활성 계정과 별도로 저장된다. 로컬 콘솔이 서로 다른 두 계정을
     섞으면 리소스 조회는 되지만 Firestore 삭제만 403으로 실패할 수 있으므로,
-    다른 관리 API와 동일하게 매번 활성 gcloud 계정의 토큰을 사용한다.
+    다른 관리 API와 동일하게 활성 gcloud 계정의 토큰을 사용한다.
     """
     try:
         from google.cloud import firestore
@@ -4103,14 +3944,6 @@ def _delete_department_firestore_state(
     *,
     progress: Callable[[str], None] | None = None,
 ) -> str:
-    """이 학과 공유드라이브에 속한 동기화 이력을 지운다.
-
-    doc_state 는 fileId 하나로 전 학과가 같은 컬렉션을 쓴다. 학과를 가르는 축은
-    ``driveId`` 뿐이라 그 값으로 골라 지운다.
-
-    **하위 컬렉션은 부모를 지워도 남는다.** ``doc_state/{fileId}/rag_files`` 를
-    따로 지우지 않으면 콘솔에서 보이지 않는 고아 매핑이 계속 쌓인다.
-    """
     if not drive_ids:
         return "대상 없음"
     from google.cloud.firestore_v1.base_query import FieldFilter
@@ -4149,7 +3982,6 @@ def _delete_department_firestore_state(
         if pending_writes >= _FIRESTORE_DELETE_BATCH:
             flush()
 
-    # `in` 은 한 번에 30개까지다. 학과당 드라이브는 한두 개지만 상한은 지킨다.
     for start in range(0, len(drive_ids), 30):
         chunk = drive_ids[start : start + 30]
         for snapshot in docs.where(
@@ -4180,7 +4012,6 @@ def _delete_department_firestore_state(
 
 
 def _delete_gcs_prefix(uri: str) -> str:
-    """공용 버킷 안의 한 prefix 만 비운다. 버킷 자체는 건드리지 않는다."""
     gcloud = _gcloud_executable()
     if not gcloud:
         raise RuntimeError("gcloud를 찾을 수 없습니다.")
@@ -4201,7 +4032,7 @@ def _require_sync_removed() -> None:
     ok, result = _gcloud_json([
         "run", "services", "describe", SYNC_SERVICE,
         f"--project={common.get('GCP_PROJECT_ID', '')}",
-        f"--region={common.get('GCP_REGION') or 'asia-northeast3'}",
+        f"--region={common['GCP_REGION']}",
     ], timeout=30)
     if not ok and _missing_resource_output(str(result)):
         return
@@ -4245,7 +4076,6 @@ def _execute_teardown_run(run_id: str) -> None:
         if target.get("skipped"):
             _set_teardown_target(run_id, key, status="SKIPPED")
             continue
-        # 실패하면 Cloud 설정을 담은 MCP와 라우팅을 남겨 재시도한다.
         if run["kind"] == "department" and failed and (
             key in {"sync-env", "mcp-staff"} or (run.get("unifiedMcp") and kind != "mcpRoute")
         ):
@@ -4297,8 +4127,6 @@ def _execute_teardown_run(run_id: str) -> None:
             else:
                 raise ValueError(f"지원하지 않는 삭제 대상: {kind}")
             _set_teardown_target(run_id, key, status="COMPLETE", detail=detail)
-        # 백그라운드 작업의 최종 예외 경계다. Google SDK의 PermissionDenied 같은
-        # 예외를 놓치면 thread만 종료되고 화면은 영원히 RUNNING으로 남는다.
         except Exception as exc:  # noqa: BLE001
             failed += 1
             _set_teardown_target(
@@ -4323,11 +4151,6 @@ def _execute_teardown_run(run_id: str) -> None:
 def apply_teardown_selection(
     plan: dict[str, Any], selected: list[str] | None
 ) -> dict[str, Any]:
-    """화면에서 고른 대상만 남긴다. 고르지 않은 것은 지우지 않고 목록에 남긴다.
-
-    ``selected`` 가 None 이면 계획 그대로(기본 선택)를 쓴다 — 선택 UI 가 없는
-    호출자(스크립트·기존 테스트)의 동작을 바꾸지 않기 위해서다.
-    """
     plan = copy.deepcopy(plan)
     if selected is None:
         chosen = {target["key"] for target in plan["targets"] if target.get("selected")}
@@ -4347,7 +4170,6 @@ def apply_teardown_selection(
         raise ValueError("교직원 MCP 삭제 시 학과 라우팅 갱신도 선택해 주세요.")
     for target in plan["targets"]:
         if target.get("sharedWith"):
-            # 다른 학과가 쓰는 것은 화면이 뭐라 하든 지우지 않는다.
             continue
         picked = target["key"] in chosen
         target["selected"] = picked
@@ -4360,7 +4182,6 @@ def apply_teardown_selection(
 
 
 def teardown_selection_warnings(plan: dict[str, Any]) -> list[str]:
-    """고른 조합이 만들어 내는 사고를 미리 말한다. 막지는 않는다."""
     warnings: list[str] = []
     chosen = {target["key"] for target in plan["targets"] if target.get("selected")}
     if not chosen:
@@ -4397,7 +4218,6 @@ def teardown_selection_warnings(plan: dict[str, Any]) -> list[str]:
 def start_teardown_run(
     plan: dict[str, Any], confirm: str, selected: list[str] | None = None
 ) -> dict[str, Any]:
-    """계획을 확정해 실행한다. 확인 문구가 어긋나면 아무것도 하지 않는다."""
     expected = str(plan.get("confirmWord") or "")
     if str(confirm or "").strip() != expected:
         raise PermissionError(expected)
@@ -4543,7 +4363,6 @@ def _gcloud_env_argument(values: dict[str, Any]) -> str:
 
 
 def _cloud_department_configs() -> dict[str, dict[str, Any]]:
-    """Secret Manager/Firestore Cloud 등록부의 전 학과 설정을 읽는다."""
     return _mcp_registry_read(allow_empty=True)[1]
 
 
@@ -4553,28 +4372,18 @@ def _cloud_sync_department_configs() -> dict[str, dict[str, Any]]:
 
 
 def cloud_departments_json() -> str:
-    """Cloud v2 주석 기준 rag-sync DEPARTMENTS_JSON 한 줄."""
     return dept_config.departments_json_from_configs(_cloud_sync_department_configs())
 
 
 def update_sync_department_map(
     *, on_line: Any = lambda _line: None, expected: str | None = None
 ) -> str:
-    """rag-sync 의 DEPARTMENTS_JSON 을 지금 배포된 학과 전체로 맞춘다.
-
-    **--update-env-vars 여야 한다.** --set-env-vars 는 env 를 통째로 치환하므로
-    여기서 이 키 하나만 넘기면 버킷·코퍼스·Cloud Tasks 설정이 통째로 사라진다
-    (그 목록은 deploy.ps1 의 $syncEnv 한 곳에만 있다).
-
-    ``expected`` 를 주면 그 값을 그대로 쓴다. 학과 철거 중처럼 등록부 상태를
-    단계적으로 바꾸는 순간의 명시적 스냅샷이 조회값보다 우선한다.
-    """
     gcloud = _gcloud_executable()
     if not gcloud:
         raise RuntimeError("gcloud를 찾을 수 없습니다.")
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     expected = expected if expected is not None else cloud_departments_json()
 
     ok, service = _gcloud_json(
@@ -4629,8 +4438,6 @@ def update_sync_department_map(
         Path(flags_path).unlink(missing_ok=True)
     if not update_ok:
         raise RuntimeError(f"{SYNC_SERVICE}: {str(output or '갱신 실패')[:400]}")
-    # 동기화 탭은 배포된 맵을 30초 캐시로 읽는다. 방금 올린 학과가 곧바로
-    # 목록에 뜨도록 비운다.
     with _SYNC_TARGET_CACHE_LOCK:
         _SYNC_TARGET_CACHE.clear()
     codes = ", ".join(sorted(json.loads(expected)))
@@ -4660,12 +4467,9 @@ def _cloud_config_audiences(config: dict[str, Any]) -> tuple[str, ...]:
 def _update_cloud_department_config(
     code: str, config: dict[str, Any], *, on_line: Any = lambda _line: None
 ) -> list[str]:
-    """로컬 파일 없이 기존 MCP 서비스의 env와 전체-YAML 주석을 갱신한다."""
     if _unified_mcp_enabled():
         _cloud_config_audiences(config)
         deployment_config = copy.deepcopy(config)
-        # Ordinary edits do not change lifecycle state. An asynchronous save must
-        # not undo a scope/sync revocation that happened after the editor loaded.
         deployment_config.pop("mcpDisabledAudiences", None)
         deployment_config.pop("syncDisabled", None)
         _mcp_registry_mutate("update_department", code, deployment_config)
@@ -4677,7 +4481,7 @@ def _update_cloud_department_config(
         raise RuntimeError("gcloud를 찾을 수 없습니다.")
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     corpora = config.get("corpora") or {}
     buckets = config.get("buckets") or {}
     keys = config.get("keys") or {}
@@ -4710,8 +4514,8 @@ def _update_cloud_department_config(
             "RAG_CORPUS_NAME": str(corpora.get(audience) or ""),
             "GCS_HWP_ORIGINAL_BUCKET": effective_buckets["hwpOriginal"],
             "GCS_SOURCE_BUCKET": effective_buckets["source"],
-            "FIRESTORE_DATABASE": str(common.get("FIRESTORE_DATABASE") or "rag-sync-state"),
-            "DOC_STATE_COLLECTION": str(common.get("DOC_STATE_COLLECTION") or "doc_state"),
+            "FIRESTORE_DATABASE": str(common["FIRESTORE_DATABASE"]),
+            "DOC_STATE_COLLECTION": str(common["DOC_STATE_COLLECTION"]),
             "MCP_API_KEY": str(keys.get(audience) or ""),
             "TOP_K_DEFAULT": str(common.get("TOP_K_DEFAULT") or 5),
             "SEARCH_FETCH_MULTIPLIER": str(common.get("SEARCH_FETCH_MULTIPLIER") or 3),
@@ -4821,11 +4625,6 @@ def _execute_mcp_deployment(run_id: str) -> None:
             detail=f"{len(servers)}개 서비스 정상 응답",
         )
 
-        # MCP 만 올리고 끝내면 rag-sync 의 DEPARTMENTS_JSON 이 그대로라 이 학과의
-        # 드라이브가 라우팅 맵에 없다. 그 상태에서는 동기화 탭에 학과가 뜨지도
-        # 않고, 실행해도 UnknownDriveError 로 건너뛴다(실측 — cs 가 그랬다).
-        # 배포의 마지막 단계로 묶어야 학과 추가 때마다 사람이 기억해야 하는
-        # 수동 절차가 되지 않는다.
         _set_mcp_deploy_step(
             run_id, "syncMap", status="RUNNING", detail="rag-sync 학과 라우팅 맵 갱신 중"
         )
@@ -4955,7 +4754,6 @@ def _service_account_access_token(
     *,
     gcloud_json: Any = _gcloud_json,
 ) -> tuple[str, str, int, str]:
-    """Compute SA 가장 토큰. 반환값은 (token, service_account, latency_ms, error)."""
     project_ok, project_info = gcloud_json(["projects", "describe", project])
     project_number = str(project_info.get("projectNumber") or "") if project_ok else ""
     if not project_number:
@@ -4978,7 +4776,6 @@ def _service_account_access_token(
 
 
 def _drive_folder_info(folder_id: str, token: str) -> dict[str, Any]:
-    """Compute SA가 보는 Drive 폴더의 표시 이름과 소속을 반환한다."""
     params = urlencode(
         {
             "supportsAllDrives": "true",
@@ -5013,7 +4810,6 @@ def _drive_folder_info(folder_id: str, token: str) -> dict[str, Any]:
 
 
 def _lookup_drive_folders(folder_ids: list[str], token: str) -> dict[str, Any]:
-    """입력 순서를 유지하면서 Drive 폴더 ID를 실제 이름으로 해석한다."""
     started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=min(12, max(1, len(folder_ids)))) as executor:
         folders = list(executor.map(lambda item: _drive_folder_info(item, token), folder_ids))
@@ -5031,7 +4827,6 @@ def _lookup_drive_folders(folder_ids: list[str], token: str) -> dict[str, Any]:
 
 
 def _drive_folder_children(drive_id: str, parent_id: str, token: str) -> dict[str, Any]:
-    """공유드라이브 안에서 한 단계의 폴더만 조회한다(트리 지연 로딩용)."""
     query = (
         f"'{parent_id}' in parents and "
         f"mimeType = '{DRIVE_FOLDER_MIME_TYPE}' and trashed = false"
@@ -5158,7 +4953,7 @@ def _resource_status(
 ) -> list[dict]:
     checks: list[dict[str, Any]] = []
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     gcloud = _gcloud_executable()
     if not gcloud:
         return [_check("RESOURCE", "gcloud", "FAIL", "gcloud를 찾을 수 없습니다.")]
@@ -5197,7 +4992,7 @@ def _resource_status(
         else:
             checks.append(_check("RESOURCE", label, "FAIL", f"버킷 조회 실패: {bucket}"))
 
-    database = str(common.get("FIRESTORE_DATABASE") or "rag-sync-state")
+    database = str(common["FIRESTORE_DATABASE"])
     ok, db = gcloud_json(
         ["firestore", "databases", "describe", f"--database={database}", f"--project={project}"]
     )
@@ -5254,7 +5049,7 @@ def _deploy_and_runtime_status(
 ) -> list[dict]:
     checks: list[dict[str, Any]] = []
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     gcloud = _gcloud_executable()
     if not gcloud:
         return [_check("DEPLOY", "gcloud", "FAIL", "gcloud를 찾을 수 없습니다.")]
@@ -5385,8 +5180,6 @@ def _deploy_and_runtime_status(
         status_code, body, latency = _http_json(health_url, token)
         retried = False
         if status_code == 0:
-            # min-instances=0 서비스는 첫 요청 10초 안에 기동하지 못할 수 있다.
-            # 첫 요청이 인스턴스를 깨운 뒤 한 번 더 확인해 콜드 스타트를 장애와 구분한다.
             retried = True
             status_code, body, retry_latency = _http_json(health_url, token, timeout=20)
             latency += retry_latency
@@ -5415,19 +5208,10 @@ def _sync_status(
     deploy_checks: list[dict[str, Any]] | None = None,
     code: str = "",
 ) -> list[dict]:
-    """정기 동기화 상태. **원인이 앞 단계에 있으면 그쪽으로 넘긴다.**
-
-    예전에는 무엇이 잘못됐든 "최근 실행 없음 또는 조회 실패" 한 줄이었다. 공통
-    런타임이 없어서 워크플로가 아예 없는 경우와, 워크플로는 있는데 아직 안 돈
-    경우와, 조회가 실패한 경우가 같은 문구로 보였다 — 화면에서 다음에 뭘 눌러야
-    하는지 알 수 없었다.
-    """
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     gcloud_json = cache.gcloud_json if cache else _gcloud_json
 
-    # 배포 단계에서 이미 걸린 것이 있으면 여기서 또 오류를 내지 않는다.
-    # 같은 사고를 두 줄로 세면 어느 쪽을 고쳐야 하는지가 흐려진다.
     blockers = [
         str(item.get("name") or "")
         for item in (deploy_checks or [])
@@ -5481,9 +5265,6 @@ def _sync_status(
             )
         ]
 
-    # 정기 실행을 거는 것은 Scheduler 잡이다. 여기가 비어 있으면 워크플로가 멀쩡해도
-    # 아무것도 안 돈다 — 배포가 중간에 죽으면 딱 이 상태가 되고, 예전에는 어느
-    # 검사에도 안 잡혀서 "최근 실행 없음" 한 줄로만 드러났다(실측).
     checks: list[dict[str, Any]] = []
     scheduler_ready = False
     job_ok, job = gcloud_json(
@@ -5547,8 +5328,6 @@ def _sync_status(
             "rag-daily-sync",
             f"--location={region}",
             f"--project={project}",
-            # 사용자가 중복 실행을 취소한 직후에도 그 CANCELLED 한 건만 보고
-            # 전체 동기화가 실패했다고 오판하지 않도록 최근 이력을 함께 본다.
             "--limit=10",
         ]
     )
@@ -5589,9 +5368,6 @@ def _sync_status(
             )
         )
         return checks
-    # CANCELLED 는 운영자가 중복 작업을 정리한 정상적인 결과일 수 있다. 최근
-    # 유효 실행이 따로 있으면 그것으로 상태를 판정하고, 전부 취소된 경우에만
-    # 마지막 취소를 WARN 으로 보여 준다. FAILED 는 실제 장애이므로 건너뛰지 않는다.
     row = next(
         (item for item in rows if str(item.get("state") or "") != "CANCELLED"),
         rows[0],
@@ -5634,7 +5410,6 @@ def _json_mapping(value: Any) -> dict[str, Any]:
 
 
 def _firestore_value(value: Any) -> Any:
-    """Firestore REST typed value를 GUI 응답용 일반 값으로 바꾼다."""
     if not isinstance(value, dict):
         return None
     for key in ("stringValue", "timestampValue", "referenceValue", "bytesValue"):
@@ -5698,16 +5473,9 @@ def _execution_run_id(row: dict[str, Any]) -> str:
 
 
 def _deployed_sync_department_map() -> dict[str, dict[str, Any]]:
-    """rag-sync가 실제 사용하는 학과 라우팅 맵을 Cloud Run env에서 읽는다.
-
-    데이터 동기화는 MCP 주석보다 이 값이 중요하다. 주석에 학과가 있어도
-    rag-sync의 DEPARTMENTS_JSON에 아직 반영되지 않았다면 실행 즉시
-    UnknownDriveError가 나기 때문이다. 실행 이력 화면은 5초마다 갱신되므로 짧은
-    프로세스 캐시로 describe 호출만 줄이고, 배포 변경은 최대 30초 안에 반영한다.
-    """
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     if not project:
         return {}
     cache_key = (project, region)
@@ -5766,10 +5534,9 @@ def _sync_department_targets() -> tuple[dict[str, dict[str, Any]], dict[str, str
         }
         departments[code] = target
 
-    # 실제 sync 라우팅 값은 Cloud Run env가 최종 권위다.
     for code, config in _deployed_sync_department_map().items():
         if code not in configs:
-            continue  # 낡은 배포 맵이 중지된 Cloud 학과를 되살리면 안 된다.
+            continue
         existing = departments.get(code) or {}
         departments[code] = {
             "code": code,
@@ -5884,9 +5651,6 @@ def _list_sync_execution_rows(
             )
         raise RuntimeError(message[:300] or "동기화 실행 이력을 조회하지 못했습니다.")
     records = [row for row in rows if isinstance(row, dict)]
-    # executions list 는 기본 뷰라 완료 실행의 argument/labels/result 를 주지 않는다.
-    # 이 상태로 이력 행을 만들면 수동 실행도 "자동 실행"이 되고 totals 는 전부 0,
-    # Workflow 가 정상 return 한 ok=false 도 잃어버려 SUCCEEDED=완료로 오표시된다.
     needs_detail = [
         row
         for row in records
@@ -5934,7 +5698,7 @@ def _sync_execution_records(
     common: dict[str, Any], rows: list[dict[str, Any]], token: str = ""
 ) -> list[dict[str, Any]]:
     project = str(common.get("GCP_PROJECT_ID") or "")
-    database = str(common.get("FIRESTORE_DATABASE") or "rag-sync-state")
+    database = str(common["FIRESTORE_DATABASE"])
     departments, drive_owners = _sync_department_targets()
     run_ids = {_execution_run_id(row) for row in rows}
     run_ids = {item for item in run_ids if re.fullmatch(r"[0-9a-f]{32}", item)}
@@ -6163,7 +5927,7 @@ def _start_manual_sync(code: str, mode: str, *, file_id: str = "", request_id: s
 
     common = _common()
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
+    region = str(common["GCP_REGION"])
     selected = None
     if mode == "reprocess":
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", file_id) or not re.fullmatch(r"[a-f0-9]{32}", request_id):
@@ -6176,7 +5940,6 @@ def _start_manual_sync(code: str, mode: str, *, file_id: str = "", request_id: s
         if not index_issues.issue_item(file_id, doc):
             raise ValueError("이미 처리됐거나 수집 대상에서 제외된 문서입니다. 목록을 새로고침해 주세요.")
         selected = {"fileId": file_id, "driveId": doc["driveId"]}
-        # An older Workflow ignores unknown args and would run a full delta!
         ok, deployed = _gcloud_json([
             "workflows", "describe", SYNC_WORKFLOW_NAME,
             f"--location={region}", f"--project={project}",
@@ -6247,10 +6010,9 @@ def _start_manual_sync(code: str, mode: str, *, file_id: str = "", request_id: s
 
 
 def _warm_status_cache(cache: _StatusRunCache, common: dict[str, Any]) -> None:
-    """서로 독립적인 공통 조회를 먼저 병렬 실행해 CLI 기동 대기를 겹친다."""
     project = str(common.get("GCP_PROJECT_ID") or "")
-    region = str(common.get("GCP_REGION") or "asia-northeast3")
-    database = str(common.get("FIRESTORE_DATABASE") or "rag-sync-state")
+    region = str(common["GCP_REGION"])
+    database = str(common["FIRESTORE_DATABASE"])
     gcloud = _gcloud_executable()
     if not gcloud or not project:
         return
@@ -6323,7 +6085,6 @@ def _run_department_status(
         checks.extend(_resource_status(code, cfg, common, cache))
         deploy_checks = _deploy_and_runtime_status(code, common, cfg, cache)
         checks.extend(deploy_checks)
-        # SYNC 는 배포 결과를 보고 원인을 앞 단계로 넘긴다.
         checks.extend(_sync_status(common, cache, deploy_checks=deploy_checks, code=code))
     result = {
         "code": code,
@@ -6413,11 +6174,6 @@ async def security_headers(request: Request, call_next):  # type: ignore[no-unty
 
 @app.get("/api/v1/session")
 def session() -> dict[str, Any]:
-    """부팅 첫 호출. gcloud 를 타지 않아야 한다 — 여기서 막히면 화면이 통째로 늦다.
-
-    `commonExists` 는 파일 존재 확인뿐이므로 즉시 답한다. 콘솔은 이 값만 보고
-    공통 설정 화면을 먼저 띄우고, 느린 gcloud 상태는 뒤에서 채운다.
-    """
     return {"nonce": _SESSION_NONCE, "commonExists": (CONFIG_DIR / "common.yaml").exists()}
 
 
@@ -6435,12 +6191,11 @@ def _index_issue_context(code: str):
     project = str(common.get("GCP_PROJECT_ID") or "")
     if not project:
         raise RuntimeError("공통 프로젝트 설정이 없습니다.")
-    names = {**_firestore_collection_names(), "jobs": str(common.get("SYNC_JOB_COLLECTION") or "sync_jobs")}
+    names = {**_firestore_collection_names(), "jobs": str(common["SYNC_JOB_COLLECTION"])}
     return config, drives, common, names
 
 
 def _index_issue_evidence(file_id: str, config: dict, common: dict, detail: dict) -> list[dict]:
-    """Read bounded import-result history; never infer file failure from batch counts."""
     from datetime import timedelta
     from shared.rag_import_result import parse_import_results
 
@@ -6490,7 +6245,6 @@ def _index_issue_evidence(file_id: str, config: dict, common: dict, detail: dict
         evidence = []
         for row in parse_import_results(payload):
             source = urlparse(row.gcs_uri)
-            # Only this exact Drive file's generated objects, in this department's bucket.
             if source.netloc != source_bucket or not re.fullmatch(re.escape(file_id) + r"\.[A-Za-z0-9.]+", source.path.lstrip("/")):
                 continue
             evidence.append({"object": source.path.lstrip("/"), "status": row.status,
@@ -6576,10 +6330,8 @@ def index_issue_reprocess_history(code: str, file_id: str) -> JSONResponse:
         data = snap.to_dict() or {}
         if not snap.exists or data.get("driveId") not in drives:
             raise FileNotFoundError(file_id)
-        # Scoped server query, FULL view includes arguments/result. Polling this
-        # endpoint survives browser reload without reissuing a mutation.
         project = common["GCP_PROJECT_ID"]
-        region = common.get("GCP_REGION") or "asia-northeast3"
+        region = common["GCP_REGION"]
         history_filter = quote(f'labels."department":"{code}" AND labels."mode":"reprocess"', safe='')
         url = (f"https://workflowexecutions.googleapis.com/v1/projects/{quote(project, safe='')}/locations/"
                f"{quote(region, safe='')}/workflows/{SYNC_WORKFLOW_NAME}/executions"
@@ -6604,7 +6356,6 @@ def index_issue_reprocess_history(code: str, file_id: str) -> JSONResponse:
 
 @app.get("/api/v1/cloud-mcp-services")
 def cloud_mcp_services() -> JSONResponse:
-    """Cloud 등록부의 관리 대상 MCP를 조회한다."""
     try:
         return JSONResponse({"departments": cloud_mcp_department_records()})
     except (FileNotFoundError, OSError, RuntimeError, TypeError, yaml.YAMLError) as exc:
@@ -6745,7 +6496,6 @@ def common_runtime_deployment(run_id: str) -> JSONResponse:
 
 @app.get("/api/v1/runtime-env")
 def runtime_env() -> JSONResponse:
-    """배포된 parser/sync env 가 현재 학과 설정과 같은지."""
     try:
         return JSONResponse(runtime_env_drift())
     except (OSError, RuntimeError, TypeError, ValueError, yaml.YAMLError) as exc:
@@ -6803,7 +6553,6 @@ def department_teardown_plan_endpoint(code: str) -> JSONResponse:
 
 @app.get("/api/v1/common-runtime/status")
 def common_runtime_status_endpoint() -> JSONResponse:
-    """운영 환경 화면의 공통 런타임 카드."""
     try:
         return JSONResponse(common_runtime_state())
     except (OSError, RuntimeError, TypeError, ValueError, yaml.YAMLError) as exc:
@@ -6830,7 +6579,6 @@ def common_runtime_teardown_plan_endpoint() -> JSONResponse:
 
 
 def _teardown_selection(payload: dict[str, Any]) -> list[str] | None:
-    """본문에 targets 가 없으면 계획의 기본 선택을 그대로 쓴다."""
     raw = payload.get("targets")
     if raw is None:
         return None
@@ -6989,7 +6737,7 @@ def environment() -> dict[str, Any]:
     common_exists = common_path.exists()
     common_valid = False
     common_error = ""
-    common: dict[str, Any] = {}
+    common = common_config.resolve({})
     if common_exists:
         try:
             common = _common()
@@ -7004,9 +6752,7 @@ def environment() -> dict[str, Any]:
         try:
             department_count = len(_cloud_department_configs())
         except (OSError, RuntimeError, TypeError, ValueError):
-            # 환경 부트스트랩 화면은 Cloud 인증·등록부 장애와 무관하게 열려야 한다.
             department_count = 0
-    # bootstrap 과 SA 조회는 서로 독립이다. 순차로 돌면 gcloud 왕복이 그대로 더해진다.
     with ThreadPoolExecutor(max_workers=2) as pool:
         bootstrap_future = pool.submit(
             _gcloud_bootstrap_state, include_projects=not common_exists
@@ -7031,7 +6777,7 @@ def environment() -> dict[str, Any]:
         "gcloudProject": bootstrap["currentProject"],
         "gcloudProjects": bootstrap["projects"],
         "availableRegions": bootstrap["regions"],
-        "region": str(common.get("GCP_REGION") or "asia-northeast3"),
+        "region": str(common["GCP_REGION"]),
         "departmentCount": department_count,
         "commonExists": common_exists,
         "commonValid": common_valid,
@@ -7067,7 +6813,6 @@ def common_config_resources(project: str, region: str) -> JSONResponse:
 
 @app.post("/api/v1/common-config/resource-plans")
 async def common_config_resource_plan(request: Request) -> JSONResponse:
-    """무엇을 켜고 무엇을 만들지만 돌려준다. 여기서는 아무것도 바꾸지 않는다."""
     _require_local_session(request)
     payload = await request.json()
     if not isinstance(payload, dict):
@@ -7146,13 +6891,11 @@ def common_config_provision_run(run_id: str) -> JSONResponse:
 
 @app.get("/api/v1/projects/search")
 def project_search(q: str = "", limit: int = PROJECT_SEARCH_LIMIT) -> JSONResponse:
-    """프로젝트 부분 일치 검색. 전량을 받지 않으므로 타이핑 중에도 쓸 수 있다."""
     return JSONResponse(search_projects(q, limit))
 
 
 @app.get("/api/v1/drive-service-account/status")
 def drive_sa_status() -> JSONResponse:
-    """Drive 확인 SA 를 실제 가장 토큰까지 받아보고 판정한다."""
     try:
         project = str(_common().get("GCP_PROJECT_ID") or "")
     except (OSError, TypeError, UnicodeError, yaml.YAMLError):
@@ -7162,7 +6905,6 @@ def drive_sa_status() -> JSONResponse:
 
 @app.post("/api/v1/drive-service-account/repair-plans")
 def drive_sa_repair_plan(request: Request) -> JSONResponse:
-    """무엇을 켜고 어떤 권한을 줄지만 돌려준다. 여기서는 아무것도 바꾸지 않는다."""
     _require_local_session(request)
     try:
         project = str(_common().get("GCP_PROJECT_ID") or "")
@@ -7254,7 +6996,6 @@ def start_gcloud_login(request: Request) -> JSONResponse:
 
 @app.post("/api/v1/gcloud-auth/logout")
 def gcloud_logout(request: Request) -> JSONResponse:
-    """gcloud 계정 자격 증명을 모두 철회한다. 다른 계정으로 바꿔 로그인할 때 쓴다."""
     _require_local_session(request)
     gcloud = _gcloud_executable()
     if not gcloud:
@@ -7265,7 +7006,6 @@ def gcloud_logout(request: Request) -> JSONResponse:
     _stop_gcloud_login_process()
     ok, output = _run_command([gcloud, "auth", "revoke", "--all", "--quiet"], timeout=30)
     _clear_cloud_caches()
-    # 이미 로그아웃된 상태에서 revoke 는 실패로 끝난다. 결과 상태로 판단한다.
     if not ok and _gcloud_bootstrap_state(include_projects=False)["authenticated"]:
         return JSONResponse(
             {"error": {"code": "LOGOUT_FAILED", "message": output.strip()[:300] or "로그아웃하지 못했습니다."}},
@@ -7397,7 +7137,6 @@ async def save_docai_common_config(request: Request) -> JSONResponse:
             for kind, selection in payload["docai"].items():
                 _DOCAI_SETUP.verify(view["projectId"], kind, selection)
             target = CONFIG_DIR / "common.yaml"
-            # Recheck after remote I/O; preserve every unrelated setting.
             raw = target.read_bytes()
             if hashlib.sha256(raw).hexdigest() != view["configRevision"]:
                 return JSONResponse({"error": {"message": "공통 설정이 변경됐습니다. 다시 열어 주세요."}}, status_code=409)
@@ -7645,7 +7384,6 @@ async def drive_preflight(request: Request) -> JSONResponse:
 
 @app.post("/api/v1/departments/folder-lookup")
 async def drive_folder_lookup(request: Request) -> JSONResponse:
-    """동기화 폴더 ID를 Compute SA가 보는 실제 Drive 폴더명으로 해석한다."""
     _require_local_session(request)
     payload = await request.json()
     folder_ids = _normalise_ids(
@@ -7718,7 +7456,6 @@ async def drive_folder_lookup(request: Request) -> JSONResponse:
 
 @app.post("/api/v1/departments/drive-folders")
 async def drive_folder_children(request: Request) -> JSONResponse:
-    """공유드라이브 폴더 탐색기의 한 단계 자식을 Compute SA 권한으로 조회한다."""
     _require_local_session(request)
     payload = await request.json()
     drive_id = str(payload.get("driveId") or "").strip() if isinstance(payload, dict) else ""
@@ -7998,7 +7735,6 @@ async def update_parser_options(code: str, request: Request) -> JSONResponse:
 async def _update_parser_options(
     code: str, request: Request, *, option: str | None = None,
 ) -> JSONResponse:
-    """상세 패널의 파서 옵션만 변경하고 나머지 Cloud 설정은 보존한다."""
     _require_local_session(request)
     payload = await request.json()
     audience_keys = {"enableDocaiFallbackStaff", "enableDocaiFallbackStudent", "enableImageOcrStaff", "enableImageOcrStudent"}
@@ -8068,7 +7804,7 @@ def sync_runs(limit: int = 20) -> JSONResponse:
     try:
         common = _common()
         project = str(common.get("GCP_PROJECT_ID") or "")
-        region = str(common.get("GCP_REGION") or "asia-northeast3")
+        region = str(common["GCP_REGION"])
         rows = _list_sync_execution_rows(
             project, region, limit=max(1, min(limit, SYNC_RUN_HISTORY_LIMIT))
         )
@@ -8102,7 +7838,6 @@ def sync_runs(limit: int = 20) -> JSONResponse:
 
 
 def _sync_run_file_review(project, database, token, run):
-    """Historical review is separate from immutable Workflow execution state."""
     if run.get("state") != "FAILED":
         return None
     base = (f"https://firestore.googleapis.com/v1/projects/{quote(project, safe='')}/"
@@ -8140,7 +7875,6 @@ def _sync_run_file_review(project, database, token, run):
             or review.get("driveId") not in run.get("driveIds", [])
             or review.get("departmentCode") != run.get("departmentCode")):
         return None
-    # Raw evidence is retained server-side; the screen needs only scoped rows.
     return {key: value for key, value in review.items() if key != "evidence"}
 
 
@@ -8153,8 +7887,8 @@ def sync_run_detail(execution_id: str) -> JSONResponse:
     try:
         common = _common()
         project = str(common.get("GCP_PROJECT_ID") or "")
-        region = str(common.get("GCP_REGION") or "asia-northeast3")
-        database = str(common.get("FIRESTORE_DATABASE") or "rag-sync-state")
+        region = str(common["GCP_REGION"])
+        database = str(common["FIRESTORE_DATABASE"])
         ok, row = _gcloud_json(
             [
                 "workflows",

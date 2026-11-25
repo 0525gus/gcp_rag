@@ -1,5 +1,3 @@
-"""소스 조회 실패가 Drive 루프와 후속 복구를 중단하지 않는지 검증한다."""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -55,15 +53,12 @@ def _assert_exhausted_retry_continues_drive_loop(
     error_steps = call_step["except"]["steps"]
     serialized = yaml.safe_dump(error_steps)
 
-    # 소스 응답이 없을 때 Drive 단위 실패를 기록하고 오류 로그를 남긴다.
     assert "totals.failed + 1" in serialized
     assert "severity: ERROR" in serialized
 
-    # 현재 Drive만 중단한다. 다음 Drive 및 루프 밖 복구 단계는 계속 실행된다.
     terminal = next(iter(error_steps[-1].values()))
     assert terminal["next"] == "continue"
 
-    # 예외 경로에서 생성되지 않은 성공 응답 변수를 읽어서는 안 된다.
     assert response_variable not in serialized
 
 

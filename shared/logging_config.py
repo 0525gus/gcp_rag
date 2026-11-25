@@ -1,5 +1,3 @@
-"""공유 로깅 설정."""
-
 from __future__ import annotations
 
 import logging

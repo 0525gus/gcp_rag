@@ -1,5 +1,3 @@
-"""Optional managed cross-encoder and Gemini rerankers with fail-open ordering."""
-
 from __future__ import annotations
 
 import json
@@ -35,8 +33,6 @@ def _validated_order(ids: list[str], records: list[RerankRecord]) -> list[int] |
     if not ids or any(value not in index for value in ids) or len(set(ids)) != len(ids):
         return None
     ordered = [index[value] for value in ids]
-    # Models sometimes return only the confident head. Preserve its ranking and
-    # append omitted candidates in base-RRF order instead of discarding the call.
     selected = set(ordered)
     return ordered + [i for i in range(len(records)) if i not in selected]
 

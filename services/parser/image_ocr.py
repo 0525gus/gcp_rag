@@ -1,5 +1,3 @@
-"""PNG/JPEG와 이미지 위주 PDF의 텍스트만 추출한다. 이미지 설명 생성·표 복원·청킹은 하지 않는다."""
-
 from __future__ import annotations
 
 import io
@@ -59,7 +57,6 @@ def extract_image_text(data: bytes, mime_type: str, settings: Settings) -> str:
     name = client.processor_path(
         settings.gcp_project_id, settings.docai_ocr_location, settings.docai_ocr_processor_id,
     )
-    # 잘못 연결된 Layout Parser에 이미지를 보내거나 다른 처리 비용을 발생시키지 않는다.
     processor = client.get_processor(name=name, retry=None, timeout=30)
     if processor.type_ != "OCR_PROCESSOR":
         raise ImageOcrError("OCR_WRONG_PROCESSOR: OCR_PROCESSOR is required")

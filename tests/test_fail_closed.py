@@ -8,6 +8,7 @@ from google.api_core.exceptions import NotFound, PermissionDenied, ResourceExhau
 
 import services.sync.main as sync_main
 import shared.rag_engine as rag_engine
+from settings_presets import NO_LEASES_OR_MAPPINGS
 from shared.config import Department, Settings, _departments_from_json
 from shared.models import Audience, DocState
 from shared.rag_engine import ImportOutcome, RagEngineClient
@@ -22,6 +23,7 @@ def rag_client(workers=1):
         student_folder_ids="folder",
         rag_delete_concurrency=workers,
         rag_delete_pacing_seconds=0,
+        **NO_LEASES_OR_MAPPINGS,
     )
     client.corpus_name = "student"
     client._file_index = Mock(return_value={"file1234567890": ["corpus/ragFiles/old"]})

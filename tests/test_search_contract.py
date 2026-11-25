@@ -1,5 +1,3 @@
-"""Public protocol, evidence boundaries and HTML ingestion regression checks."""
-
 import json
 import os
 from dataclasses import replace
@@ -53,6 +51,9 @@ def server(monkeypatch, clock):
             return hits
 
     class Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def get(self, fid):
             return DocState(
                 file_id=fid,
@@ -121,7 +122,6 @@ def test_protocol_exposes_only_search_and_returns_evidence_once(server, clock):
             "context" not in payload and "coverage" not in payload and "chunk_count" not in payload
         )
         assert response_documents(result) == payload["documents"]
-        # SDK emits a text representation for MCP clients without structured-output support.
         assert json.loads(result["content"][0]["text"]) == payload
         clock["now"] = datetime(2026, 9, 18, 15, 0, 0, tzinfo=timezone.utc)
         cached_result = rpc(
@@ -160,6 +160,31 @@ def test_new_query_runs_again_but_same_query_uses_cache(server):
     assert len(calls) == 2
 
 
+def test_search_reads_candidate_states_in_one_batch(server, monkeypatch):
+    app, _, _ = server
+    reads = []
+
+    class Store:
+        def get(self, fid):
+            reads.append(("get", fid))
+
+        def get_many(self, fids):
+            fids = list(fids)
+            reads.append(("get_many", fids))
+            return {
+                fid: DocState(file_id=fid, drive_id="d", name=f"{fid}.txt", status=DocStatus.INDEXED)
+                for fid in fids
+            }
+
+    monkeypatch.setattr(app, "DocStateStore", lambda *_: Store())
+
+    result = app.search("묶음 조회")
+
+    assert [kind for kind, _ in reads] == ["get_many"], "문서마다 Firestore 를 따로 왕복하면 후보 수만큼 느려진다"
+    assert set(reads[0][1]) == {"f1", "f2"}
+    assert result["documentCount"] == 2
+
+
 @pytest.mark.parametrize("empty", [False, True])
 @pytest.mark.parametrize(
     ("before", "after", "expected_before", "expected_after"),
@@ -185,7 +210,6 @@ def test_cached_date_rolls_over_in_korea_without_retrieval(
     assert second == {**first, "currentDate": expected_after}
     assert second["timeZone"] == "Asia/Seoul"
     assert len(calls) == 1
-    # Updating the date on the returned copy must not mutate the stored payload.
     assert next(iter(app._cache.values()))[1]["currentDate"] == expected_before
     fresh = app.search("새로운 날짜 질의")
     assert fresh["currentDate"] == expected_after
@@ -223,6 +247,9 @@ def test_search_returns_preview_for_existing_edit_uri(server, monkeypatch):
     original = "https://docs.google.com/document/d/f1/edit?resourcekey=key"
 
     class Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def get(self, fid):
             return DocState(
                 file_id=fid,
@@ -246,6 +273,9 @@ def test_search_returns_download_link_for_hangul_office_source(server, monkeypat
     app, _, _ = server
 
     class Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def get(self, fid):
             return DocState(
                 file_id=fid,
@@ -317,6 +347,9 @@ def test_legacy_html_is_cleaned_but_code_examples_in_other_documents_are_preserv
     ]
 
     class Store:
+        def get_many(self, fids):
+            return {fid: self.get(fid) for fid in fids}
+
         def get(self, fid):
             return DocState(
                 file_id=fid,

@@ -1,12 +1,3 @@
-"""sync 파이프라인 회귀 수정 검증 (#1~#5).
-
-#1 URI vs 파일 카운팅 (reconcile index_ok / uris)
-#2 reconcile 이중 집계 (dlq/split ⊂ failed)
-#3 색인 누락 복구 (should_skip_reindex)
-#4 status 대소문자 (out-of-scope → SKIPPED)
-#5 배치 삭제 코퍼스 1회 순회 (delete_files_by_ids)
-"""
-
 from __future__ import annotations
 
 import sys
@@ -19,15 +10,15 @@ if str(ROOT) not in sys.path:
 import services.sync.main as sync_main  # noqa: E402
 from services.sync.main import ReconcileBody, reconcile  # noqa: E402
 from shared import rag_engine  # noqa: E402
+from settings_presets import NO_LEASES_OR_MAPPINGS
 from shared.config import Settings  # noqa: E402
 from shared.firestore_state import DocStateStore  # noqa: E402
 from shared.models import DocState, DocStatus  # noqa: E402
 from shared.rag_engine import RagEngineClient  # noqa: E402
 
 
-# ---------------------------------------------------------------- #3
 class _FakeStore(DocStateStore):
-    def __init__(self, doc: DocState | None) -> None:  # firestore client 우회
+    def __init__(self, doc: DocState | None) -> None:
         self._doc = doc
 
     def get(self, file_id: str) -> DocState | None:  # type: ignore[override]
@@ -40,7 +31,6 @@ def test_should_skip_reindex_indexed_same_hash() -> None:
 
 
 def test_should_skip_reindex_parsed_not_indexed() -> None:
-    # PARSED(색인만 실패) + 같은 해시 → 스킵 금지 (색인 복구 필요)
     doc = DocState(file_id="f1", drive_id="d", content_hash="h1", status=DocStatus.PARSED)
     assert _FakeStore(doc).should_skip_reindex("f1", "h1") is False
 
@@ -54,7 +44,6 @@ def test_should_skip_reindex_missing() -> None:
     assert _FakeStore(None).should_skip_reindex("f1", "h1") is False
 
 
-# ---------------------------------------------------------------- #5
 class _FakeRagFile:
     def __init__(self, display: str, name: str) -> None:
         self.display_name = display
@@ -62,11 +51,6 @@ class _FakeRagFile:
 
 
 def _bare_client(corpus: str) -> RagEngineClient:
-    """__init__(vertexai.init) 우회. 인덱스 캐시가 읽는 필드만 손으로 채운다.
-
-    캐시는 corpus_name 을 키로 쓰는 모듈 전역이라, 테스트마다 다른 이름을 주고
-    이전 잔재를 지워야 옆 테스트의 인덱스를 물려받지 않는다.
-    """
     client = object.__new__(RagEngineClient)
     client.corpus_name = corpus
     client.settings = get_settings_for_test()
@@ -80,6 +64,7 @@ def get_settings_for_test() -> Settings:
         gcp_project_id="p",
         rag_delete_concurrency=1,
         rag_delete_pacing_seconds=0.0,
+        **NO_LEASES_OR_MAPPINGS,
     )
 
 
@@ -104,15 +89,13 @@ def test_delete_files_by_ids_single_list(monkeypatch) -> None:
     )
 
     n = client.delete_files_by_ids(["f1", "f2"])
-    assert calls["list"] == 1  # 핵심: 배치 전체에 코퍼스 1회 순회
+    assert calls["list"] == 1
     assert n == 3
     assert set(calls["deleted"]) == {"rn1", "rn2", "rn3"}
 
 
 def test_shared_client_scans_the_corpus_once_across_batches(monkeypatch) -> None:
-    """배치마다 지우되(지우는 집합 = 넣는 집합) 순회는 첫 배치에서 한 번만."""
     client = object.__new__(RagEngineClient)
-    # 인덱스 캐시는 코퍼스 이름으로 키잉된다(학생/교직원 분리) — 스텁도 이름이 필요하다.
     client.corpus_name = "corpora/shared-scan"
     client.settings = get_settings_for_test()
     rag_engine._CORPUS_INDEX_CACHE.pop(client.corpus_name, None)
@@ -137,7 +120,6 @@ def test_shared_client_scans_the_corpus_once_across_batches(monkeypatch) -> None
     assert client.delete_files_by_ids(["f3"]) == 1
     assert calls["list"] == 1
     assert calls["deleted"] == ["rn1", "rn2", "rn3"]
-    # 이미 지운 파일을 다시 지우라고 해도 재순회하지 않는다.
     assert client.delete_files_by_ids(["f1"]) == 0
     assert calls["list"] == 1
 
@@ -152,9 +134,7 @@ def test_delete_files_by_ids_empty(monkeypatch) -> None:
     assert client.delete_files_by_ids([]) == 0
 
 
-# ---------------------------------------------------------------- #1 / #2
 def test_reconcile_no_double_count_dlq() -> None:
-    # 5 listed = 2 gcs + 1 unchanged + 1 skipped + 1 failed(=dlq). dlq는 failed 하위.
     body = ReconcileBody(
         driveId="d", listed=5, gcsUploaded=2, uris=2, indexed=2,
         failed=1, skipped=1, deleted=0, unchanged=1, dlq=1, splitQueued=0,
@@ -165,7 +145,6 @@ def test_reconcile_no_double_count_dlq() -> None:
 
 
 def test_reconcile_index_ok_uses_uris() -> None:
-    # 파일 1개 = 2 URI → indexed=2 > gcs=1 이지만 uris=2라 정합해야 함
     body = ReconcileBody(
         driveId="d", listed=1, gcsUploaded=1, uris=2, indexed=2,
         failed=0, skipped=0, deleted=0, unchanged=0,
@@ -195,7 +174,6 @@ def test_reconcile_detects_missing_indexed_uri() -> None:
 
 
 def test_reconcile_detects_real_gap() -> None:
-    # listed=5, 실제 4만 계정 → 진짜 누락 1건은 여전히 잡아야 함
     body = ReconcileBody(
         driveId="d", listed=5, gcsUploaded=2, uris=2, indexed=2,
         failed=1, skipped=1, deleted=0, unchanged=0,
@@ -205,7 +183,6 @@ def test_reconcile_detects_real_gap() -> None:
     assert r["ok"] is False
 
 
-# ---------------------------------------------------------------- #4
 def test_ingest_out_of_scope_returns_uppercase_excluded(monkeypatch) -> None:
     from services.sync.main import IngestBody, ingest
 
@@ -232,14 +209,10 @@ def test_ingest_out_of_scope_returns_uppercase_excluded(monkeypatch) -> None:
     )
 
     res = ingest(IngestBody(fileId="f1", driveId="d", mimeType="application/pdf"))
-    # 원래 이 테스트가 고정하려던 것은 '대문자 enum 값'이었다. 거기에 더해
-    # 이제 폴더 밖은 SKIPPED 가 아니라 EXCLUDED 로 갈린다 — 집계에서 빠져야
-    # skipped 가 '대상인데 처리 못 함'만 가리키기 때문이다.
     assert res["status"] == DocStatus.EXCLUDED.value == "EXCLUDED"
     assert res["reason"] == "out_of_folder_scope"
 
 
-# ------------------------------------------------- GCS 삭제 범위 (prefix 훑기)
 class _FakeBlob:
     def __init__(self, name: str, sink: list[str]) -> None:
         self.name = name
@@ -250,14 +223,7 @@ class _FakeBlob:
 
 
 class _FakeGcsBackend:
-    """list_blobs / bucket().blob() 만 흉내내는 최소 스텁.
-
-    객체 키에서 prefix 를 없앤 뒤로는 **버킷을 구분해야** 한다 — 예전에는
-    `source/` 와 `hwp-original/` 이 달라서 버킷을 무시해도 결과가 갈렸다.
-    """
-
     def __init__(self, names: list[str] | dict[str, list[str]]) -> None:
-        # 리스트면 어느 버킷이든 같은 목록 (단일 버킷 테스트용)
         self.names = names
         self.deleted: list[str] = []
 
@@ -297,7 +263,6 @@ def _fake_gcs(names: list[str] | dict[str, list[str]]):
 
 
 def test_delete_for_file_catches_suffixes_a_hardcoded_list_missed() -> None:
-    """손으로 적은 확장자 목록이 놓쳤던 것들 — 분할 PDF 조각과 .rtf."""
     client, backend = _fake_gcs(
         [
             "abc123.part1.pdf",
@@ -312,12 +277,11 @@ def test_delete_for_file_catches_suffixes_a_hardcoded_list_missed() -> None:
 
 
 def test_delete_for_file_respects_file_id_boundary() -> None:
-    """prefix 만으로 걸면 fileId 가 남의 fileId 접두사일 때 남의 파일을 지운다."""
     client, backend = _fake_gcs(
         [
             "abc123.md",
-            "abc123456.md",  # 다른 문서 — 건드리면 안 된다
-            "abc123",  # 확장자 없는 정확 일치는 대상
+            "abc123456.md",
+            "abc123",
         ]
     )
     removed = client.delete_for_file("b", "abc123")
@@ -326,13 +290,11 @@ def test_delete_for_file_respects_file_id_boundary() -> None:
 
 
 def test_delete_file_also_clears_the_raw_original(monkeypatch) -> None:
-    """Drive 에서 지운 문서의 원본이 raw 에 남아 있었다(실측 52건)."""
     from services.sync.main import DeleteBody, delete_file
 
     class FakeSettings:
         gcs_source_bucket = "norm"
         gcs_hwp_original_bucket = "raw-b"
-        # 학생/교직원 분리가 꺼진 기본 배포 형상
         audience_split_enabled = False
         rag_corpus_name_student = ""
 
@@ -385,9 +347,7 @@ def test_delete_preserves_vertex_quota_as_http_429(monkeypatch) -> None:
     assert caught.value.status_code == 429
 
 
-# ------------------------------------------------------------- 빈 fileId
 def test_ingest_rejects_blank_file_id() -> None:
-    """빈 fileId 는 400 이어야 한다 — Firestore 경로가 `doc_state/` 가 되어 500 났다."""
     import pytest
     from fastapi import HTTPException
 
@@ -399,11 +359,6 @@ def test_ingest_rejects_blank_file_id() -> None:
 
 
 def test_list_changes_drops_entries_without_file_id(monkeypatch) -> None:
-    """fileId 없는 change(공유 드라이브 자체 변경)는 목록에서 빠져야 한다.
-
-    흘려보내면 빈 id 로 Drive 를 조회해 400 이 나고, 이어지는 upsert 가
-    Firestore 400 으로 죽어 /sync/ingest 가 500 을 낸다(7/23·24·29 실측).
-    """
     from shared.drive import DriveClient
 
     client = object.__new__(DriveClient)
@@ -417,7 +372,7 @@ def test_list_changes_drops_entries_without_file_id(monkeypatch) -> None:
                     return {
                         "newStartPageToken": "t2",
                         "changes": [
-                            {"fileId": "", "file": {}},  # 드라이브 자체 변경
+                            {"fileId": "", "file": {}},
                             {
                                 "fileId": "realid1234",
                                 "file": {"id": "realid1234", "name": "a.pdf"},
@@ -434,7 +389,6 @@ def test_list_changes_drops_entries_without_file_id(monkeypatch) -> None:
     assert token == "t2"
 
 
-# ---------------------------------------------------------------- workflow YAML
 def test_workflow_yaml_parses_and_uses_uris_gate() -> None:
     import yaml
 
@@ -442,7 +396,6 @@ def test_workflow_yaml_parses_and_uses_uris_gate() -> None:
     txt = p.read_text(encoding="utf-8")
     data = yaml.safe_load(txt)
     assert "main" in data
-    # 색인 실패는 failed 와 분리해 세지만(이중 집계 방지) 커밋은 똑같이 막아야 한다.
     assert (
         "drive_failed == 0 and drive_indexed + drive_deferred_uris == drive_uris"
         in txt
@@ -457,7 +410,6 @@ def test_workflow_yaml_parses_and_uses_uris_gate() -> None:
 
 
 def test_workflow_runs_explicit_recovery_after_all_drives() -> None:
-    """복구는 드라이브 처리 뒤에 있되 일반 동기화에서는 건너뛴다."""
     import yaml
 
     data = yaml.safe_load((ROOT / "workflows" / "daily_sync.yaml").read_text(encoding="utf-8"))
@@ -488,7 +440,6 @@ def test_workflow_flattens_delta_index_payload() -> None:
     assert "list.concat(pending_file_ids, [change.fileId])" not in txt
 
 
-# ---------------------------------------------------------------- import 재시도
 def test_throttle_retry_unwraps_runtime_error_args(monkeypatch) -> None:
     from google.api_core import exceptions as gcp_exceptions
 
@@ -544,17 +495,10 @@ def test_list_files_retries_current_page_without_restarting(monkeypatch) -> None
     client.corpus_name = "corpus/test"
 
     assert client.list_files() == ["first-page", "second-page"]
-    # 두 번째 페이지의 429만 재시도한다. 첫 페이지로 돌아가면 대형 코퍼스는
-    # 매번 같은 지점에서 쿼터를 소진해 절대 완주하지 못한다.
     assert calls == [None, "page-2", "page-2"]
 
 
 def test_import_retries_on_corpus_busy(monkeypatch) -> None:
-    """코퍼스 동시 작업(FailedPrecondition)은 기다리면 풀린다 — 재시도해야 한다.
-
-    2026-07-29 재색인에서 48건이 이걸로 즉시 실패했다. 당시엔
-    ResourceExhausted 만 재시도 대상이었다.
-    """
     from google.api_core import exceptions as gcp_exceptions
 
     calls: list[int] = []
@@ -579,11 +523,6 @@ def test_import_retries_on_corpus_busy(monkeypatch) -> None:
     assert len(calls) == 3, "재시도 없이 즉시 실패하면 안 된다"
 
 
-# ------------------------------------------------- import 결과 검증 (조용한 실패)
-# `rag.import_files` 는 **호출 자체가 실패할 때만** 예외를 던진다. 파일 단위
-# 거부는 응답의 failed/skipped 카운트로 온다. 예전에는 그 카운트를 로그로만
-# 흘리고 보낸 목록을 그대로 성공으로 돌려줘서, 거부된 파일이 INDEXED 로 찍혔다
-# (실측: xlsx 27건이 상시 거부 중이었는데 집계는 전부 성공).
 def _fake_response(imported: int, failed: int = 0, skipped: int = 0):
     return type(
         "R",
@@ -616,12 +555,6 @@ def test_import_reports_partial_failure(monkeypatch) -> None:
 
 
 def test_import_counts_skipped_as_ok(monkeypatch) -> None:
-    """skipped 를 실패로 세면 pre-delete 생략 경로가 무한 루프에 빠진다.
-
-    `reindex-pending` 비-force 는 속도 때문에 pre-delete 를 생략한다. 이미
-    코퍼스에 있는 문서를 다시 import 하면 skipped 로 잡힐 수 있는데, 이걸
-    실패로 보면 그 문서는 INDEXED 가 되지 못하고 매일 다시 import 된다.
-    """
     monkeypatch.setattr(
         rag_engine.rag, "import_files",
         lambda *a, **k: _fake_response(imported=0, skipped=1),
@@ -630,7 +563,6 @@ def test_import_counts_skipped_as_ok(monkeypatch) -> None:
 
 
 def test_import_failure_still_not_ok_despite_skipped(monkeypatch) -> None:
-    # skipped 를 관대하게 세더라도 failed 는 그대로 실패다
     monkeypatch.setattr(
         rag_engine.rag, "import_files",
         lambda *a, **k: _fake_response(imported=1, failed=1, skipped=1),
@@ -642,8 +574,6 @@ def test_import_failure_still_not_ok_despite_skipped(monkeypatch) -> None:
 
 
 def test_import_outcome_survives_missing_counts(monkeypatch) -> None:
-    # SDK 가 카운트를 안 주면 비관하지 않는다 — 여기서 실패로 처리하면
-    # 필드명이 바뀌는 날 파이프라인이 통째로 멈춘다.
     monkeypatch.setattr(
         rag_engine.rag, "import_files", lambda *a, **k: type("R", (), {})()
     )
@@ -653,12 +583,10 @@ def test_import_outcome_survives_missing_counts(monkeypatch) -> None:
 
 
 def test_import_aggregates_across_subbatches(monkeypatch) -> None:
-    # URI 25개 상한으로 쪼개지는데, 뒤 배치의 실패가 앞 배치에 묻히면 안 된다
     seen: list[int] = []
 
     def _import(corpus, uris, transformation_config=None):
         seen.append(len(uris))
-        # 두 번째 서브배치에서만 실패
         return _fake_response(imported=len(uris) - (1 if len(seen) == 2 else 0),
                               failed=1 if len(seen) == 2 else 0)
 
@@ -676,7 +604,6 @@ def test_import_aggregates_across_subbatches(monkeypatch) -> None:
 
 
 def test_index_gcs_keeps_parsed_on_partial_failure(monkeypatch) -> None:
-    """부분 실패 시 INDEXED 로 올리면 reindex-pending 이 영영 못 집는다."""
     marked: list[str] = []
 
     class _Rag:
@@ -702,7 +629,7 @@ def test_index_gcs_keeps_parsed_on_partial_failure(monkeypatch) -> None:
     monkeypatch.setattr(sync_main, "DocStateStore", lambda *a, **k: _Store())
     monkeypatch.setattr(
         sync_main, "get_settings",
-        lambda: Settings(gcp_project_id="p", rag_corpus_name="corpora/x"),
+        lambda: Settings(gcp_project_id="p", rag_corpus_name="corpora/x", **NO_LEASES_OR_MAPPINGS),
     )
 
     res = sync_main.index_gcs(
@@ -744,7 +671,7 @@ def test_index_gcs_marks_indexed_on_full_success(monkeypatch) -> None:
     monkeypatch.setattr(sync_main, "DocStateStore", lambda *a, **k: _Store())
     monkeypatch.setattr(
         sync_main, "get_settings",
-        lambda: Settings(gcp_project_id="p", rag_corpus_name="corpora/x"),
+        lambda: Settings(gcp_project_id="p", rag_corpus_name="corpora/x", **NO_LEASES_OR_MAPPINGS),
     )
 
     res = sync_main.index_gcs(

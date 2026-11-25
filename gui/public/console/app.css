@@ -136,7 +136,6 @@ button, select { cursor: pointer; }
 .brand-mark i:nth-child(1) { inset: 3px 16px 16px 3px; background: #5477ef; }
 .brand-mark i:nth-child(2) { inset: 3px 3px 16px 16px; border-color: #38c7ad; }
 .brand-mark i:nth-child(3) { inset: 16px 9px 3px 9px; border-color: #8da5ff; }
-/* 사이드바 브랜드: 학교 엠블럼(어두운 배경 대비용 흰 원형 패드) */
 .brand-logo { width: 34px; height: 34px; flex: none; display: block; border-radius: 9px; background: #fff; padding: 3px; box-shadow: 0 1px 4px rgba(9, 20, 45, .35); object-fit: contain; }
 
 .nav-list { display: grid; gap: 7px; }
@@ -178,7 +177,6 @@ button, select { cursor: pointer; }
 .context-dot { width: 7px; height: 7px; background: var(--teal); border-radius: 50%; box-shadow: 0 0 0 4px rgba(19, 163, 139, 0.1); }
 .context-divider { color: #c2c9d3; }
 .mobile-menu { display: none; }
-
 
 .view { display: none; padding: 38px 40px 60px; max-width: 1540px; margin: 0 auto; }
 .view.active { display: block; animation: viewIn 220ms ease both; }
@@ -555,7 +553,6 @@ button, select { cursor: pointer; }
 .drive-tree-row { position: relative; min-height: 43px; display: grid; grid-template-columns: auto 27px minmax(0, 1fr); align-items: stretch; border-bottom: 1px solid #edf0f4; border-radius: 7px; transition: background 140ms ease, opacity 140ms ease; }
 .drive-tree-row:hover { background: #f5f8fd; }.drive-tree-row.is-selected { background: #edf3ff; }.drive-tree-row.is-locked { opacity: .47; background: #fafbfc; }
 .drive-tree-indent { width: 0; min-width: 0; position: relative; align-self: stretch; }
-/* 하위 폴더: 들여쓰기 + 세로 가이드선. 마지막 항목은 ㄴ자로 꺾어 끝을 표시 */
 .drive-tree-children { position: relative; margin-left: 13px; padding-left: 14px; }
 .drive-tree-children > .drive-tree-node { position: relative; }
 .drive-tree-children > .drive-tree-node::before { content: ""; position: absolute; left: -14px; top: 0; bottom: 0; width: 1px; background: #dbe2ed; }
@@ -753,7 +750,6 @@ button, select { cursor: pointer; }
 .resource-modal-panel > footer { padding: 14px 23px; border-top: 1px solid var(--line); background: #fbfcfd; display: flex; justify-content: flex-end; gap: 8px; }
 .deployment-modal-panel { width: min(680px, 100%); }
 .deployment-step-list { margin: 15px 0; display: grid; gap: 8px; }
-/* 삭제(철거) UI. 되돌릴 수 없는 동작이라 파랑 계열과 확실히 갈라 놓는다. */
 .button.danger { color: #fff; background: var(--fail); }
 .button.danger:hover { filter: brightness(.94); }
 .button.danger:disabled { color: #fff; background: #d8b7bd; cursor: default; filter: none; }
@@ -765,7 +761,6 @@ button, select { cursor: pointer; }
 .teardown-warning > span { width: 17px; height: 17px; border-radius: 6px; color: #fff; background: var(--fail); display: grid; place-items: center; font-size: 12px; font-weight: 850; }
 .teardown-warning p { margin: 0; color: #96555f; font-size: 12px; line-height: 1.55; }
 .teardown-confirm span b { color: var(--fail); font-family: Consolas, monospace; }
-/* 선택형 철거. 계획 단계에서만 보이고, 실행이 시작되면 진행 목록으로 갈아탄다. */
 .teardown-select-bar { margin: 15px 0 8px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 10px; background: #fbfcfe; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; }
 .teardown-select-bar b { display: block; color: #3e4d64; font-size: 12px; }
 .teardown-select-bar small { color: var(--muted); font-size: 12px; }
@@ -782,7 +777,6 @@ button, select { cursor: pointer; }
 .teardown-impact p { margin: 0; padding: 9px 11px; border-radius: 9px; color: #96555f; background: var(--fail-bg); font-size: 12px; line-height: 1.55; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 8px; }
 .teardown-impact p span { color: var(--fail); font-weight: 850; }
 .row-button.danger-button:hover { border-color: #efc3ca; color: var(--fail); background: var(--fail-bg); }
-/* 운영 환경의 공통 런타임 카드. 학과 화면의 DEPLOY 검사와 달리 공통 4종만 본다. */
 .runtime-panel { margin: 0 0 14px; overflow: hidden; }
 .runtime-panel .panel-toolbar { gap: 16px; }
 .runtime-panel .toolbar-controls { flex-wrap: wrap; gap: 12px; }
@@ -938,7 +932,6 @@ button, select { cursor: pointer; }
 .sync-file-times time { white-space: nowrap; }
 @media (max-width: 640px) { .sync-detail-item .sync-file-times { grid-column: 1 / -1; min-width: 0; } }
 
-/* Department detail is a navigable page, with the application sidebar retained. */
 .department-detail { max-width: 1240px; margin: 0 auto; }
 .department-back { display: inline-flex; align-items: center; gap: 10px; min-height: 44px; border: 1px solid #c6d3ef; border-radius: 12px; background: #edf2ff; color: #2445a4; cursor: pointer; padding: 10px 18px; margin: 0 0 24px; font: inherit; font-size: 15px; font-weight: 700; box-shadow: 0 2px 5px rgba(31, 55, 110, .06); transition: background 150ms ease, border-color 150ms ease; }
 .department-back > span { font-size: 21px; line-height: 1; }
@@ -997,7 +990,6 @@ button, select { cursor: pointer; }
 #refreshSyncRuns.is-loading:disabled { opacity: 1; color: #2346b0; background: #eaf0ff; border-color: #a9bce9; cursor: progress; box-shadow: 0 0 0 3px rgba(66, 99, 235, .07); }
 #refreshSyncRuns.is-loading .loader-ring { width: 18px; height: 18px; flex: none; }
 
-/* Advanced management: compare audiences within each processing method. */
 .department-page .department-management > summary { color: var(--ink); background: #fafbfe; }
 .department-page .department-management > summary strong { font-size: 17px; }
 .department-page .department-management > summary span { color: var(--muted); font-size: 13px; }
@@ -1032,19 +1024,16 @@ button, select { cursor: pointer; }
 
 .issue-row .issue-badge { max-width: 100%; white-space: normal; }
 
-/* ── Polish layer: 아이콘 통일, 브라우저 기본 표면, 포커스 ───────────────────── */
 .sync-panel-mark svg, .sync-active-empty > span svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .sync-panel-mark:not(.live) svg { fill: currentColor; stroke-width: 1.5; width: 13px; height: 13px; }
 .sync-active-empty > span svg { width: 19px; height: 19px; stroke-width: 2.4; }
 
-/* 운영 환경 카드: 아이콘을 라벨 옆에 붙여 빈 세로 공간 제거 */
 .environment-card { min-height: 0; grid-template-columns: auto minmax(0, 1fr); align-content: start; align-items: start; gap: 14px; }
 .environment-card > div { min-width: 0; display: grid; gap: 2px; }
 .environment-card .env-icon { font-size: 12px; letter-spacing: -.02em; }
 .environment-card b { margin-top: 3px; }
 .environment-card small { margin-top: 4px; line-height: 1.55; }
 
-/* 프로그램이 이동시킨 제목 포커스는 링을 그리지 않는다 (키보드 포커스는 :focus-visible 유지) */
 [tabindex="-1"]:focus:not(:focus-visible),
 :is(h1, h2)[tabindex="-1"]:focus { outline: none; }
 .status-table th { white-space: nowrap; }

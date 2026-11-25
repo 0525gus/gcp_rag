@@ -1,19 +1,3 @@
-# =============================================================================
-# Cloud Workflows — 일일 Drive → GCS → RAG 동기화 (v2)
-# HWP/HWPX: Parser(rhwp-python) → GCS MD → RAG import
-# 기타: export/copy → GCS → RAG import (Drive 네이티브 커넥터 미사용)
-# QG_MODE=log 기본 — 품질 게이트는 파서 로그, 배치 중단 없음
-# Scheduler: 0 0 * * * Asia/Seoul
-# =============================================================================
-#
-#   Scheduler / 수동 실행
-#     → for each driveId
-#         → backfill=true 이면 /sync/backfill (초기 전체)
-#            아니면 /sync/changes (델타; 최초 토큰 없으면 backfill 스냅샷)
-#         → for each change → ingest|delete
-#         → /sync/index-gcs-async → job poll → reconcile → commit-token
-#
-
 main:
   params: [args]
   steps:
@@ -27,13 +11,10 @@ main:
           - sync_url: ${default(map.get(args, "syncUrl"), "https://SYNC_SERVICE_URL")}
           - parser_url: ${default(map.get(args, "parserUrl"), "https://PARSER_SERVICE_URL")}
           - drive_ids: ${default(map.get(args, "driveIds"), [])}
-          # backfill(최대 50)와 reindex-pending(최대 25)이 함께 쓰는 값이다.
           - index_batch_size: ${default(map.get(args, "indexBatchSize"), 24)}
           - do_backfill: ${default(map.get(args, "backfill"), false)}
           - run_id: ${default(map.get(args, "runId"), "")}
           - department_code: ${default(map.get(args, "departmentCode"), "")}
-          # 과거 PARSED/DLQ 복구는 일반 변경분 동기화와 분리한다. 기본 실행에
-          # 섞으면 변경 1건이어도 전역 backlog 200건 때문에 수분씩 지연된다.
           - run_recovery: ${default(map.get(args, "runRecovery"), false)}
           - drive_count: ${len(drive_ids)}
           - drive_index: 0
@@ -42,7 +23,6 @@ main:
           # 델타 1페이지당 변경 건수. Workflows 변수 한도 512KB 대비 안전 마진
           # (200건 ≈ 174KB). 남은 분량은 hasMore 로 이어 처리한다.
           - max_changes: ${default(map.get(args, "maxChanges"), 200)}
-          # 한 실행에서 Drive 하나가 돌 수 있는 최대 페이지 (무한 루프 방지)
           - max_pages: ${default(map.get(args, "maxPages"), 50)}
           - totals:
               listed: 0
@@ -56,11 +36,8 @@ main:
               splitQueued: 0
               excluded: 0
               indexFailed: 0
-              # DLQ·분할 대기로 보낸 문서. failed 와 분리한다 — 아래 commit_token
-              # 주석 참고. 이 값은 커밋을 막지 않는다.
               parked: 0
 
-    # Explicit selected-file mode never lists changes or advances a Drive token.
     - selected_file_mode:
         switch:
           - condition: ${map.get(args, "reprocessFile") != null}
@@ -81,7 +58,6 @@ main:
           value: drive_id
           in: ${drive_ids}
           steps:
-            # Drive 진입 시 1회. 페이지 루프는 sync_page 부터 반복한다.
             - reset_drive_state:
                 assign:
                   - drive_index: ${drive_index + 1}
@@ -89,7 +65,6 @@ main:
                   - drive_has_more: true
                   - drive_backfill: ${do_backfill}
 
-            # ----- 페이지 루프 시작 (hasMore 인 동안 반복) -----
             - sync_page:
                 assign:
                   - drive_page: ${drive_page + 1}
@@ -116,7 +91,6 @@ main:
                   - drive_parked: 0
                   - drive_has_more: false
 
-            # ----- 1) 초기 backfill-run 또는 Changes 델타 -----
             - fetch_source:
                 switch:
                   - condition: ${drive_backfill == true}
@@ -150,7 +124,6 @@ main:
                             steps:
                               - tally_backfill_source_failure:
                                   assign:
-                                    # 응답을 받지 못한 Drive 자체를 운영 실패 1건으로 집계한다.
                                     - drive_failed: ${drive_failed + 1}
                                     - totals.failed: ${totals.failed + 1}
                               - log_backfill_source_failure:
@@ -159,7 +132,6 @@ main:
                                     severity: "ERROR"
                                     text: ${"backfill-run exhausted retries drive=" + drive_id + " " + json.encode_to_string(backfill_err)}
                               - continue_after_backfill_source_failure:
-                                  # backfill_resp가 없으므로 성공 응답 처리 단계를 건너뛴다.
                                   next: continue
                       - apply_backfill_totals:
                           assign:
@@ -179,7 +151,6 @@ main:
                             - pending_uris: []
                             - pending_file_ids: []
                             - change_list: []
-                            # backfill-run 이 드라이브 전체를 끝내므로 페이지 루프는 여기서 종료
                             - drive_backfill: false
                             - drive_has_more: false
                             - totals.listed: ${totals.listed + default(backfill_resp.body.totals.listed, 0)}
@@ -226,7 +197,6 @@ main:
                             steps:
                               - tally_changes_source_failure:
                                   assign:
-                                    # 응답을 받지 못한 Drive 자체를 운영 실패 1건으로 집계한다.
                                     - drive_failed: ${drive_failed + 1}
                                     - totals.failed: ${totals.failed + 1}
                               - log_changes_source_failure:
@@ -235,7 +205,6 @@ main:
                                     severity: "ERROR"
                                     text: ${"fetch-changes exhausted retries drive=" + drive_id + " " + json.encode_to_string(changes_err)}
                               - continue_after_changes_source_failure:
-                                  # changes_resp가 없으므로 assign_changes 이후를 실행하지 않는다.
                                   next: continue
 
             # 토큰이 없으면(최초 실행) 전체 스냅샷을 워크플로우 변수에 올릴 수 없다.
@@ -269,7 +238,6 @@ main:
                   severity: "INFO"
                   text: ${"drive=" + drive_id + " page=" + string(drive_page) + " mode=" + default(changes_resp.body.mode, "delta") + " changes=" + string(len(change_list)) + " hasMore=" + string(drive_has_more)}
 
-            # ----- 2) 문서 단위 MIME 분기 (부분 실패 격리) -----
             - process_each:
                 for:
                   value: change
@@ -277,7 +245,6 @@ main:
                   steps:
                     - route_switch:
                         switch:
-                          # === 삭제 ===
                           - condition: ${change.route == "DELETE" or change.removed == true}
                             steps:
                               - do_delete:
@@ -328,9 +295,6 @@ main:
                                     severity: "INFO"
                                     text: ${"sync-file-result status=DELETED " + json.encode_to_string(change)}
 
-                          # === 대상 폴더 밖 — 집계에서 제외 ===
-                          # SKIP(대상인데 처리 못 함)과 구분한다. reconcile 이
-                          # listed 에서 차감하므로 skipped 가 진짜 신호가 된다.
                           - condition: ${change.route == "EXCLUDE"}
                             steps:
                               - do_exclude:
@@ -371,7 +335,6 @@ main:
                                     severity: "INFO"
                                     text: ${"sync-file-result status=EXCLUDED " + json.encode_to_string(change)}
 
-                          # === 미지원 스킵 ===
                           - condition: ${change.route == "SKIP"}
                             steps:
                               - do_skip:
@@ -393,10 +356,6 @@ main:
                                         parserUrl: ${parser_url}
                                       timeout: 120
                                     result: skip_resp
-                                  # 범위 밖 파일의 정리는 fail closed(500)라 일시적
-                                  # 오류도 실패로 온다. 재시도가 없으면 그 1건이
-                                  # drive_failed 를 세워 pageToken 을 영구 미커밋으로
-                                  # 굳히고, 다음 실행이 같은 페이지를 다시 받는다.
                                   retry:
                                     predicate: ${http.default_retry_predicate}
                                     max_retries: 3
@@ -428,7 +387,6 @@ main:
                                     severity: "INFO"
                                     text: ${"sync-file-result status=SKIPPED " + json.encode_to_string(change)}
 
-                          # === HWP/HWPX · Google export · 원본 복사 · 이미지 OCR → GCS ===
                           - condition: ${change.route == "HWP_PARSE" or change.route == "GOOGLE_EXPORT" or change.route == "FILE_COPY" or change.route == "IMAGE_OCR"}
                             steps:
                               - do_ingest:
@@ -446,7 +404,6 @@ main:
                                         modifiedTime: ${change.modifiedTime}
                                         removed: false
                                         webViewLink: ${change.webViewLink}
-                                        # 다운로드 전에 크기를 거르기 위해 전달
                                         sizeBytes: ${default(map.get(change, "sizeBytes"), null)}
                                         route: ${change.route}
                                         parserUrl: ${parser_url}
@@ -520,12 +477,6 @@ main:
                                             args:
                                               severity: "INFO"
                                               text: ${"sync-file-result status=SKIPPED " + json.encode_to_string(change)}
-                                    # DLQ·SPLIT_QUEUED 는 '실패'가 아니라 **판정을 마치고
-                                    # 별도 큐로 보낸 것**이다. failed 로 세면 아래
-                                    # commit_token 이 막히는데, 다시 처리해도 같은 결과라
-                                    # 그 한 건이 드라이브의 pageToken 을 영구히 세운다
-                                    # (같은 페이지가 매일 재생되고 뒷 페이지는 영영 처리 안 됨).
-                                    # parked 로 분리해 커밋을 통과시키고, 문서는 큐에 남긴다.
                                     - condition: ${ingest_resp.body.status == "DLQ"}
                                       steps:
                                         - tally_dlq:
@@ -564,7 +515,6 @@ main:
                                               severity: "WARNING"
                                               text: ${"unexpected ingest status fileId=" + change.fileId + " status=" + default(ingest_resp.body.status, "null")}
 
-                          # === 알 수 없는 route ===
                           - condition: true
                             steps:
                               - unknown_route:
@@ -581,11 +531,6 @@ main:
                         assign:
                           - _: null
 
-            # ----- 3) GCS → RAG Engine 증분 import -----
-            # 페이지 하나가 모은 URI 를 한 번에 보낸다. indexBatchSize 는 여기 쓰이지
-            # 않는다(서버 안에서 도는 backfill-run/복구 전용). 델타의 실질 배치 크기는
-            # maxChanges 다 — 나눠 보내면 호출마다 코퍼스를 다시 순회하게 되므로,
-            # 색인 부하를 줄이려면 maxChanges 를 낮춰야 한다.
             - index_if_needed:
                 switch:
                   - condition: ${len(pending_uris) > 0}
@@ -606,10 +551,6 @@ main:
                           except:
                             as: index_err
                             steps:
-                              # 색인 실패를 failed 에 더하면 이중 집계다 — 그 파일은
-                              # 이미 gcsUploaded 로 세어져 reconcile 의 listed 항등식이
-                              # 깨진다(unaccounted 가 음수). 별도 지표로 두고, 커밋은
-                              # 아래 drive_indexed == drive_uris 가 막는다.
                               - index_fail:
                                   assign:
                                     - drive_index_failed: ${drive_index_failed + len(pending_uris)}
@@ -629,7 +570,6 @@ main:
                                           args:
                                             severity: "INFO"
                                             text: ${"sync-file-result status=INDEX_FAILED " + json.encode_to_string(failed_item)}
-                              # 색인 실패 시 pageToken 미커밋 → 다음 배치에서 재시도
                               - skip_commit_on_index_fail:
                                   next: reconcile_drive
                       - init_index_poll:
@@ -700,7 +640,6 @@ main:
                           assign:
                             - _: null
 
-            # ----- 4) 정합성 검증 (Drive 조회 vs GCS 업로드·색인) -----
             - reconcile_drive:
                 try:
                   call: http.post
@@ -741,7 +680,6 @@ main:
                 assign:
                   - drive_reconciled: ${default(recon_resp.body.ok, false)}
 
-            # ----- 5) pageToken 커밋 (전체 처리·색인·정합성 검증 성공 시에만) -----
             - commit_token:
                 switch:
                   - condition: ${pending_page_token != "" and drive_failed == 0 and drive_indexed + drive_deferred_uris == drive_uris and drive_reconciled == true}
@@ -778,7 +716,6 @@ main:
                                     severity: "ERROR"
                                     text: ${"commit-token exhausted retries drive=" + drive_id + " " + json.encode_to_string(commit_err)}
                               - continue_after_commit_failure:
-                                  # 토큰은 미커밋 상태이므로 다음 실행에서 안전하게 재처리한다.
                                   next: continue
                   - condition: true
                     steps:
@@ -788,9 +725,6 @@ main:
                             severity: "WARNING"
                             text: ${"pageToken NOT committed drive=" + drive_id + " failed=" + string(drive_failed) + " indexFailed=" + string(drive_index_failed) + " reconciled=" + string(drive_reconciled) + " gcs=" + string(drive_gcs) + " uris=" + string(drive_uris) + " indexed=" + string(drive_indexed) + " (parked=" + string(drive_parked) + " 는 커밋을 막지 않는다)"}
 
-            # ----- 6) 다음 페이지 -----
-            # 커밋 조건과 동일해야 한다. 토큰이 커밋되지 않았는데 되돌아가면 같은
-            # 페이지를 무한히 다시 받는다. 남은 분량은 다음 실행이 이어받는다.
             - next_page:
                 switch:
                   - condition: ${drive_has_more == true and pending_page_token != "" and drive_failed == 0 and drive_indexed + drive_deferred_uris == drive_uris and drive_reconciled == true and drive_page < max_pages}
@@ -803,9 +737,6 @@ main:
                             severity: "WARNING"
                             text: ${"delta paging stopped with work remaining drive=" + drive_id + " page=" + string(drive_page) + " failed=" + string(drive_failed) + " reconciled=" + string(drive_reconciled) + " — resumes next run"}
 
-    # ----- 6) 명시적 복구: 색인 누락(PARSED) → 재색인, 실패(FAILED/DLQ) → ingest 재시도 -----
-    # 일반 변경분/백필 실행은 여기서 끝난다. 전역 backlog 복구는 runRecovery=true
-    # 로 별도 실행해야 현재 변경분의 소요 시간과 성공 여부를 오염시키지 않는다.
     - check_recovery_enabled:
         switch:
           - condition: ${run_recovery == false}
@@ -929,8 +860,6 @@ main:
                   call: sys.log
                   args:
                     severity: "WARNING"
-                    # ok 를 뒤집지 않는다 — 다시 돌려도 같은 결과라 실행 실패로
-                    # 보고하면 매일 거짓 경보가 된다. 대신 여기서 눈에 띄게 남긴다.
                     text: ${"parked " + string(totals.parked) + " docs (dlq=" + string(totals.dlq) + " splitQueued=" + string(totals.splitQueued) + ") — 큐에 남아 있고 자동 회수되지 않는다"}
 
     # Workflow 실행 상태도 실제 결과와 같아야 한다. return ok=false 는 콘솔에서

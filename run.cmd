@@ -1,6 +1,5 @@
 @echo off
 setlocal
-rem GCP RAG department console launcher. Usage: run.cmd [--port N] [--no-browser]
 cd /d "%~dp0"
 
 set "VENV=%~dp0.venv"
@@ -17,7 +16,6 @@ if not exist "%PY%" (
 )
 
 :deps
-rem Reinstall only when requirements-gui.txt changed since the last install.
 fc /b requirements-gui.txt "%STAMP%" >nul 2>&1
 if not errorlevel 1 goto launch
 echo [run] Installing GUI dependencies

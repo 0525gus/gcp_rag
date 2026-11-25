@@ -1,15 +1,3 @@
-"""
-동기화 HTTP 서비스 — GCS 단일 진입점 파이프라인.
-
-Workflows 호출 순서:
-  1) POST /sync/changes       — 델타 + MIME 라우팅 (pageToken 미커밋)
-  2) POST /sync/ingest        — Drive→GCS (HWP 파싱 / Google export / 원본 복사)
-  3) POST /sync/index-gcs     — RAG Engine이 GCS만 import
-  4) POST /sync/delete        — 코퍼스·GCS 정리
-  5) POST /sync/commit-token  — 배치 성공 후 pageToken 커밋
-  6) POST /sync/reconcile     — Drive 조회 vs GCS 업로드·색인 정합성
-"""
-
 from __future__ import annotations
 
 import io
@@ -33,7 +21,6 @@ _ROOT = Path(__file__).resolve().parents[2]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-# shared 모듈 import
 from shared.config import Settings, UnknownDriveError, get_settings  # noqa: E402
 from shared.drive import DriveClient, parse_drive_size
 from services.sync import metadata_refresh
@@ -81,7 +68,6 @@ from shared.index_guard import (  # noqa: E402
 setup_logging()
 logger = logging.getLogger("sync_service")
 
-# 직접 경로(_ingest_direct) 중 텍스트는 본문에 breadcrumb를 직접 삽입
 _TEXT_COPY_MIMES = frozenset(
     {
         "text/plain",
@@ -105,12 +91,10 @@ _SPREADSHEET_COPY_MIMES = frozenset(
 class PdfTextProfile:
     pages: int
     text_pages: int
-    # 원본을 Vertex로 보낼 수 없는 사유. None이면 텍스트 페이지가 하나 이상 있다.
     reason: str | None
 
     @property
     def image_dominant(self) -> bool:
-        """이미지만 있거나 텍스트 페이지가 절반 미만인 PDF — OCR 대상."""
         return self.pages > 0 and self.text_pages * 2 < self.pages
 
 
@@ -151,7 +135,7 @@ def _pdf_text_profile(data: bytes) -> PdfTextProfile:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    get_settings()  # 잘못된 학과 맵으로 readiness 성공을 보고하지 않는다.
+    get_settings()
     yield
 
 
@@ -165,20 +149,17 @@ class DriveIdBody(BaseModel):
 
 
 class BootstrapBody(DriveIdBody):
-    # 기존 스냅샷을 의도적으로 건너뛰는 운영자 전용 동작. 기본은 fail closed.
     baseline_only: bool = Field(default=False, alias="baselineOnly")
 
 
 class BackfillBody(BaseModel):
     drive_id: str = Field(..., alias="driveId")
-    # true면 기존 pageToken이 있어도 전체 스캔 (초기 셋업용)
     force: bool = False
 
     model_config = {"populate_by_name": True}
 
 
 class ChangesBody(DriveIdBody):
-    # 한 번에 반환할 최대 변경 건수 (미지정 시 SYNC_MAX_CHANGES).
     max_changes: int | None = Field(default=None, alias="maxChanges", ge=1, le=2000)
 
 
@@ -195,11 +176,9 @@ class IngestBody(BaseModel):
     name: str = ""
     mime_type: str = Field(default="", alias="mimeType")
     modified_time: str | None = Field(default=None, alias="modifiedTime")
-    # 변환기 변경 후 원본 수정 시각을 보존하면서 정규화 산출물을 다시 만든다.
     refresh_content: bool = Field(default=False, alias="refreshContent")
     removed: bool = False
     web_view_link: str | None = Field(default=None, alias="webViewLink")
-    # Drive 가 알려준 원본 크기. 다운로드 전에 거르는 데 쓴다(없으면 사후 검사만).
     size_bytes: int | None = Field(default=None, alias="sizeBytes")
     route: str | None = None
     parser_url: str = Field(default="", alias="parserUrl")
@@ -243,8 +222,6 @@ class DeleteBody(BaseModel):
 
 
 class BackfillRagMappingsBody(DriveIdBody):
-    # 기본은 조회만 한다. 운영자가 결과 건수를 확인한 뒤 명시적으로 false를
-    # 보내야 Firestore를 변경하므로 잘못된 학과/코퍼스 선택을 조기에 잡을 수 있다.
     dry_run: bool = Field(default=True, alias="dryRun")
 
 
@@ -252,7 +229,6 @@ class ReconcileBody(BaseModel):
     drive_id: str = Field(..., alias="driveId")
     listed: int
     gcs_uploaded: int = Field(..., alias="gcsUploaded")
-    # 업로드된 GCS URI 총수(파일당 원본+.meta.md면 2). indexed 정합성 비교 기준.
     uris: int = 0
     indexed: int
     index_job_id: str = Field(default="", alias="indexJobId")
@@ -263,14 +239,7 @@ class ReconcileBody(BaseModel):
     unchanged: int = 0
     dlq: int = 0
     split_queued: int = Field(default=0, alias="splitQueued")
-    # 처리를 **마쳤고** 별도 큐(DLQ·분할 대기)로 보낸 문서 수. dlq/splitQueued 의 합과
-    # 같지만 그쪽은 세부 분류라 accounted 에는 이 값만 더한다.
-    #
-    # failed 와 분리하는 이유는 pageToken 커밋 때문이다. failed 는 '다시 하면 될 수도
-    # 있는 것'이라 토큰을 막아야 하지만, parked 는 '다시 해도 같은 결과'다. 막으면
-    # 그 한 건 때문에 같은 페이지가 매일 재생되고 드라이브가 영구 정지한다.
     parked: int = 0
-    # 동기화 지정 폴더 밖 — 애초에 우리 대상이 아니므로 listed 에서 차감한다.
     excluded: int = 0
 
     model_config = {"populate_by_name": True}
@@ -290,7 +259,6 @@ def _route_file_meta(
     drive: DriveClient,
     enable_image_ocr: bool = False,
 ) -> dict[str, Any] | None:
-    """Drive files.list 항목 → workflow change entry. 폴더는 None."""
     mime = file_meta.get("mimeType") or ""
     if mime == "application/vnd.google-apps.folder" or file_meta.get("name") == "metadata.json":
         return None
@@ -327,11 +295,6 @@ def _build_backfill_changes(
     drive: DriveClient,
     settings: Settings,
 ) -> dict[str, Any]:
-    """현재 Drive 스냅샷과 커밋 후보 pageToken을 반환한다.
-
-    후보 토큰은 호출자가 스냅샷 처리를 성공한 뒤에만 저장해야 한다. 여기서 먼저
-    저장하면 중간 실패 후 다음 실행이 미처리 스냅샷을 건너뛰게 된다.
-    """
     folder_ids = settings.sync_folder_id_list
     token = store.get_start_page_token(drive_id)
     if not token:
@@ -351,7 +314,6 @@ def _build_backfill_changes(
             continue
         if entry.get("skipReason") == "out_of_folder_scope":
             skipped_out_of_scope += 1
-            # backfill에서는 범위 밖은 목록에 넣지 않음
             continue
         if entry["route"] == RouteKind.SKIP.value:
             continue
@@ -371,11 +333,6 @@ def _build_backfill_changes(
 
 @app.post("/sync/bootstrap")
 def bootstrap(body: BootstrapBody) -> dict[str, str]:
-    """향후 변경만 추적할 기준점을 명시적으로 생성한다.
-
-    일반 초기 동기화는 /sync/changes의 backfill 경로를 사용해야 한다. 기존 문서를
-    건너뛰는 위험한 동작은 baselineOnly=true를 지정한 경우에만 허용한다.
-    """
     store = DocStateStore()
     drive = DriveClient()
     existing = store.get_start_page_token(body.drive_id)
@@ -400,7 +357,6 @@ def bootstrap(body: BootstrapBody) -> dict[str, str]:
 
 @app.post("/sync/backfill")
 def backfill(body: BackfillBody) -> dict[str, Any]:
-    """초기 셋업용 파일 목록만 반환 (소량/디버그). 대량은 /sync/backfill-run 사용."""
     store = DocStateStore()
     drive = DriveClient()
     settings = _settings_for_drive(get_settings(), body.drive_id)
@@ -455,7 +411,6 @@ def _publish_backfill_progress(
 
 @app.post("/sync/backfill-run")
 def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
-    """드라이브당 하나만 돌도록 잠근 뒤 실제 백필을 수행한다."""
     store = DocStateStore()
     lock_name = f"backfill:{body.drive_id}"
     if not store.try_acquire_lock(lock_name, ttl_seconds=_BACKFILL_LOCK_TTL_SECONDS):
@@ -478,10 +433,6 @@ def backfill_run(body: BackfillRunBody) -> dict[str, Any]:
 
 
 def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[str, Any]:
-    """초기 전체 적재: Drive 스냅샷 → ingest(병렬) → index-gcs 배치.
-
-    Workflow에 수천 개 change를 올리면 메모리 한도에 걸리므로 init은 여기서 수행.
-    """
     import threading
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -519,15 +470,8 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
         "unchanged": 0,
         "dlq": 0,
         "splitQueued": 0,
-        # 처리를 마치고 별도 큐로 보낸 문서. failed 와 달리 커밋을 막지 않는다.
         "parked": 0,
-        # 색인이 덜 된 URI 수. failed 와 분리한다 — reconcile 로 가는 값들과 단위가
-        # 달라(그쪽 accounted 는 '파일 수' 기준) 섞으면 없는 불일치가 보고된다.
-        # pageToken 커밋 판단에만 쓴다.
-        # 키 이름은 워크플로우가 읽는 것과 같아야 한다(totals.indexFailed) —
-        # 다르면 커밋 게이트가 색인 실패를 못 보고 항상 0 으로 통과한다.
         "indexFailed": 0,
-        # 백필은 범위 밖 파일을 목록에 넣지 않으므로 스냅샷 집계를 그대로 쓴다
         "excluded": int(snapshot.get("skippedOutOfScope") or 0),
     }
     pending_uris: list[str] = []
@@ -535,16 +479,9 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     processed_count = 0
     last_progress_at = 0.0
     progress_context: dict[str, Any] = {}
-    # lock: totals·pending 접근용(짧게). index_lock: import 직렬화용(길게).
-    # 하나로 합치면 import 가 도는 수십 초 동안 워커 8개가 집계조차 못 하고 멈춘다
-    # — 동시성이 사실상 1로 붕괴하고, 그 지연이 Cloud Run 타임아웃까지 이어진다.
     lock = threading.Lock()
     index_lock = threading.Lock()
 
-    # 스냅샷 전체를 미리 지우면 안 된다. 재백필에서는 대부분의 파일이 UNCHANGED 로
-    # 빠져 재import 되지 않으므로, 미리 지운 청크가 그대로 유실된다 — 그러고도
-    # totals 는 unchanged 로 세고 ok=true 로 보고했다. 삭제는 import 하는 배치에서만
-    # 한다(_import_and_mark). 클라이언트를 공유해 코퍼스 순회는 1회로 유지한다.
     rag = RagEngineClient(settings)
 
     def publish_progress(phase: str, *, force: bool = False) -> None:
@@ -568,7 +505,6 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     publish_progress("INGESTING", force=True)
 
     def _take_batch(min_size: int) -> tuple[list[str], list[str]] | None:
-        """조건을 만족하면 대기열을 통째로 떼어 온다. 반드시 lock 밖에서 import 할 것."""
         nonlocal pending_uris, pending_ids
         with lock:
             if len(pending_uris) < min_size or not pending_uris:
@@ -578,7 +514,6 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
             return uris, ids
 
     def flush_index(min_size: int = 1) -> int:
-        """떼어 온 배치를 import 한다. 실패하면 그 배치의 파일 수를 돌려준다."""
         batch = _take_batch(min_size)
         if batch is None:
             return 0
@@ -604,10 +539,6 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
                     corpus_type="FACULTY",
                 )
                 indexed = part.imported
-                # 학생 코퍼스도 같은 배치에서 맞춘다. 델타 경로는 /sync/index-gcs
-                # 가 대신 해 주지만 백필은 그 엔드포인트를 거치지 않는다. 여기를
-                # 빼면 **초기 적재 직후 학생 코퍼스가 통째로 비어 있고**, 그 문서들은
-                # 이미 INDEXED 라 이후 델타에도 안 걸려 영영 안 채워진다.
                 student = _sync_student_corpus(uris, ids, settings, store)
                 if split_enabled:
                     if not bool(student.get("ok", True)):
@@ -619,8 +550,6 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
             return len(dict.fromkeys(ids))
         with lock:
             totals["indexed"] += indexed
-            # 배치가 통째로 죽는 것(위 except)과 달리, 일부 URI 만 색인이 안 된
-            # 경우는 예외가 없다. 여기서 세지 않으면 커밋 게이트가 통과해 버린다.
             totals["indexFailed"] += max(0, len(uris) - indexed)
         publish_progress("INGESTING", force=True)
         return 0
@@ -705,8 +634,6 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
                 elif status in {"SKIPPED", "skipped"}:
                     totals["skipped"] += 1
                 elif status == "DLQ":
-                    # 델타 경로와 같은 이유로 failed 가 아니라 parked 다 — 다시 돌려도
-                    # 같은 결과인 문서가 pageToken 커밋을 막으면 백필이 영영 안 끝난다.
                     totals["dlq"] += 1
                     totals["parked"] += 1
                 elif status == "SPLIT_QUEUED":
@@ -725,13 +652,9 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
     if index_failed:
         totals["indexFailed"] += index_failed
 
-    # 색인 실패를 failed 에 더하면 이중 집계다 — 그 파일은 이미 gcsUploaded 로
-    # 세어져 있어서 reconcile 의 listed 항등식이 깨진다(unaccounted 가 음수).
-    # 별도 지표로 두고, 커밋 게이트에서는 워크플로우와 같은 항등식으로 막는다.
     index_complete = totals["indexed"] == totals["uris"]
     ok = totals["failed"] == 0 and totals["indexFailed"] == 0 and index_complete
 
-    # 색인이 덜 된 채 토큰을 커밋하면 그 변경분을 다시 볼 기회가 사라진다.
     if pending_page_token and ok:
         store.set_start_page_token(body.drive_id, pending_page_token)
 
@@ -758,19 +681,6 @@ def _backfill_run_locked(body: BackfillRunBody, store: DocStateStore) -> dict[st
 
 @app.post("/sync/changes")
 def list_changes(body: ChangesBody) -> dict[str, Any]:
-    """델타 조회. pageToken은 commit-token 전까지 커밋하지 않음.
-
-    한 번에 최대 maxChanges 건만 반환하고, 남으면 hasMore=true 로 알린다. 호출측은
-    hasMore 가 false 가 될 때까지 (처리 → 커밋 → 재호출) 을 반복한다. 배치마다
-    토큰을 커밋할 수 있으므로 중간에 실패해도 앞 배치는 확정된다.
-
-    토큰이 없으면(최초) 목록 대신 mode=backfill_required 를 돌려준다. 드라이브 전체
-    스냅샷은 크기가 델타와 달리 상한이 없고 재개 지점도 없어서, 서버 안에서 끝내는
-    /sync/backfill-run 이 유일하게 안전한 경로다.
-
-    SYNC_FOLDER_IDS가 있으면 해당 폴더 트리 밖 파일은 SKIP.
-    삭제(removed)는 이전에 색인됐을 수 있어 범위 밖이어도 DELETE 유지.
-    """
     store = DocStateStore()
     drive = DriveClient()
     settings = _settings_for_drive(get_settings(), body.drive_id)
@@ -818,9 +728,6 @@ def list_changes(body: ChangesBody) -> dict[str, Any]:
                 ch.file_id, folder_ids, parents=ch.parents or None
             )
             if not in_scope:
-                # 백필과 달리 델타에서는 목록에서 빼지 않고 EXCLUDE 로 흘린다.
-                # 이전에 색인된 문서가 폴더 밖으로 나간 경우, 목록에서 빼버리면
-                # 코퍼스·GCS 잔존물을 회수할 기회 자체가 사라지기 때문이다.
                 kind = RouteKind.EXCLUDE
                 skip_reason = "out_of_folder_scope"
                 skipped_out_of_scope += 1
@@ -892,15 +799,6 @@ _OUT_OF_SCOPE_REASON = "out_of_folder_scope"
 
 
 def _already_evicted(existing: DocState | None) -> bool:
-    """이 파일의 범위 밖 정리가 이미 성공적으로 끝났는가.
-
-    상태만으로는 판단할 수 없다 — 지원하지 않는 MIME 으로 바뀐 문서도 코퍼스에
-    청크를 남긴 채 SKIPPED 가 된다. 정리를 마친 뒤에만 찍히는
-    ``error=out_of_folder_scope`` 마커까지 맞을 때만 생략한다.
-
-    EXCLUDED 가 정상 상태이고, SKIPPED 는 상태 신설 이전에 쓰인 값이다.
-    마이그레이션 전 잔여 문서도 정리를 다시 돌리지 않도록 둘 다 받는다.
-    """
     return bool(
         existing
         and existing.status in {DocStatus.EXCLUDED, DocStatus.SKIPPED}
@@ -909,7 +807,6 @@ def _already_evicted(existing: DocState | None) -> bool:
 
 
 def _delete_gcs_objects_for_file(gcs: GcsClient, bucket: str, file_id: str) -> int:
-    """Delete one file's objects without matching longer file ids."""
     if not bucket:
         return 0
     blobs = list(
@@ -942,24 +839,15 @@ def _delete_gcs_objects_for_file(gcs: GcsClient, bucket: str, file_id: str) -> i
 def _cleanup_out_of_scope_file(
     gcs: GcsClient, settings: Settings, file_id: str
 ) -> tuple[bool, int, int]:
-    """Best-effort both cleanup targets, then fail if either target errored."""
     failures: list[Exception] = []
     rag_deleted = False
     source_deleted = 0
     hwp_original_deleted = 0
     try:
-        # False means no matching RAG file remained, which is an idempotent success.
-        # **settings 를 넘긴다.** 인자를 빼면 전역 기본 코퍼스를 지우게 되어,
-        # 학과를 갈라 놓아도 교직원 쪽 문서는 실제 코퍼스에 그대로 남는다
-        # (바로 아래 학생 코퍼스는 처음부터 settings 를 쓰고 있었다 — 비대칭이었다).
         rag_deleted = RagEngineClient(settings).delete_by_file_id(file_id)
     except Exception as exc:
         failures.append(exc)
         logger.exception("out-of-scope RAG cleanup failed: %s", file_id)
-    # 분리가 켜져 있으면 학생 코퍼스에서도 내린다. 인자 없는 클라이언트는 기본
-    # (=교직원) 코퍼스만 보므로, 여기를 빼면 범위 밖으로 나간 문서가 교직원
-    # 검색에서만 사라지고 **학생에게는 계속 검색된다** — 내려야 할 자료가
-    # 안 내려가는 쪽이라 조용히 넘기지 않고 실패로 올린다.
     if settings.audience_split_enabled:
         try:
             student_deleted = RagEngineClient(
@@ -991,7 +879,6 @@ def _cleanup_out_of_scope_file(
 
 @app.post("/sync/ingest")
 def ingest(body: IngestBody) -> dict[str, Any]:
-    """Drive 문서를 GCS 정규화 버킷에 적재. RAG import는 /sync/index-gcs."""
     # 빈 fileId 는 Firestore 문서 경로를 `doc_state/` 로 만들어 400 을 던진다.
     # 호출측을 고쳐도(shared/drive.py) 이 엔드포인트가 500 으로 죽을 이유는 없다.
     if not body.file_id.strip():
@@ -1023,12 +910,6 @@ def _ingest_locked(
     body: IngestBody, *, store: DocStateStore, settings: Settings,
     gcs: GcsClient, drive: DriveClient,
 ) -> dict[str, Any]:
-    """ingest 본체. 클라이언트를 주입받아 대량 경로에서 재사용할 수 있게 한다.
-
-    파일마다 DriveClient 를 새로 만들면 인증 + discovery build 가 파일 수만큼 돌고,
-    parents/name 캐시가 인스턴스 단위라 조상 폴더를 파일마다 다시 조회하게 된다
-    (N × 폴더깊이 회의 files.get). 백필에서 이 비용이 지배적이다.
-    """
     if body.name == "metadata.json" and not body.removed:
         existing = store.get(body.file_id)
         if existing and existing.status not in {DocStatus.DELETED, DocStatus.EXCLUDED}:
@@ -1039,8 +920,6 @@ def _ingest_locked(
                               error="metadata_sidecar"))
         return {"fileId": body.file_id, "status": "EXCLUDED", "reason": "metadata_sidecar"}
     folder_ids = settings.sync_folder_id_list
-    # EXCLUDE 는 list_changes 가 같은 folder_ids 로 이미 판정해 붙인 라우트다.
-    # 여기서 is_in_sync_scope 를 다시 부르면 Drive 조회만 한 번 더 든다.
     routed_out_of_scope = body.route == RouteKind.EXCLUDE.value
     if not body.removed and (
         routed_out_of_scope
@@ -1050,9 +929,6 @@ def _ingest_locked(
         source_deleted = 0
         hwp_original_deleted = 0
         if _already_evicted(store.get(body.file_id)):
-            # 이미 이 사유로 정리를 마친 파일이다. 다시 부르면 코퍼스를 파일마다
-            # 전수 순회하는데(정리할 것도 없이), 범위 밖 파일은 바뀔 때마다 델타에
-            # 다시 실려 오므로 그 비용이 매 실행 반복된다.
             return {
                 "fileId": body.file_id,
                 "status": DocStatus.EXCLUDED.value,
@@ -1089,9 +965,6 @@ def _ingest_locked(
                     detail=f"{_OUT_OF_SCOPE_CLEANUP_ERROR}: state_record_failed",
                 ) from state_exc
             raise HTTPException(status_code=500, detail=reason[:500]) from exc
-        # 잔존물을 회수한 뒤에야 EXCLUDED 로 확정한다. SKIPPED 로 찍으면
-        # '대상인데 처리 못 함'과 섞여 집계가 흐려진다 — EXCLUDED 는 reconcile 의
-        # listed 에서 차감되고 cleanup 의 살아있는 상태 목록에서도 빠진다.
         store.upsert(
             DocState(
                 file_id=body.file_id,
@@ -1131,7 +1004,6 @@ def _ingest_locked(
         body.mime_type, body.name, removed=body.removed,
         enable_image_ocr=image_ocr_enabled,
     )
-    # 과거 큐에 남은 route 값으로 OCR 허용 여부를 우회하지 않는다.
     if route != RouteKind.DELETE and not body.removed and (body.mime_type.lower() in IMAGE_OCR_MIME or route == RouteKind.IMAGE_OCR):
         route = classify_route(
             body.mime_type, body.name,
@@ -1145,7 +1017,6 @@ def _ingest_locked(
         if body.mime_type.lower() in IMAGE_OCR_MIME:
             existing = store.get(body.file_id)
             if existing and existing.status == DocStatus.INDEXED:
-                # 끄기는 추가 OCR을 멈출 뿐, 이전 색인의 메타데이터를 숨기지 않는다.
                 return {"fileId": body.file_id, "status": "SKIPPED", "route": "SKIP"}
         store.upsert(
             DocState(
@@ -1165,7 +1036,6 @@ def _ingest_locked(
 
     if not body.refresh_content and not store.should_reparse(body.file_id, body.modified_time):
         existing = store.get(body.file_id)
-        # path 있고 이미 INDEXED면 스킵. PARSED만 된 문서는 재처리(색인 누락 복구).
         if (
             existing
             and (existing.path or "").strip()
@@ -1207,8 +1077,6 @@ def _ingest_locked(
             mimeType=body.mime_type,
             modifiedTime=body.modified_time,
             route=route.value,
-            # 재시도가 Drive 링크를 복원할 수 있도록 남긴다. 여기서 빠뜨리면
-            # retry-failed 가 sourceUri 를 gs:// 로 덮어쓴다.
             sourceUri=body.web_view_link,
         )
         return {
@@ -1242,14 +1110,6 @@ def _size_gate(
     ext: str,
     limit: int | None = None,
 ) -> dict[str, Any] | None:
-    """크기 체크. 초과 시 FAILED/분할 큐. None이면 통과(크기 미상 포함).
-
-    ``ext`` 는 **실제로 GCS 에 올라갈** 확장자다. 텍스트 FILE_COPY 는 breadcrumb 를
-    붙여 .md 로 올라가므로 원본 MIME 이 아니라 업로드 형식으로 재야 한다.
-
-    ``limit`` 을 주면 RAG 한도 대신 그 값을 쓴다 — HWP 원본처럼 '업로드물이 아니라
-    메모리에 올릴 바이트'를 막을 때 사용한다.
-    """
     if size is None:
         return None
     if limit is None:
@@ -1305,16 +1165,6 @@ def _resolve_path_ctx(drive: DriveClient, body: IngestBody) -> PathContext:
 def _resolve_audience(
     drive: DriveClient, settings: Settings, body: IngestBody
 ) -> Audience:
-    """학생자료 폴더 트리 안이면 STUDENT, 아니면 STAFF.
-
-    판정에 필요한 부모 조회는 `_resolve_path_ctx` 가 이미 훑어 캐시해 둔 것을
-    재사용하므로(DriveClient._parent_cache) Drive 호출이 추가로 들지 않는다.
-
-    실패는 전부 STAFF 로 떨어진다. `is_in_sync_scope` 자체가 부모를 못 읽으면
-    False 를 주므로 이미 그쪽으로 기울어 있지만, 여기서 한 번 더 감싼다 —
-    이 함수가 틀리는 방향은 '학생에게 안 보인다' 여야 하고, 절대 그 반대가
-    되어서는 안 된다.
-    """
     folder_ids = settings.student_folder_id_list
     if not folder_ids:
         return Audience.STAFF
@@ -1381,7 +1231,6 @@ def _gcs_ready(
 
 
 def _cloud_run_auth_headers(audience_url: str) -> dict[str, str]:
-    """동일 프로젝트 Cloud Run 호출용 ID 토큰 (sync → parser)."""
     import google.auth.transport.requests
     import google.oauth2.id_token
 
@@ -1401,8 +1250,6 @@ def _ingest_hwp(
     if not body.parser_url:
         raise ValueError("parserUrl required for HWP_PARSE")
 
-    # 원본을 통째로 메모리에 올리기 전에 막는다. 여기 한도는 RAG import 상한이
-    # 아니라 운영 메모리 상한이다 — 60MB HWP 가 2MB 마크다운이 되는 일도 흔하다.
     src_ext = ".hwpx" if is_hwpx(body.mime_type, body.name) else ".hwp"
     gated = _size_gate(
         store,
@@ -1442,10 +1289,6 @@ def _ingest_hwp(
                 if resp.headers.get("content-type", "").startswith("application/json")
                 else {"detail": resp.text}
             )
-            # 파서는 서로 다른 4가지를 모두 422 로 낸다 — PARSE_FAILED(코드/라이브러리
-            # 결함), EMPTY_TEXT, QUALITY_GATE(임계 미달), FALLBACK_FAILED. 전부
-            # "QUALITY_GATE" 로 적으면 DLQ 에서 '파서가 깨진 것'과 '문서 품질이 낮은
-            # 것'을 구분할 수 없다. 파서가 준 분류를 그대로 쓴다.
             kind = "PARSE_REJECTED"
             if isinstance(detail, dict):
                 inner = detail.get("detail") if isinstance(detail.get("detail"), dict) else detail
@@ -1458,7 +1301,6 @@ def _ingest_hwp(
                 name=body.name,
                 mimeType=body.mime_type,
                 modifiedTime=body.modified_time,
-                # 하드코딩하면 HWPX 문서가 DLQ 에 RHWP 로 남는다.
                 parseRoute=(
                     ParseRoute.HWPX.value
                     if is_hwpx(body.mime_type, body.name)
@@ -1468,9 +1310,6 @@ def _ingest_hwp(
                 path=path_ctx.path,
                 bundle=path_ctx.bundle,
             )
-            # 거부된 원본은 아무도 다시 읽지 않는다 — 재시도도 Drive 에서 새로
-            # 내려받아 같은 경로를 덮어쓴다. 안 지우면 영구 실패 문서만큼 hwp-original 버킷이
-            # 단조 증가한다. 실패해도 DLQ 결과를 뒤집지는 않는다.
             try:
                 gcs.delete(raw_uri)
             except Exception:  # noqa: BLE001
@@ -1496,9 +1335,6 @@ def _ingest_hwp(
         body=md_bytes.decode("utf-8", errors="replace"),
     )
     md_bytes = md_text.encode("utf-8")
-    # 파서 결과는 마크다운이므로 md 한도(10MB)가 적용된다.
-    # 업로드 전에 잰다 — 파서가 이미 같은 경로에 써 둔 객체는 별개지만,
-    # 한도 초과분을 다시 올릴 이유는 없다.
     gated = _size_gate(store, settings, body, len(md_bytes), splittable=True, ext=".md")
     if gated:
         gated["route"] = "HWP_PARSE"
@@ -1508,10 +1344,6 @@ def _ingest_hwp(
     md_uri = gcs.upload_source_md(md_text, body.file_id)
 
     if store.should_skip_reindex(body.file_id, content_hash):
-        # 이미 INDEXED 이고 내용도 그대로다 — modifiedTime 만 전진시킨다.
-        # 여기서 PARSED 로 덮어쓰면 색인된 문서가 '색인 누락'으로 강등된다.
-        # audience 는 같이 넘긴다: 내용이 그대로여도 폴더가 학생↔교직원으로
-        # 옮겨졌으면 대상 코퍼스가 바뀌므로, 안 넘기면 영영 옛 코퍼스에 남는다.
         store.touch_modified_time(
             body.file_id, body.modified_time, audience=audience
         )
@@ -1578,7 +1410,6 @@ def _ingest_image_ocr(
     gated = _size_gate(store, settings, body, len(raw), splittable=False, ext=IMAGE_OCR_MIME[mime], limit=limit)
     if gated:
         return {**gated, "route": RouteKind.IMAGE_OCR.value}
-    # 원본은 기존 원본 버킷에 보관하고, RAG import에는 OCR 본문만 전달한다.
     raw_uri = gcs.upload_bytes(
         raw, settings.gcs_hwp_original_bucket, body.file_id + IMAGE_OCR_MIME[mime], mime,
     )
@@ -1609,7 +1440,6 @@ def _index_ocr_text(
     body: IngestBody, store: DocStateStore, gcs: GcsClient, settings: Settings,
     text: str, audience: Audience, path_ctx: PathContext, route: str,
 ) -> dict[str, Any]:
-    """OCR 본문을 머리말 붙은 .md 하나로 올리고 PARSED로 기록한다."""
     markdown = build_breadcrumb_markdown(
         path=path_ctx.path, bundle=path_ctx.bundle, title=body.name or body.file_id, source_title=path_ctx.source_title, website_url=path_ctx.website_url, body=text,
     )
@@ -1636,11 +1466,6 @@ def _hold_for_admin_review(
     body: IngestBody, store: DocStateStore, gcs: GcsClient, drive: DriveClient,
     settings: Settings, size: int | None, limit: int,
 ) -> dict[str, Any]:
-    """판정 한도를 넘은 PDF. 내려받지 않고 관리자가 확인할 때까지 보류한다.
-
-    SKIPPED는 자동 재시도 대상이 아니다. 파일이 바뀌면(수정 시각 증가) 다시 판정한다.
-    이전 판본이 색인돼 있었다면 지금 판본과 다른 내용이 검색되지 않게 내린다.
-    """
     reason = f"ADMIN_REVIEW_SIZE:{size if size is not None else 'unknown'}>{limit}(.pdf)"
     existing = store.get(body.file_id)
     if existing and existing.status not in {DocStatus.SKIPPED, DocStatus.DELETED, DocStatus.EXCLUDED}:
@@ -1660,11 +1485,6 @@ def _ingest_pdf_ocr(
     body: IngestBody, store: DocStateStore, gcs: GcsClient, drive: DriveClient,
     settings: Settings, data: bytes, audience: Audience, path_ctx: PathContext,
 ) -> dict[str, Any] | None:
-    """이미지 위주 PDF를 Document AI OCR 본문으로 색인한다.
-
-    OCR이 실패하거나 글자가 없으면 None을 돌려 기존 PDF 경로(텍스트 원본 또는
-    경로 사이드카)로 넘긴다. OCR 장애 때문에 문서 자체를 잃지 않기 위해서다.
-    """
     raw_uri = gcs.upload_bytes(
         data, settings.gcs_hwp_original_bucket, f"{body.file_id}.pdf", "application/pdf",
     )
@@ -1686,7 +1506,6 @@ def _ingest_pdf_ocr(
         return None
     result = _index_ocr_text(body, store, gcs, settings, text, audience, path_ctx, "FILE_COPY")
     if result.get("status") == "GCS_READY":
-        # 이전 판본의 원본·분할 조각·사이드카가 남으면 재색인 때 OCR 본문과 함께 두 벌이 된다.
         keep = f"{body.file_id}.md"
         try:
             for name in gcs.list_blob_names_for_file(settings.gcs_source_bucket, body.file_id):
@@ -1720,8 +1539,6 @@ def _ingest_google_export(
     )
     content_hash = sha256_text(f"{sha256_bytes(data)}|{path_ctx.path}|{sidecar}")
     if store.should_skip_reindex(body.file_id, content_hash):
-        # 전진시키지 않으면 should_reparse 가 매 실행 참이 되어 같은 문서를
-        # 매일 다시 export 한다(내용이 그대로인 걸 확인하려고).
         store.touch_modified_time(body.file_id, body.modified_time)
         return {
             "fileId": body.file_id,
@@ -1765,21 +1582,6 @@ def _ingest_sidecar_only(
     drive: DriveClient,
     settings: Settings,
 ) -> dict[str, Any]:
-    """본문 추출 수단이 없는 형식 — 경로 사이드카만 색인한다.
-
-    SKIP 으로 두면 파일명으로도 검색되지 않는다. SKIP 라우트는 GCS 업로드도
-    사이드카도 만들지 않고, 검색단이 SKIPPED 문서를 결과에서 걸러내기까지 한다
-    (services/mcp_server/main.py). "그런 파일이 어디 있다"는 답조차 못 하는 셈이라
-    사이드카만이라도 남긴다.
-
-    원본 바이트는 GCS 에 올리지 않는다 — RAG Engine 이 못 읽는 형식을 색인에
-    넣으면 매번 import 에서 거부된다(암호 xlsx 27건이 상시 실패하던 전례).
-
-    **파일을 내려받지 않는다.** 쓸 데가 없고, ZIP 은 큰 것이 흔하다. 대신 해시를
-    바이트가 아니라 경로·사이드카에서 만든다. 파일명이나 폴더가 바뀌면 사이드카가
-    바뀌어 재색인되고, 내용만 바뀐 경우는 어차피 색인할 본문이 없어 재색인이
-    무의미하므로 건너뛴다.
-    """
     path_ctx = _resolve_path_ctx(drive, body)
     audience = _resolve_audience(drive, settings, body)
     sidecar = build_breadcrumb_markdown(
@@ -1810,8 +1612,6 @@ def _ingest_sidecar_only(
             source_uri=body.web_view_link or uris[0],
             path_ctx=path_ctx,
             audience=audience,
-            # 본문 없는 문서라는 사실이 조회 가능해야 한다. 상태는 색인되므로
-            # INDEXED 로 가지만, 검색 결과의 근거가 파일명뿐임을 여기서 알린다.
             error=f"NO_BODY_EXTRACTOR:{body.mime_type}",
         )
     )
@@ -1837,63 +1637,21 @@ def _ingest_direct(
     drive: DriveClient,
     settings: Settings,
 ) -> dict[str, Any]:
-    """파서 서비스를 거치지 않고 Drive→GCS 로 바로 가는 포맷들.
-
-    한때는 이름 그대로 '복사'만 했으나 지금은 포맷마다 다르게 손본다.
-    라우트 키(`FILE_COPY`)는 워크플로가 문자열로 비교하고 API 응답에도
-    나가므로 그대로 두고, 함수 이름만 실제 동작에 맞춘다.
-
-        PDF          100MB 초과는 관리자 확인. 이미지 위주면 OCR(옵션 켜진 경우),
-                     텍스트 PDF는 한도 초과분을 페이지 경계로 분할
-        XLSX/XLSM    셀을 마크다운 표로 변환
-        TXT/HTML/CSV 머리말을 본문 앞에 심음
-        ZIP/XLS      사이드카만 (본문 추출 수단 없음, 아래 참고)
-        그 외        원본 복사 + 경로 사이드카
-
-    크기 게이트가 세 번 나오는데 **재는 대상이 다르다**. 맨 위는 다운로드 전
-    Drive 가 알려 준 크기, 가운데는 내려받은 원본 바이트, 아래는 RAG 로 실제
-    올라갈 산출물이다. 섞으면 색인되지도 않을 원본 크기 때문에 문서를 잃는다
-    (실측 사고 있었음).
-    """
     name = body.name or body.file_id
     mime = (body.mime_type or "").lower()
     ext = Path(name).suffix or _ext_for_mime(body.mime_type)
 
-    # 본문을 뽑을 수단이 없는 형식(.zip/.xls)은 여기서 끝낸다. 사이드카만 색인하므로
-    # **다운로드도 크기 게이트도 필요 없다.** 그냥 아래로 흘려보내면 원본 크기를
-    # RAG 한도(10MB)로 재는 게이트에 걸려 SPLIT_QUEUED 로 영구 정체한다 — 올리지도
-    # 않을 바이트 때문에 문서를 잃는, 이 함수가 이미 두 번 겪은 사고다.
     if mime in SIDECAR_ONLY_MIME:
         return _ingest_sidecar_only(body, store, gcs, drive, settings)
 
-    # 텍스트는 breadcrumb 를 붙여 .md 로 나가므로 상한도 .md 기준이다.
     upload_ext = ".md" if mime in _TEXT_COPY_MIMES else ext
 
-    # 다운로드 전 1차 차단. 크기 미상이면 통과하고 아래 사후 검사가 잡는다.
-    #
-    # **여기서 RAG 한도로 재면 안 되는 두 종류가 있다.** 이 게이트의 목적은
-    # '메모리에 올릴 바이트'를 막는 것이지, '색인될 산출물'을 재는 게 아니다.
-    # 산출물 크기는 변환·분할이 끝난 뒤 아래에서 따로 잰다.
-    #
-    #   스프레드시트  원본이 아니라 변환된 .md 가 올라간다. 원본 크기로 재면
-    #                변환하면 통과할 문서를 다운로드도 전에 버린다.
-    #                (실측: 29MB xlsx 가 SPLIT_QUEUED 로 영구 정체 중)
-    #   PDF          한도를 넘으면 버리는 게 아니라 페이지 경계로 쪼갠다.
-    #                여기서 막으면 그 분할 로직에 **영영 도달하지 못한다**.
-    #                (실측: GCS 에 .partN 조각 6개가 남아 있으나 이 게이트가
-    #                 생긴 뒤로는 새로 만들어지지 않는다)
-    #
-    # 둘 다 '내려받아도 되는 최대치'인 MAX_GCS_BYTES 로만 막는다. 그보다 큰 PDF 를
-    # 쪼개려면 MAX_GCS_BYTES 를 올려야 한다 — 기본값은 RAG PDF 한도와 같은 50MB 라
-    # 그대로 두면 분할 구간이 열리지 않는다.
     if mime in _SPREADSHEET_COPY_MIMES or ext.lower() == ".pdf":
         pre_ext, pre_limit = ext, settings.max_gcs_bytes
     else:
         pre_ext, pre_limit = upload_ext, None
 
     is_pdf = ext.lower() == ".pdf"
-    # PDF는 서버가 내려받아 판정한다. 판정 한도를 넘는 파일은 분할·재시도로
-    # 돌리지 않고 관리자 확인 대상으로 둔다.
     pdf_limit = min(settings.max_gcs_bytes, PDF_REVIEW_BYTES)
     if is_pdf and body.size_bytes is not None and body.size_bytes > pdf_limit:
         return _hold_for_admin_review(body, store, gcs, drive, settings, body.size_bytes, pdf_limit)
@@ -1913,7 +1671,6 @@ def _ingest_direct(
             return gated
 
     path_ctx = _resolve_path_ctx(drive, body)
-    # _resolve_path_ctx 가 훑어 둔 부모 캐시를 재사용하므로 Drive 호출이 늘지 않는다.
     audience = _resolve_audience(drive, settings, body)
     if is_pdf:
         try:
@@ -1921,15 +1678,10 @@ def _ingest_direct(
         except ValueError as exc:
             if not str(exc).startswith("DOWNLOAD_SIZE_EXCEEDED"):
                 raise
-            # Drive가 크기를 알려 주지 않은 파일. 받다가 한도를 넘으면 멈춘다.
             return _hold_for_admin_review(body, store, gcs, drive, settings, None, pdf_limit)
     else:
         data = drive.download_file(body.file_id)
 
-    # Vertex 기본 PDF 파서는 OCR을 하지 않는다. 이미지 스캔본을 원본 URI로
-    # 보내면 파일 단위 INVALID_ARGUMENT가 나고, Cloud Tasks가 같은 배치 전체를
-    # 반복한다. 이미지 위주 PDF는 OCR이 켜져 있으면 OCR 본문으로 색인하고,
-    # 아니면 텍스트가 있는 원본 또는 파일명·경로 사이드카만 색인한다.
     index_original = True
     skip_reason: str | None = None
     if is_pdf:
@@ -1953,7 +1705,6 @@ def _ingest_direct(
                 skip_reason,
             )
 
-    # PDF 는 한도를 넘으면 버리지 말고 페이지 경계로 쪼갠다.
     pdf_parts: list[bytes] | None = None
     if (
         index_original
@@ -1968,13 +1719,9 @@ def _ingest_direct(
             )
         except PdfSplitError as exc:
             logger.warning("PDF split failed %s: %s", body.file_id, exc)
-            pdf_parts = None  # 아래 게이트가 큐로 보낸다
+            pdf_parts = None
 
     if pdf_parts is None and index_original:
-        # 스프레드시트 원본은 RAG 로 가지 않는다 — 색인되는 건 변환된 .md 뿐이다.
-        # 원본을 RAG 한도로 재면 색인되지도 않을 크기 때문에 문서를 통째로 잃는다.
-        # (실측: 27.7MB xlsx 가 여기서 떨어져 사이드카로도 못 찾게 됐다)
-        # 변환 결과는 아래에서 .md 기준으로 따로 잰다. 여기서는 우리 저장 상한만 본다.
         raw_limit = (
             settings.max_gcs_bytes if mime in _SPREADSHEET_COPY_MIMES else None
         )
@@ -1986,18 +1733,10 @@ def _ingest_direct(
             return gated
 
     body_text: str | None = None
-    # 원본 바이트를 RAG 로 보낼지. 스프레드시트는 변환에 실패하면 보내지 않는다.
     if mime in _SPREADSHEET_COPY_MIMES:
         try:
             body_text = xlsx_to_markdown(data)
         except XlsxParseError as exc:
-            # 암호 걸린 파일 등 — 사이드카만 남긴다(경로·파일명으로는 찾힌다).
-            #
-            # 원본 xlsx 를 색인 목록에 넣으면 안 된다. RAG Engine 기본 파서는
-            # xlsx 를 못 읽어 **매번 import 에서 거부**되는데, 지금까지는 그
-            # 실패가 성공으로 집계돼 보이지 않았다(실측 27건이 상시 실패 중).
-            # 재색인 경로(_source_uris_for_file)는 이미 .xlsx 를 빼고
-            # 있었다 — ingest 경로만 빠져 있었던 것이다.
             index_original = False
             skip_reason = f"XLSX_UNREADABLE:{exc}"
             logger.warning(
@@ -2019,9 +1758,6 @@ def _ingest_direct(
             title=name, source_title=path_ctx.source_title, website_url=path_ctx.website_url,
             body=body_text,
         )
-        # 원본 바이트가 아니라 머리말까지 붙인 최종 산출물로 잰다.
-        # 변환으로 늘어난 분량(xlsx→표)은 원본 크기로는 안 보이고, 텍스트는
-        # 원본 확장자와 무관하게 breadcrumb 를 붙여 .md 로 올라간다.
         md_bytes = md_text.encode("utf-8")
         gated = _size_gate(
             store, settings, body, len(md_bytes), splittable=True, ext=".md"
@@ -2044,14 +1780,6 @@ def _ingest_direct(
         uris = [gcs_uri]
         _drop_stale_sidecar(gcs, settings, body.file_id)
     else:
-        # 쪼갠 PDF 는 여기서 재지 않는다. split_pdf 가 파트마다 한도 이하로 만들어
-        # 놓았는데 **원본 전체 크기**로 다시 재면 무조건 걸린다 — 위에서 분할에
-        # 성공해도 그대로 SPLIT_QUEUED 로 떨어져, 1424행 분할 로직이 통째로
-        # 도달 불가가 된다. (로컬 종단 검증에서 잡음: 53MB PDF 가 2파트로 쪼개진
-        # 직후 이 게이트에 걸려 파트가 하나도 업로드되지 않았다.)
-        # 원본을 올리지 않는 경우(텍스트 없는 PDF·읽을 수 없는 스프레드시트)는
-        # 사이드카만 올라가므로 원본 크기로 막지 않는다. (실측: 110MB 이미지
-        # 포스터 PDF가 판정까지 끝난 뒤 여기서 SIZE_EXCEEDED로 실패했다.)
         if not pdf_parts and index_original:
             gated = _size_gate(store, settings, body, len(data), splittable=True, ext=ext)
             if gated:
@@ -2075,13 +1803,8 @@ def _ingest_direct(
             }
         ctype = body.mime_type or "application/octet-stream"
         if not index_original:
-            # 읽을 수 없는 스프레드시트 — 원본은 GCS 에도 올리지 않는다.
-            # 아무도 읽지 않는데(재색인 경로가 .xlsx 를 제외한다) 자리만 차지하고,
-            # 색인에 넣으면 매번 import 를 실패시킨다.
             uris = []
         elif pdf_parts and len(pdf_parts) > 1:
-            # {fileId}.part1.pdf ... — extract_file_id 가 .partN 을 떼어내므로
-            # 검색 결과에서는 원본 한 문서로 합쳐진다.
             uris = []
             for i, part in enumerate(pdf_parts, start=1):
                 uris.append(
@@ -2103,7 +1826,6 @@ def _ingest_direct(
             ]
         uris.append(gcs.upload_source_sidecar_md(sidecar, body.file_id))
         if is_pdf:
-            # 예전 판본을 OCR 본문으로 색인했다면 그 .md 가 남아 두 벌이 된다.
             try:
                 gcs.delete(gs_uri(settings.gcs_source_bucket, f"{body.file_id}.md"))
             except Exception as exc:  # noqa: BLE001
@@ -2118,8 +1840,6 @@ def _ingest_direct(
             source_uri=body.web_view_link or uris[0],
             path_ctx=path_ctx,
             audience=audience,
-            # 본문 추출 실패 사유를 남긴다. 상태는 INDEXED 로 가지만(사이드카는
-            # 색인됨) 본문이 없는 문서라는 사실은 조회 가능해야 한다.
             error=skip_reason,
         )
     )
@@ -2134,16 +1854,10 @@ def _ingest_direct(
 
 
 def _drop_stale_sidecar(gcs: GcsClient, settings: Settings, file_id: str) -> None:
-    """본문 md 가 생긴 문서의 옛 경로 사이드카를 치운다.
-
-    xlsx 는 예전에 `.meta.md` 한 줄만 색인했다. 본문이 생긴 뒤에도 남겨두면
-    같은 fileId 로 청크가 두 벌 잡혀, 문서당 청크 상한을 사이드카가 잡아먹는다.
-    """
     uri = gs_uri(settings.gcs_source_bucket, f"{file_id}.meta.md")
     try:
         gcs.delete(uri)
     except Exception as exc:  # noqa: BLE001
-        # 처음부터 없었으면 그만이다. 삭제 실패로 색인을 막지 않는다.
         logger.debug("사이드카 정리 건너뜀 %s: %s", uri, exc)
 
 
@@ -2168,11 +1882,6 @@ _FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{10,}$")
 
 
 def _clean_file_ids(raw_ids: list[str]) -> tuple[list[str], list[str]]:
-    """(정상 fileId, 버린 값). 파일명/URI 로 들어와도 fileId 로 되돌린다.
-
-    여기서 거르지 않으면 아래 upsert 가 이상한 문서를 새로 만들어 버린다
-    (예: '{fileId}.meta.md' 를 순진하게 잘라 만든 '{fileId}.meta').
-    """
     ok: list[str] = []
     bad: list[str] = []
     for raw in raw_ids:
@@ -2192,19 +1901,6 @@ def _sync_student_corpus(
 def _sync_student_corpus_locked(
     gcs_uris: list[str], file_ids: list[str], settings: Settings, store: DocStateStore
 ) -> dict[str, Any]:
-    """학생 코퍼스를 doc_state 의 audience 에 맞춘다.
-
-    교직원 코퍼스(=기본 코퍼스)는 전량을 담으므로 기존 경로가 그대로 처리한다.
-    여기서는 **학생 코퍼스만** 따로 맞춘다.
-
-    핵심은 대상이 아닌 문서까지 **먼저 지운다**는 점이다. 학생자료 → 교직원자료로
-    옮긴 문서는 삭제 대상이 아니라 소속 변경 대상이고, 그 이동이 반영되는 지점이
-    여기뿐이다. 지우지 않으면 옮긴 뒤에도 학생에게 계속 노출된다.
-
-    URI → fileId 는 이름에서 되돌린다(`extract_file_id`). 워크플로가 넘기는
-    fileIds 는 URI 와 1:1 이 아니라(파일 하나가 본문+.meta.md 로 URI 2개를
-    만든다) URI 별 판정에는 쓸 수 없기 때문이다.
-    """
     if not settings.audience_split_enabled:
         return {"enabled": False}
 
@@ -2213,7 +1909,6 @@ def _sync_student_corpus_locked(
     for uri in gcs_uris:
         fid = extract_file_id(uri)
         if not _FILE_ID_RE.match(fid):
-            # fileId 로 못 되돌리는 URI 는 소속을 판정할 수 없다 → 학생에게 안 준다
             logger.warning("학생 코퍼스: fileId 판정 불가라 제외 %s", uri)
             continue
         touched.add(fid)
@@ -2225,16 +1920,12 @@ def _sync_student_corpus_locked(
     try:
         removed = rag.delete_files_by_ids(sorted(touched))
     except Exception:  # noqa: BLE001
-        # 삭제가 실패한 채로 import 하면 옛 청크가 남는다. 학생 코퍼스에서 그것은
-        # '내려야 할 문서가 안 내려간' 상태이므로 조용히 넘기지 않는다.
         logger.exception("학생 코퍼스 pre-delete 실패 files=%s", len(touched))
         raise
 
     outcome = rag.import_from_gcs(student_uris) if student_uris else None
     check_active_mutation()
     if outcome and not outcome.ok:
-        # 교직원 쪽과 달리 여기서는 상태를 되돌릴 대상이 없다(audience 는
-        # doc_state 에 이미 확정돼 있다). 남길 수 있는 건 신호뿐이다.
         logger.error(
             "학생 코퍼스 import 부분 실패 uris=%s imported=%s failed=%s skipped=%s",
             len(student_uris), outcome.imported, outcome.failed, outcome.skipped,
@@ -2266,17 +1957,6 @@ def _sync_student_corpus_locked(
 def _group_docs_by_drive(
     targets: list[DocState], settings: Settings
 ) -> list[tuple[Settings, list[DocState]]]:
-    """복구 대상을 학과(=드라이브)별로 가른다.
-
-    `_split_by_drive` 와 달리 Firestore 를 다시 안 읽는다 — DocState 가 이미
-    driveId 를 들고 있다(문서 200건이면 조회 200번을 아낀다).
-
-    driveId 가 비었거나 학과 맵에 없는 문서는 **버린다.** 어느 코퍼스·어느
-    버킷인지 모르는 채 전역 기본값으로 처리하면 남의 학과에 섞이거나, 없는
-    버킷을 뒤져 DLQ 로 보낸다. 안 건드리면 다음 주기가 다시 집는다.
-    (doc_state 가 유실된 문서는 driveId 없이 stub 으로 만들어질 수 있다 —
-     DocStateStore.mark_indexed 의 경고 참고.)
-    """
     if not getattr(settings, "departments", ()):
         return [(settings, targets)]
 
@@ -2296,12 +1976,6 @@ def _group_docs_by_drive(
 
 
 def _merge_outcomes(a: ImportOutcome, b: ImportOutcome) -> ImportOutcome:
-    """학과별로 나눠 import 한 결과를 하나로 합친다.
-
-    ok 는 **모든 부분이 성공했을 때만** True 다. 한 학과라도 부분 실패면
-    워크플로의 커밋 조건(indexed == uris)이 안 맞아 pageToken 이 안 넘어가고,
-    다음 주기가 같은 변경을 재생한다 — 그게 의도된 동작이다.
-    """
     return ImportOutcome(
         uris=a.uris + b.uris,
         imported=a.imported + b.imported,
@@ -2323,19 +1997,12 @@ def _write_rag_mappings(
     outcome: ImportOutcome,
     clear_without_uri: bool = False,
 ) -> dict[str, int | bool]:
-    """성공한 import sink를 Firestore에 write-only로 반영한다.
-
-    sink가 늦거나 파싱할 수 없으면 기존 매핑을 보존한다. 매핑은 삭제 최적화용
-    보조 인덱스이므로, 관측 실패 때문에 이미 성공한 RAG import를 실패로 바꾸지
-    않는다. 학생 대상이 아닌 파일은 학생 코퍼스 삭제 성공 뒤 빈 목록으로 교체해
-    예전 매핑을 제거한다.
-    """
     if not getattr(settings, "rag_mapping_write_enabled", False):
         return {"enabled": False, "written": 0, "deferred": 0, "failed": 0}
 
     try:
         mapping_store = RagFileMappingStore(settings)
-    except Exception:  # mapping 관측 실패가 실제 색인을 실패시키면 안 된다.
+    except Exception:
         logger.exception("RAG mapping store initialization failed")
         return {"enabled": True, "written": 0, "deferred": len(file_ids), "failed": 1}
 
@@ -2389,7 +2056,7 @@ def _write_rag_mappings(
         try:
             mapping_store.replace_for_corpus(fid, corpus_type, rows)
             written += len(rows)
-        except Exception:  # mapping 관측 실패가 실제 색인을 실패시키면 안 된다.
+        except Exception:
             failed += 1
             logger.exception(
                 "RAG mapping write failed corpus=%s fileId=%s",
@@ -2405,7 +2072,6 @@ def _mapping_from_existing_rag_file(
     corpus_type: str,
     corpus_name: str,
 ) -> RagFileMapping | None:
-    """기존 Vertex RagFile을 Firestore backfill 행으로 정규화한다."""
     resource_name = str(getattr(rag_file, "name", "") or "").strip()
     display_name = str(getattr(rag_file, "display_name", "") or "").strip()
     source_uri = str(getattr(rag_file, "source_uri", "") or "").strip()
@@ -2434,7 +2100,6 @@ def _mapping_from_existing_rag_file(
 
 @app.post("/sync/backfill-rag-mappings")
 def backfill_rag_mappings(body: BackfillRagMappingsBody) -> dict[str, Any]:
-    """기존 코퍼스를 각 1회 순회해 Firestore 삭제 인덱스를 채운다."""
     settings = _settings_for_drive(get_settings(), body.drive_id)
     if not settings.rag_mapping_write_enabled:
         raise HTTPException(409, "RAG mapping write is disabled")
@@ -2455,8 +2120,6 @@ def backfill_rag_mappings(body: BackfillRagMappingsBody) -> dict[str, Any]:
         try:
             rag_files = RagEngineClient(settings, corpus_name=corpus_name).list_files()
         except RagImportThrottledError as exc:
-            # 관리 호출도 실제 쿼터 의미를 보존해야 호출자가 backoff할 수 있다.
-            # 500이면 Workflows/운영자가 즉시 재시도해 같은 분당 창을 더 두드린다.
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         mappings = [
             mapping
@@ -2496,14 +2159,6 @@ def backfill_rag_mappings(body: BackfillRagMappingsBody) -> dict[str, Any]:
 
 
 def _settings_for_drive(base: Settings, drive_id: str | None) -> Settings:
-    """이 드라이브(=학과)용 설정. 학과 맵이 비면 그대로 돌려준다.
-
-    모르는 드라이브는 UnknownDriveError 를 그대로 올린다 — 기본 코퍼스로
-    떨어뜨리면 남의 학과 자료가 섞이고, 되돌리려면 코퍼스에서 파일을 골라
-    지워야 한다. 호출부가 그 드라이브만 건너뛰고 나머지를 계속 돌리면 된다.
-    """
-    # getattr 인 이유: 테스트·스크립트가 넘기는 가벼운 설정 대역에는 이 필드가
-    # 없다. 없으면 '학과 맵 없음' = 기존 단일 코퍼스 동작으로 본다.
     if not getattr(base, "departments", ()):
         return base
     if not drive_id:
@@ -2517,13 +2172,6 @@ def _split_by_drive(
     file_ids: list[str],
     settings: Settings,
 ) -> list[tuple[Settings, list[str], list[str]]]:
-    """URI·fileId 를 학과(=드라이브)별로 가른다.
-
-    학과 맵이 없으면 통째로 하나 — 기존 동작 그대로다. 있으면 doc_state 의
-    driveId 로 나눈다. **driveId 를 모르는 문서는 버린다**: 어느 코퍼스로 갈지
-    모르는 채 기본 코퍼스에 넣으면 남의 학과에 섞이기 때문이다(그쪽이 더 비싼
-    사고다 — 안 넣으면 다음 주기가 다시 집는다).
-    """
     if not getattr(settings, "departments", ()):
         return [(settings, gcs_uris, file_ids)]
 
@@ -2582,25 +2230,7 @@ def _import_and_mark_locked(
     rag: Any | None = None, mark_indexed: bool = True,
     mapping_settings: Settings | None = None, corpus_type: str = "FACULTY",
 ) -> ImportOutcome:
-    """이번 배치의 기존 청크만 제거 → import → **전량 성공일 때만** INDEXED 전환.
-
-    **삭제 대상은 반드시 이번에 import 할 파일과 같아야 한다.** 실행 시작 시
-    전체를 미리 지우면, 중간에 UNCHANGED 로 빠져 재import 되지 않는 문서까지
-    코퍼스에서 사라진다(백필이 정상 코퍼스를 비우고 성공으로 보고했다).
-    삭제를 import 바로 앞에 두면 지우는 집합과 넣는 집합이 정의상 같아진다.
-
-    ``rag`` 를 넘겨 **run 전체가 클라이언트 하나를 공유**하면 코퍼스 순회는
-    첫 배치에서 한 번만 일어난다(RagEngineClient.delete_files_by_ids 참고).
-    넘기지 않으면 이 호출만의 클라이언트를 쓴다.
-
-    부분 실패는 예외로 올리지 않고 outcome 으로 돌려준다. 어느 URI 가 거부됐는지는
-    응답 카운트로 알 수 없으므로(파일 단위 사유는 import_result_sink 를 걸어야
-    나온다) 배치 전체를 PARSED 로 남긴다 — INDEXED 로 찍으면 reindex-pending 이
-    PARSED 만 보므로 **자동 회수 경로가 영영 닫힌다.** 성공분을 한 번 더 import
-    하는 비용이, 실패분을 영구히 잃는 것보다 싸다.
-    """
     client = rag if rag is not None else RagEngineClient()
-    # 삭제 실패 뒤 import 를 계속하면 이전 청크와 새 청크가 함께 남으므로 fail closed.
     client.delete_files_by_ids(list(dict.fromkeys(file_ids)))
     check_active_mutation()
     outcome = client.import_from_gcs(gcs_uris)
@@ -2636,7 +2266,6 @@ def _import_and_mark_locked(
 
 
 def _mark_indexed_states(store: DocStateStore, file_ids: list[str]) -> None:
-    """모든 필수 코퍼스 동기화가 끝난 뒤 문서 상태를 INDEXED로 확정한다."""
     for fid in dict.fromkeys(file_ids):
         existing = store.get(fid)
         if existing:
@@ -2648,7 +2277,6 @@ def _mark_indexed_states(store: DocStateStore, file_ids: list[str]) -> None:
 
 @app.post("/sync/index-gcs")
 def index_gcs(body: IndexGcsBody) -> dict[str, Any]:
-    """GCS URI만 RAG Engine에 증분 import. Drive 커넥터 미사용."""
     if not body.gcs_uris:
         return {"imported": [], "count": 0, "status": "EMPTY"}
 
@@ -2667,14 +2295,6 @@ def _index_gcs_locked(body: IndexGcsBody, settings: Settings, store: DocStateSto
             "index-gcs dropped %s malformed fileIds: %s", len(bad_ids), bad_ids[:10]
         )
 
-    # 기존 청크 제거는 _import_and_mark 안에서 import 바로 앞에 한다. 여기서 한 번
-    # 더 지우면 같은 배치에 코퍼스를 두 번 순회하게 된다.
-    # 부분 실패면 INDEXED 로 올리지 않고 PARSED 로 남는다(회수 경로 유지).
-    #
-    # 이 엔드포인트만 요청에 driveId 가 없다(URI 목록만 받는다). 그래서 학과는
-    # doc_state 의 driveId 로 되짚어 **학과별로 갈라서** import 한다 — 안 가르면
-    # 전부 전역 기본 코퍼스로 들어가 학과가 둘 이상인 순간 서로 섞인다.
-    # 학과 맵이 비면 그룹이 하나뿐이라 예전과 동일한 경로다.
     outcome = ImportOutcome(uris=[], imported=0, failed=0, skipped=0)
     student: dict[str, Any] = {"enabled": False}
     for dept_settings, uris, ids in _split_by_drive(
@@ -2687,17 +2307,12 @@ def _index_gcs_locked(body: IndexGcsBody, settings: Settings, store: DocStateSto
                 uris,
                 ids,
                 rag=RagEngineClient(dept_settings),
-                # 학생 코퍼스까지 모두 성공해야 INDEXED로 확정한다. 먼저 확정하면
-                # 학생 실패 뒤 재실행이 UNCHANGED로 빠져 누락을 영구화한다.
                 mark_indexed=not split_enabled,
                 mapping_settings=dept_settings,
                 corpus_type="FACULTY",
             )
             student = _sync_student_corpus(uris, ids, dept_settings, store)
         except RagImportThrottledError as exc:
-            # 500으로 뭉개면 Workflow의 일반 5xx 재시도가 내부 backoff와 곱해져
-            # 쿼터 회복 전에 같은 요청을 여섯 번 반복한다. 호출자와 UI에 원인을
-            # 보존하고, 다음 delta 실행이 pageToken 미커밋 변경을 회수하게 한다.
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         outcome = _merge_outcomes(outcome, part)
 
@@ -2711,11 +2326,7 @@ def _index_gcs_locked(body: IndexGcsBody, settings: Settings, store: DocStateSto
                 _mark_indexed_states(store, ids)
 
     return {
-        # 하위 호환: 예전부터 '보낸 URI 목록'이었다. 성공 목록이 아니다.
         "imported": outcome.uris,
-        # 예전에는 보낸 URI 수였다. 이제 **실제 색인 건수**다 — 워크플로의
-        # 커밋 조건(drive_indexed == drive_uris)이 이 값을 쓰므로, 부분 실패가
-        # 나면 pageToken 이 커밋되지 않고 다음 주기가 같은 변경을 재생한다.
         "count": outcome.imported,
         "failed": outcome.failed,
         "skipped": outcome.skipped,
@@ -2733,7 +2344,6 @@ def _index_job_refs(settings: Settings, job_id: str):
 
 
 def _finalize_index_job(settings: Settings, job_id: str) -> dict[str, Any]:
-    """Commit INDEXED and job DONE together, only for the queued revisions."""
     from google.cloud import firestore
 
     store, job_ref, parts_ref = _index_job_refs(settings, job_id)
@@ -2789,7 +2399,6 @@ def _finalize_index_job(settings: Settings, job_id: str) -> dict[str, Any]:
                       count=len(job.get("gcsUris", [])) - len(deferred_uris),
                       partial=bool(failed_ids))
         for fid in failed_ids:
-            # Durable, versioned recovery receipt is committed with job completion.
             txn.set(store._col.document(fid).collection("index_failures").document(job_id), {
                 "fileId": fid, "driveId": job["driveId"], "jobId": job_id,
                 "status": "PENDING", "fileVersion": job["fileVersions"][fid],
@@ -2819,7 +2428,6 @@ def _finalize_index_job(settings: Settings, job_id: str) -> dict[str, Any]:
 
 @app.post("/sync/index-gcs-async", status_code=202)
 def index_gcs_async(body: IndexGcsBody) -> dict[str, Any]:
-    """Enqueue faculty/student indexing as independently retried tasks."""
     from google.cloud import firestore
 
     settings = get_settings()
@@ -2936,11 +2544,6 @@ def index_gcs_async(body: IndexGcsBody) -> dict[str, Any]:
 def _index_file_groups(
     file_ids: list[str], uris_by_id: dict[str, list[str]]
 ) -> list[list[str]]:
-    """Vertex import 한 번(URI 25개)에 들어가도록 파일을 묶는다.
-
-    문서 한 건마다 import 를 따로 기다리면 건당 수십 초가 들어 큰 변경분이 작업
-    기한을 넘긴다. URI 가 없는 파일과 한도를 혼자 넘는 파일은 단독으로 둔다.
-    """
     groups: list[list[str]] = []
     current: list[str] = []
     size = 0
@@ -2963,11 +2566,6 @@ def _index_group(
     audience: str, file_ids: list[str], uris_by_id: dict[str, list[str]],
     store: DocStateStore, dept_settings: Settings, rag: Any,
 ) -> dict[str, dict[str, Any]]:
-    """파일 묶음 하나를 한 코퍼스에 반입하고 파일별 결과를 돌려준다.
-
-    묶음이 성공하면 모든 파일이 성공이다. 실패하면 묶음 전체를 실패로 돌려주고,
-    호출자가 파일별로 다시 처리해 실패한 파일을 가려낸다.
-    """
     uris = [uri for fid in file_ids for uri in uris_by_id.get(fid) or []]
     single = len(file_ids) == 1
     if audience == "FACULTY":
@@ -2987,7 +2585,6 @@ def _index_group(
         ok = bool(student.get("ok", True))
         items = {}
         for index, fid in enumerate(file_ids):
-            # 학생 코퍼스 결과는 묶음 단위로만 나온다. 합계가 맞도록 첫 파일에 싣는다.
             share = single or index == 0
             items[fid] = {
                 "count": int(student.get("imported") or 0) if share else 0,
@@ -3004,7 +2601,6 @@ def _index_group(
 
 @app.post("/sync/index-gcs-task")
 def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
-    """Claim the part and document leases atomically before touching RAG."""
     settings = get_settings()
     if not settings.cloud_tasks_enabled:
         raise HTTPException(409, "Cloud Tasks indexing is disabled")
@@ -3018,7 +2614,6 @@ def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
     if not job or not part:
         raise HTTPException(404, "index job/part not found")
     if part.get("status") == "DONE":
-        # A crash after part completion must not leave the parent RUNNING forever.
         return {**_finalize_index_job(settings, body.job_id), "idempotent": True}
     if job.get("status") == "FAILED":
         return {"status": "FAILED", "error": job.get("error")}
@@ -3050,8 +2645,6 @@ def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
             return {**_finalize_index_job(settings, body.job_id), "idempotent": True}
         lease.pin()
         with activate(lease):
-            # Reload after claiming: a previous delivery may have checkpointed
-            # files between the initial read and acquisition of the lease.
             file_results = dict((part_ref.get().to_dict() or {}).get("fileResults") or {})
             uris_by_id = {
                 fid: [uri for uri in body.gcs_uris if extract_file_id(uri) == fid]
@@ -3061,13 +2654,9 @@ def index_gcs_task(body: IndexGcsTaskBody) -> dict[str, Any]:
                        if (file_results.get(fid) or {}).get("status") != "DONE"]
             rag = RagEngineClient(dept_settings) if body.audience == "FACULTY" else None
             for group in _index_file_groups(pending, uris_by_id):
-                # If an RPC stops returning, keep an explicit unresolved attempt
-                # instead of inventing a per-file success/failure count.
                 lease.checkpoint_files({fid: {"status": "RUNNING", "error": None} for fid in group})
                 items = _index_group(body.audience, group, uris_by_id, store, dept_settings, rag)
                 if len(group) > 1 and any(item["status"] != "DONE" for item in items.values()):
-                    # 묶음 응답은 어느 파일이 실패했는지 알려 주지 않는다. 묶음만
-                    # 한 건씩 다시 돌려 파일별 결과를 지금과 같은 정확도로 남긴다.
                     logger.warning("색인 묶음 부분 실패 — 파일별로 다시 처리 files=%s", len(group))
                     items = {}
                     for fid in group:
@@ -3133,8 +2722,6 @@ def index_job_status(job_id: str) -> dict[str, Any]:
 
 
 class ReindexPendingBody(BaseModel):
-    """PARSED(색인 누락) 문서를 GCS URI로 재인덱싱."""
-
     limit: int = Field(default=200, ge=1, le=2000)
     # URI 개수 기준이다(문서 수 아님 — 아래 루프의 len(pending_uris) 비교).
     # rag.import_files 는 호출 1회당 URI 25개까지만 받고(MAX_IMPORT_URIS),
@@ -3147,12 +2734,8 @@ class ReindexPendingBody(BaseModel):
     # 한 번 더 든다. 그 1개짜리 호출도 21초를 그대로 먹는다.
     # 24면 pending 이 23 이하이므로 2를 더해도 25 — 항상 한 번에 끝난다.
     index_batch_size: int = Field(default=24, alias="indexBatchSize", ge=1, le=25)
-    # true면 INDEXED도 다시 import (기본은 PARSED만)
     force: bool = False
-    # true면 즉시 jobId를 반환하고 뒤에서 계속 돈다.
-    # 전량 재색인은 수십 분이 걸려 클라이언트가 먼저 끊기므로 이쪽을 쓸 것.
     background: bool = False
-    # 내부용 — background 실행 시 진행률을 기록할 잡 ID
     job_id: str | None = Field(default=None, alias="jobId")
 
     model_config = {"populate_by_name": True}
@@ -3178,14 +2761,6 @@ def job_status(job_id: str) -> dict[str, Any]:
     return snap.to_dict() or {}
 
 
-# ingest 가 RAG import 대상으로 방출하는 확장자 (+ sidecar meta.md).
-# 복구는 최초 import 와 **같은 URI 집합**을 다시 제출한다. 지원 여부로 걸러내면
-# meta.md 만 색인하고 문서 전체를 INDEXED 로 오인하므로 fail closed 한다.
-#
-# 스프레드시트 원본(.xlsx)을 빼고 싶어지지만 빼면 안 된다. 지금 ingest 는 xlsx 를
-# 변환한 .md 만 올리므로 source 버킷에 남은 .xlsx 는 전부 그 변경 이전의 잔재고,
-# 그런 문서는 재색인이 아니라 **재ingest** 가 필요하다. 여기서 빼면 import 는
-# 통과하지만 본문 없는 INDEXED 가 조용히 확정된다 — 매일 실패하는 편이 낫다.
 _INDEXABLE_SUFFIXES = (
     ".md",
     ".meta.md",
@@ -3205,14 +2780,6 @@ _INDEXABLE_SUFFIXES = (
 def _source_uris_for_file(
     settings: Settings, file_id: str, gcs: GcsClient | None = None
 ) -> list[str]:
-    """존재하는 source 객체 중 인덱싱 가능 URI만 반환. 스프레드시트 원본은 제외.
-
-    fileId 경계 검사는 GcsClient 쪽에 모아 두었다 — 삭제 경로와 같은 규칙을
-    써야 '색인은 됐는데 삭제는 안 되는' 확장자가 생기지 않는다.
-
-    ``gcs`` 를 넘기면 재사용한다 — 문서마다 클라이언트를 새로 만들면 복구
-    한 번(limit 200)에 클라이언트 200개를 생성한다.
-    """
     client = gcs or GcsClient(settings)
     uris: list[str] = []
     for name in client.list_blob_names_for_file(settings.gcs_source_bucket, file_id):
@@ -3226,11 +2793,6 @@ def _source_uris_for_file(
 def reindex_pending(
     body: ReindexPendingBody, tasks: BackgroundTasks
 ) -> dict[str, Any]:
-    """Firestore PARSED(또는 force 시 전체) → GCS URI 모아 index-gcs.
-
-    백필이 ingest만 하고 색인이 끊긴 경우 복구용.
-    전량 재색인은 수십 분이 걸려 클라이언트가 먼저 끊기므로 background=true 권장.
-    """
     if body.background:
         job_id = f"reindex-{uuid.uuid4().hex[:12]}"
         _job_set(job_id, status="RUNNING", mode="reindex-pending",
@@ -3245,9 +2807,6 @@ def reindex_pending(
 def _run_reindex_job(job_id: str, body: ReindexPendingBody) -> None:
     try:
         result = _reindex_pending_sync(body)
-        # totals 는 루프 도중 스냅샷이라 완주해도 중간값이 남는다. 최종값으로
-        # 덮어써야 /sync/jobs/{id} 가 실패처럼 읽히지 않는다 (실측:
-        # reindex-0f06ea24ff7a 가 candidates=115 indexed=48 로 보였으나 완주였다).
         _job_set(job_id, status="DONE", result=result, totals=result.get("totals"))
         logger.info("reindex job %s done: %s", job_id, result.get("totals"))
     except Exception as exc:  # noqa: BLE001
@@ -3262,15 +2821,10 @@ def _reindex_group(
     targets: list[DocState],
     totals: dict[str, int],
 ) -> None:
-    """한 학과분 재색인. totals 는 그룹들이 함께 누적한다."""
-    # 문서마다 storage.Client 를 새로 만들면 200건에 200번 만든다 — 한 번만.
     gcs = GcsClient(settings)
     pending_uris: list[str] = []
     pending_ids: list[str] = []
 
-    # 그룹(=학과) 전체가 공유 → 코퍼스 순회는 첫 배치에서 1회.
-    # **settings 를 반드시 넘긴다.** 안 넘기면 전역 기본 코퍼스를 보게 되어
-    # 학과를 갈라 놓고도 전부 한 코퍼스로 들어간다.
     rag = RagEngineClient(settings)
 
     def flush() -> None:
@@ -3279,12 +2833,7 @@ def _reindex_group(
             return
         uris, ids = pending_uris, pending_ids
         uniq_ids = list(dict.fromkeys(ids))
-        # 부분 실패면 _import_and_mark 가 PARSED 로 남긴다 — 다음 주기가 다시
-        # 집는다. 여기서 INDEXED 로 올리면 이 복구 경로 자체가 그 문서를 두 번
-        # 다시 보지 못한다(PARSED 만 대상이므로).
         outcome = _import_and_mark(store, uris, uniq_ids, rag=rag)
-        # 교직원 코퍼스가 끝난 뒤에 학생 코퍼스를 맞춘다 — 소속 이동이 반영되는
-        # 지점이라 여기서는 속도보다 정확성이 우선이다.
         _sync_student_corpus(uris, uniq_ids, settings, store)
         if outcome.ok:
             for fid in uniq_ids:
@@ -3298,7 +2847,6 @@ def _reindex_group(
 
     resolved: list[tuple[str, list[str]]] = []
     for doc in targets:
-        # gcs 는 run 당 하나다 — 문서마다 만들면 limit 200 에 클라이언트 200개다.
         uris = _source_uris_for_file(settings, doc.file_id, gcs)
         if not uris:
             totals["skippedNoUri"] += 1
@@ -3314,7 +2862,6 @@ def _reindex_group(
                     sourceUri=doc.source_uri,
                 )
             except Exception:  # noqa: BLE001
-                # 상태 전이 실패 시에도 라운드로빈 커서가 다시 이 문서로 돌아온다.
                 logger.exception(
                     "failed to enqueue no-URI document for ingest retry: %s",
                     doc.file_id,
@@ -3323,12 +2870,6 @@ def _reindex_group(
         totals["withUris"] += 1
         resolved.append((doc.file_id, uris))
 
-    # 기존 청크 제거는 배치마다 _import_and_mark 가 한다 — 지우는 집합과 넣는
-    # 집합이 항상 같아야 하기 때문이다. 여기서 resolved 전체를 미리 지우면 뒤에서
-    # 플러시가 실패한 배치의 문서가 청크 없이 남는다.
-    # 삭제 자체를 생략해선 안 된다: '과거 INDEXED → 재파싱 → 색인 실패' 문서에서
-    # Vertex 가 같은 파일을 skip 하고, import_from_gcs 는 skipped 를 성공으로 세므로
-    # 구버전 내용인 채 INDEXED 로 확정된다(조용한 스테일).
     for file_id, uris in resolved:
         pending_uris.extend(uris)
         pending_ids.extend([file_id] * len(uris))
@@ -3336,8 +2877,6 @@ def _reindex_group(
             try:
                 flush()
             except Exception:  # noqa: BLE001
-                # 세는 것이 먼저다 — 비운 뒤에 len() 을 재면 항상 0 이라
-                # 배치 전체가 실패해도 ok=true 로 보고된다.
                 logger.exception("reindex-pending flush failed")
                 totals["failed"] += len(pending_uris)
                 pending_uris, pending_ids = [], []
@@ -3359,7 +2898,6 @@ def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
 
     targets: list[DocState] = []
     if body.force:
-        # stream 제한 — status 필터 두 번
         targets.extend(
             store.list_by_status(
                 DocStatus.PARSED,
@@ -3391,16 +2929,10 @@ def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
         "failed": 0,
     }
 
-    # 학과(=드라이브)별로 갈라 돌린다. 복구 대상은 status 로만 뽑히므로
-    # (list_by_status 에 드라이브 필터가 없다) 전 학과가 한 배치에 섞여 있다.
-    # 그대로 돌리면 (1) 전역 기본 코퍼스에 전부 넣고 (2) 전역 버킷에서 URI 를
-    # 찾아 학과 버킷 문서를 전부 skippedNoUri → DLQ 로 보낸다.
-    # 학과 맵이 비면 그룹이 하나뿐이라 예전과 같은 경로다.
     for dept_settings, group in _group_docs_by_drive(targets, base_settings):
         _reindex_group(body, dept_settings, store, group, totals)
 
     logger.info("reindex-pending done totals=%s", totals)
-    # skippedNoUri 는 failed 에도 함께 더해지므로 따로 조건에 넣을 필요가 없다.
     return {
         "mode": "reindex-pending",
         "totals": totals,
@@ -3409,11 +2941,8 @@ def _reindex_pending_sync(body: ReindexPendingBody) -> dict[str, Any]:
 
 
 class RetryFailedBody(BaseModel):
-    """FAILED(DLQ) 문서를 ingest부터 재시도."""
-
     limit: int = Field(default=100, ge=1, le=1000)
     parser_url: str = Field(default="", alias="parserUrl")
-    # 이 횟수만큼 재시도해도 실패하면 영구 실패로 두고 건너뜀 (무한 재시도 방지)
     max_attempts: int = Field(default=3, alias="maxAttempts", ge=1, le=10)
     index_batch_size: int = Field(default=10, alias="indexBatchSize", ge=1, le=50)
 
@@ -3421,23 +2950,12 @@ class RetryFailedBody(BaseModel):
 
 
 def _drive_link(source_uri: str | None) -> str | None:
-    """저장된 sourceUri 가 Drive 링크일 때만 재사용한다.
-
-    ingest 계열은 ``web_view_link or <gcs uri>`` 로 sourceUri 를 정하므로, 링크를
-    넘기지 않으면 merge 로 기존 Drive 링크가 gs:// 로 덮여 인용이 열리지 않는다.
-    gs:// 는 링크가 아니므로 넘기지 않는다(그 경우 기존 동작 유지).
-    """
     uri = (source_uri or "").strip()
     return uri if uri.startswith(("http://", "https://")) else None
 
 
 @app.post("/sync/retry-failed")
 def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
-    """FAILED 문서를 ingest부터 재구동하고 GCS_READY면 색인까지 이어붙인다.
-
-    일시적 오류(Drive 429/5xx, 파서 타임아웃)로 DLQ에 빠진 문서를 자동 회수한다.
-    max_attempts 초과 문서는 실제 결함으로 보고 건너뛴다.
-    """
     store = DocStateStore()
     targets = store.list_by_status(
         DocStatus.FAILED,
@@ -3445,19 +2963,9 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
         cursor_key="retry-failed",
     )
 
-    # 문서마다 ingest() 를 부르면 그때마다 DriveClient 를 새로 만든다 — 인증 +
-    # discovery build 가 문서 수만큼 돌고, parents/name 캐시가 인스턴스 단위라
-    # 같은 폴더의 조상을 문서마다 다시 조회한다. run 당 하나씩만 만든다.
-    # 회수할 게 없는 날(대부분)에는 아예 만들지 않는다.
     base_settings = get_settings() if targets else None
     drive = DriveClient() if targets else None
 
-    # 회수 대상은 status 로만 뽑혀 전 학과가 섞여 있다. **쓰기 버킷**이 문제다 —
-    # 전역 settings 로 재적재하면 ee 원본이 cs 버킷에 저장되고, 이후 재색인은
-    # ee 버킷을 뒤지므로 못 찾아 다시 DLQ 로 돌아온다(회수 장치가 무한 루프).
-    # 코퍼스 쪽은 flush() 가 index_gcs() 를 거치므로 거기서 이미 갈라진다.
-    #
-    # GcsClient 는 학과당 하나만 만든다 — 문서마다 만들면 limit 100 에 100개다.
     _dept_cache: dict[str, tuple[Settings, Any]] = {}
 
     def _dept_ctx(drive_id: str) -> tuple[Settings, Any]:
@@ -3512,8 +3020,6 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
         try:
             settings, gcs = _dept_ctx(doc.drive_id)
         except UnknownDriveError:
-            # 어느 학과인지 모르는 채 재적재하면 남의 버킷에 쓴다. 시도 횟수도
-            # 올리지 않는다 — 설정이 고쳐지면 그대로 회수되어야 한다.
             logger.warning("학과 판정 불가로 회수 보류: %s", doc.file_id)
             totals["stillFailed"] += 1
             continue
@@ -3579,9 +3085,6 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
             body.max_attempts,
         )
     logger.info("retry-failed done totals=%s", totals)
-    # exhausted 는 maxAttempts 를 넘겨 '영구 보류'로 둔 문서다 — 이번 실행의 실패가
-    # 아니다. ok 에 포함하면 손상된 문서 1건 때문에 배치가 매일 실패로 보고돼
-    # 진짜 장애가 묻힌다. 별도 지표(parked)로 올리고 경고 로그로만 남긴다.
     return {
         "mode": "retry-failed",
         "totals": totals,
@@ -3594,16 +3097,10 @@ def retry_failed(body: RetryFailedBody) -> dict[str, Any]:
 def delete_file(body: DeleteBody) -> dict[str, Any]:
     store = DocStateStore()
 
-    # 엉뚱한 코퍼스·버킷을 지우면 아무 일도 안 일어난다 — Drive 에서 지운 문서가
-    # 계속 검색되는, 가장 알아채기 어려운 형태의 잔존이 된다.
-    # 워크플로는 driveId 를 항상 넘긴다(daily_sync.yaml 의 do_delete). 수동 호출로
-    # 빠졌을 때만 doc_state 에서 되짚는다.
     settings = get_settings()
     if getattr(settings, "departments", ()):
         drive_id = body.drive_id or ""
         if not drive_id:
-            # 맵이 있을 때만 되짚는다 — 없으면 결과가 같은데 삭제마다 Firestore
-            # 읽기가 한 번씩 더 늘 뿐이다.
             state = store.get(body.file_id)
             drive_id = state.drive_id if state else ""
         settings = _settings_for_drive(settings, drive_id)
@@ -3615,27 +3112,13 @@ def _delete_file_locked(body: DeleteBody, settings: Settings, store: DocStateSto
     gcs = GcsClient(settings)
     try:
         ok = RagEngineClient(settings).delete_by_file_id(body.file_id)
-        # 학생 코퍼스에서도 반드시 빼야 한다. 여기를 빠뜨리면 Drive 에서 지운 문서가
-        # 학생에게만 계속 검색되는, 가장 알아채기 어려운 형태의 잔존이 된다.
         if settings.audience_split_enabled:
             RagEngineClient(
                 settings, corpus_name=settings.rag_corpus_name_student
             ).delete_by_file_id(body.file_id)
     except RagImportThrottledError as exc:
-        # 쿼터 문제를 500으로 위장하면 Workflow가 일반 서버 오류로 보고 즉시
-        # 재시도해 같은 분당 창을 더 두드린다. 429로 보존해 backoff 의미를 살린다.
         raise HTTPException(status_code=429, detail=str(exc)) from exc
 
-    # RAG import 산출물 + raw 원본을 prefix 로 훑어 지운다.
-    #
-    # 예전에는 확장자 목록을 손으로 적었는데, 목록에 없는 것을 조용히 놓쳤다:
-    #   .partN.pdf  분할 PDF 조각이 전량 남는다(실측 6건 존재)
-    #   .rtf / .doc  FILE_COPY_MIME 에 있는데 목록에는 없었다
-    #
-    # raw 는 아예 건드리지도 않았다. 그래서 Drive 에서 지운 문서의 **원본이
-    # GCS 에 영구 잔존**했다(실측: DELETED 100건 중 52건의 .hwp 원본이 남아 있었다).
-    # raw 에는 명단·인사발령 같은 원문이 그대로 있어(docs/DEV_SPEC.md 운영 체크리스트)
-    # 삭제가 이행되지 않는 것 자체가 문제다.
     failures: list[Exception] = []
     counts = {"source": 0, "hwpOriginal": 0}
     for bucket, kind in (
@@ -3650,8 +3133,6 @@ def _delete_file_locked(body: DeleteBody, settings: Settings, store: DocStateSto
             failures.append(exc)
             logger.exception("delete %s GCS cleanup failed: %s", kind, body.file_id)
 
-    # 코퍼스는 이미 정리됐으므로 상태는 DELETED 가 맞다. 다만 GCS 가 남았으면
-    # 성공으로 위장하지 않고 올려 보내 재시도(=삭제 change 재생)되게 한다.
     store.mark_deleted(body.file_id)
     logger.info(
         "deleted fileId=%s corpus=%s source=%s hwpOriginal=%s",
@@ -3675,27 +3156,15 @@ def _delete_file_locked(body: DeleteBody, settings: Settings, store: DocStateSto
 
 @app.post("/sync/reconcile")
 def reconcile(body: ReconcileBody) -> dict[str, Any]:
-    """Drive 조회 건수 vs GCS 업로드·색인·스킵·실패·삭제 정합성."""
-    # dlq/splitQueued 는 failed 의 하위 분류(집계 시 failed 도 함께 증가)이므로
-    # accounted 에 다시 더하면 이중 집계된다 — failed 만 합산한다.
     accounted = (
         body.gcs_uploaded
         + body.failed
-        # parked(DLQ·분할 대기) 도 '처리를 마친 것'이라 accounted 에 든다. 안 더하면
-        # 그만큼 unaccounted 로 잡혀 정합성 검사가 실패하고 토큰이 안 커밋된다.
         + body.parked
         + body.skipped
         + body.deleted
         + body.unchanged
     )
-    # EXCLUDED 는 대상 폴더 밖이라 처리할 일이 없다. accounted 에 더하는 대신
-    # listed 에서 뺀다 — 그래야 남은 skipped 가 '대상인데 처리 못 한 것'만
-    # 가리킨다. (예전에는 폴더 밖 393건이 skipped 로 잡혀 그 신호를 덮었다)
     listed = body.listed - body.excluded
-    # indexed(=처리 완료된 URI 수)는 업로드된 URI 수와 **정확히 같아야** 한다.
-    # 부등호로 두면 색인이 덜 된 배치가 정합성 검사를 통과해 버린다.
-    # gcs_uploaded 는 '파일 수' 라 파일당 URI가 2개(원본+.meta.md)면 어긋난다 →
-    # uris(업로드된 URI 총수)와 비교. uris 미제공 시 gcs_uploaded 로 폴백.
     index_baseline = body.uris if body.uris > 0 else body.gcs_uploaded
     deferred_verified = body.deferred_uris == 0
     if body.deferred_uris and body.index_job_id:
@@ -3736,8 +3205,6 @@ def reconcile(body: ReconcileBody) -> dict[str, Any]:
     else:
         logger.info("Reconciliation OK: %s", summary)
     if body.parked:
-        # ok 판정에는 안 들어가므로(토큰을 막지 않는다) 여기서라도 남긴다.
-        # 방치되면 '처리된 줄 알았는데 검색에 안 나오는' 문서가 조용히 쌓인다.
         logger.warning(
             "parked %s docs on drive=%s (dlq=%s splitQueued=%s) — 별도 조치 필요",
             body.parked, body.drive_id, body.dlq, body.split_queued,
@@ -3745,14 +3212,8 @@ def reconcile(body: ReconcileBody) -> dict[str, Any]:
     return summary
 
 
-# 하위 호환: 구 process 엔드포인트는 ingest+즉시 index (비권장)
 @app.post("/sync/reprocess-file")
 def reprocess_file(body: ReprocessFileBody) -> dict[str, Any]:
-    """Refresh exactly one in-scope document and enqueue its own index job.
-
-    The mutation lease covers validation, ingestion and enqueue. A durable request
-    receipt prevents a repeated Workflow request from repeating OCR/import work.
-    """
     from google.cloud import firestore
     from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -3777,7 +3238,6 @@ def reprocess_file(body: ReprocessFileBody) -> dict[str, Any]:
             raise HTTPException(409, "Document is no longer a reprocessing target")
         if state.status == DocStatus.INDEXED and not str(state.error or "").startswith("NO_BODY_EXTRACTOR:"):
             raise HTTPException(409, "Document is already indexed; refresh the issue list")
-        # Queued tasks may not hold a mutation lease yet. Do not replace their input.
         jobs = list(receipt.parent.where(filter=FieldFilter(
             "fileIds", "array_contains", body.file_id,
         )).limit(1001).stream())
@@ -3798,8 +3258,6 @@ def reprocess_file(body: ReprocessFileBody) -> dict[str, Any]:
         receipt.set({"kind": "REPROCESS_FILE", "fileIds": [body.file_id],
                      "driveId": body.drive_id, "status": "STARTED",
                      "createdAt": firestore.SERVER_TIMESTAMP})
-        # No automatic retry after an ambiguous external call. The receipt remains
-        # STARTED if this process dies; a duplicate request is then rejected above.
         result = _ingest_with(IngestBody(
             fileId=body.file_id, driveId=body.drive_id,
             name=meta.get("name", ""), mimeType=meta.get("mimeType", ""),

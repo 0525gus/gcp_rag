@@ -1,10 +1,3 @@
-"""
-MCP 서버 (Cloud Run) — FactChat 등 원격 MCP 커넥터용 Streamable HTTP.
-
-tool: search
-인증: MCP_API_KEY 설정 시 Authorization: Bearer <key> 또는 X-API-Key 필수
-"""
-
 from __future__ import annotations
 
 import copy
@@ -66,19 +59,13 @@ settings = get_settings()
 MCP_API_KEY = os.environ.get("MCP_API_KEY", "").strip()
 ROUTING_MODE = os.environ.get("MCP_ROUTING_MODE", "single")
 route_registry = RouteRegistry(settings)
-# 키가 없으면 ApiKeyMiddleware 가 통째로 무력화된다(401 이 아니라 그냥 통과).
-# 배포가 공개(allUsers)로 바뀌는 순간 코퍼스 전체가 무인증 노출이므로, 인증 없이
-# 뜨는 것은 반드시 의도한 선택이어야 한다 — 명시적 opt-in 없이는 기동을 거부한다.
-# IAM(ID 토큰) 으로만 여는 scripts/deploy.ps1 경로에서 이 값을 켠다.
 MCP_ALLOW_NO_AUTH = os.environ.get("MCP_ALLOW_NO_AUTH", "").strip().lower() in (
     "1",
     "true",
     "yes",
 )
 
-# search 가 노출하는 top_k 상한. 사용자 요청 k 는 이 값으로 clamp 된다.
 MAX_TOP_K = 20
-# 필터·중복 제거가 걷어낼 몫. k 가 커도 최소 이만큼은 더 받아 자리를 채운다.
 _FETCH_HEADROOM = 10
 _MAX_FETCH = MAX_TOP_K + _FETCH_HEADROOM
 
@@ -91,8 +78,6 @@ mcp = FastMCP(
 
 
 class ApiKeyMiddleware(BaseHTTPMiddleware):
-    """FactChat 등 외부 커넥터용 단순 API 키 게이트."""
-
     async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
         if request.url.path in {"/health", "/"}:
             return await call_next(request)
@@ -154,7 +139,6 @@ def _cache_get(key: _CacheKey) -> SearchResponse | None:
             del _cache[key]
             return None
         _cache.move_to_end(key)
-    # 호출측이 리스트를 만지더라도 캐시가 오염되지 않게 사본을 준다
     return copy.deepcopy(value)
 
 
@@ -237,13 +221,9 @@ def search(
     cached = _cache_get(cache_key)
     if cached is not None:
         logger.info("search cache hit query=%r top_k=%s", query, k)
-        # _cache_get returns a copy; refresh after lookup to cross KST midnight
-        # without re-retrieving documents or changing the cached evidence.
         cached["currentDate"] = current_date_kst()
         return cached
 
-    # 여유분 retrieve 후 후처리(파일당 청크 병합)로 k개.
-    # 상한을 k*배수보다 낮게 두면 큰 k 에서 여유분이 사라져 k 개를 못 채운다.
     fetch_k = min(
         settings.search_fetch_max,
         max(k * settings.search_fetch_multiplier, k),
@@ -253,8 +233,6 @@ def search(
             settings.search_fetch_max,
             max(fetch_k, settings.search_reranker_candidate_k * settings.search_fetch_multiplier),
         )
-    # 거리 상한 — 코퍼스 범위 밖 질문에 무관한 문서를 물어다 주지 않도록.
-    # 0 이하면 필터를 끈다.
     threshold = settings.search_distance_threshold
 
     def _retrieve(search_query: str) -> list[Any]:
@@ -264,10 +242,6 @@ def search(
             vector_distance_threshold=threshold if threshold > 0 else None,
         )
 
-    # Raw retrieval and Gemini rewriting run in parallel. When a rewrite passes
-    # validation, its retrieval occupies the freed worker. The raw query is never
-    # replaced: a failed model call, rejected rewrite, or second retrieval failure
-    # still returns its evidence.
     raw_vertex_hit_count: int | None = None
     rewrite_vertex_hit_count: int | None = None
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -304,10 +278,7 @@ def search(
         else None
     )
     store = DocStateStore(request_settings)
-    # 상태·드라이브 필터는 **postprocess 앞**에 둔다. 뒤에 두면 postprocess 가 이미
-    # k 개 문서로 잘라 놓은 뒤라, 걸러낸 자리가 빈 채로 남아 top_k 보다 적게 나간다.
-    # 앞에서 걷어내면 청크 병합 예산(max_total_chunks)도 살아남을 문서에만 쓰인다.
-    meta_cache: dict[str, Any] = {}
+    meta_cache: dict[str, Any] = store.get_many(hit.source.file_id for hit in raw_hits)
 
     def _meta(file_id: str) -> Any:
         if file_id not in meta_cache:
@@ -323,22 +294,17 @@ def search(
         ):
             return False
         if meta and (
-            # EXCLUDED = 대상 폴더 밖. 코퍼스 정리가 비동기라 청크가 남아 있을 수
-            # 있으므로 검색 단에서도 막는다.
             meta.status in {DocStatus.SKIPPED, DocStatus.EXCLUDED, DocStatus.DELETED}
             or (
                 meta.status == DocStatus.FAILED
                 and (meta.error or "").startswith("out_of_folder_scope_cleanup_failed")
             )
         ):
-            # 비동기 코퍼스 정리·재시도가 수렴하는 동안의 이중 방어.
             return False
         if drive_id and (not meta or meta.drive_id != drive_id):
             return False
         return True
 
-    # 기존 HTML 색인도 응답 단계에서 정제한다. 원본 MIME/파일명으로 한정해
-    # 프로그래밍 문서의 HTML 예제 등 일반 텍스트를 임의로 지우지 않는다.
     cleaned = []
     for hit in raw_hits:
         meta = _meta(hit.source.file_id)
@@ -349,8 +315,6 @@ def search(
             cleaned.append(hit)
     raw_hits = cleaned
 
-    # 어휘 순위를 섞어 상위를 다시 세운다(후보 안에서만, recall 불변).
-    # postprocess_hits 는 들어온 순서를 그대로 존중하므로 여기서 정렬해 넘긴다.
     if settings.search_lexical_rerank and len(raw_hits) > 1:
         titles = []
         temporal_metadata = []
@@ -359,8 +323,6 @@ def search(
             name = ((meta.name if meta else None) or hit.source.name or "")
             bundle = (meta.bundle if meta else None) or ""
             titles.append(f"{(meta.source_title if meta else None) or ''} {name}".strip())
-            # Strip ingestion timestamps before period extraction so path suffixes
-            # such as _20260912153000 do not look like document metadata.
             temporal_metadata.append(f"{normalize_title(name)} {normalize_title(bundle)}")
         order = rrf_rerank(
             query,
@@ -378,8 +340,6 @@ def search(
     raw_hits = [h for h in raw_hits if _servable(h)]
 
     if settings.search_reranker_mode != "none":
-        # Reranker breadth is defined in documents, not raw chunks. Merge duplicate
-        # chunks by file before presenting exactly Top10/20/30 document candidates.
         raw_hits = postprocess_hits(
             raw_hits,
             top_k=settings.search_reranker_candidate_k,
@@ -425,8 +385,6 @@ def search(
 
     response_chunk_budget = settings.search_max_total_chunks
     if settings.search_reranker_mode != "none":
-        # Normal requests still return their requested top_k, while breadth
-        # benchmarks may request the full document candidate set.
         response_chunk_budget = max(
             response_chunk_budget,
             min(k, settings.search_reranker_candidate_k),
@@ -439,7 +397,6 @@ def search(
         max_total_chunks=response_chunk_budget,
     )
     if not hits:
-        # 필터가 전부 걸러낸 경우 — 임계값 조정 판단 근거로 남긴다
         logger.info(
             "search no-hit query=%r fetched=%s threshold=%s",
             query,
@@ -449,13 +406,10 @@ def search(
 
     documents: list[EvidenceDocument] = []
     for hit in hits:
-        # 상태·드라이브 필터는 postprocess 전에 이미 걸렀다(_servable). 여기서는
-        # 그때 읽어 둔 메타를 재사용만 한다 — 같은 문서를 두 번 조회하지 않는다.
         meta = _meta(hit.source.file_id)
         display_name = (
             (meta.name if meta and meta.name else None) or hit.source.name or hit.source.file_id
         )
-        # displayName이 fileId.ext 형태면 숨김
         if display_name.endswith((".pdf", ".md", ".txt", ".pptx", ".xlsx")) and (
             not meta or not meta.name
         ):
@@ -507,13 +461,6 @@ def retrieve_channel(
     *,
     scope: SearchScope | None = None,
 ) -> dict[str, Any]:
-    """Expose one retrieval signal over a shared vector-created candidate pool.
-
-    ``vector`` is the only candidate generator in the current repository.
-    ``body``, ``title``, ``bundle``, and ``metadata`` independently reorder the
-    same vector candidates; the response states this explicitly so channel-local
-    Hit@k is not mistaken for corpus-wide lexical recall.
-    """
     if channel not in RETRIEVAL_CHANNELS:
         raise ValueError(f"channel must be one of: {', '.join(RETRIEVAL_CHANNELS)}")
     if not (query or "").strip():
@@ -543,7 +490,7 @@ def retrieve_channel(
 
     store_started = time.perf_counter()
     store = DocStateStore(request_settings)
-    meta_cache: dict[str, Any] = {}
+    meta_cache: dict[str, Any] = store.get_many(hit.source.file_id for hit in raw_hits)
 
     def _meta(file_id: str) -> Any:
         if file_id not in meta_cache:
@@ -683,7 +630,6 @@ def retrieve_channel(
 async def search_tool(
     query: str, ctx: Context, top_k: int | None = None, drive_id: str | None = None
 ) -> SearchResponse:
-    # Scope comes from the authenticated HTTP request, never from tool arguments.
     request = ctx.request_context.request
     scope = getattr(request.state, "mcp_scope", None) if request is not None else None
     return await asyncio.to_thread(search, query, top_k, drive_id, scope=scope)
@@ -707,7 +653,6 @@ async def health(_request: Request):  # type: ignore[no-untyped-def]
 
 @mcp.custom_route("/retrieval/{channel}", methods=["POST"])
 async def retrieval_channel_route(request: Request):  # type: ignore[no-untyped-def]
-    """Authenticated benchmark route: /retrieval/vector|body|title|bundle|metadata."""
     channel = request.path_params.get("channel", "")
     if channel not in RETRIEVAL_CHANNELS:
         return JSONResponse(
@@ -736,7 +681,6 @@ async def retrieval_channel_route(request: Request):  # type: ignore[no-untyped-
 
 
 def build_app():
-    """ASGI 앱 (+ API 키 미들웨어). 인증이 없으면 기동을 거부한다."""
     if ROUTING_MODE not in {"single", "registry"}:
         raise RuntimeError("Unknown MCP routing mode")
     if ROUTING_MODE != "registry" and not MCP_API_KEY and not MCP_ALLOW_NO_AUTH:

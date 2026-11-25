@@ -1,5 +1,3 @@
-"""Unified MCP Cloud console integration, including destructive-action boundaries."""
-
 from __future__ import annotations
 
 import copy
@@ -9,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from scripts import dept_config, dept_gui
+from scripts import common_config, dept_config, dept_gui
 
 
 @pytest.fixture
@@ -95,7 +93,6 @@ def test_registry_inventory_public_config_and_keys(unified):
 def test_docai_choice_is_saved_by_update_and_returned_to_editor(unified, monkeypatch, enabled):
     from fastapi.testclient import TestClient
 
-    # 반대값에서 시작해 켜기와 끄기 모두 저장되는지 확인한다.
     unified.configs["cs"]["enableDocaiFallback"] = not enabled
     unified.configs["cs"]["drive"]["syncFolderIds"].append("student-cs")
     monkeypatch.setattr(dept_gui, "_merge_live_resource_validation", lambda *a: None)
@@ -182,7 +179,6 @@ def test_image_ocr_enable_requires_explicit_processor_and_location(unified, endp
 def test_drawer_docai_save_preserves_other_settings(unified, monkeypatch, enabled):
     from fastapi.testclient import TestClient
 
-    # OCR이 이미 켜져 있어도 fallback만 저장할 때는 OCR 설정을 변경·검증하지 않는다.
     unified.configs["cs"]["enableImageOcr"] = True
     original = copy.deepcopy(unified.configs["cs"])
     monkeypatch.setattr(dept_gui, "_http_json", lambda *a, **kw: (200, {"status": "ok"}, 1))
@@ -487,7 +483,7 @@ def test_scoped_parser_save_only_updates_selected_audience(unified,monkeypatch,b
 
 def test_scoped_options_roundtrip_in_full_editor(unified,monkeypatch):
     unified.configs["cs"]["drive"]["syncFolderIds"].append("student-cs")
-    monkeypatch.setattr(dept_gui,"_common",lambda:{**dept_config._load_yaml(dept_config.CONFIG_DIR/"common.yaml"),"DOCAI_OCR_PROCESSOR_ID":"ocr","DOCAI_OCR_LOCATION":"us"})
+    monkeypatch.setattr(dept_gui,"_common",lambda:{**common_config.load_common(dept_config.CONFIG_DIR),"DOCAI_OCR_PROCESSOR_ID":"ocr","DOCAI_OCR_LOCATION":"us"})
     public=dept_gui.department_public_config_any("cs")
     public.update(enableDocaiFallbackStaff=False,enableDocaiFallbackStudent=True,
                   enableImageOcrStaff=False,enableImageOcrStudent=True)
