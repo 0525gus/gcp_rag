@@ -108,7 +108,9 @@ def test_golden100_has_complete_e2e_labels():
 
 def test_golden200_adds_100_weakness_focused_unique_sources():
     rows = json.loads(
-        (Path(__file__).parent / "golden200.json").read_text(encoding="utf-8")
+        (Path(__file__).parent / "frozen" / "golden200-2026-09-13" / "golden200.json").read_text(
+            encoding="utf-8"
+        )
     )
 
     assert len(rows) == 200

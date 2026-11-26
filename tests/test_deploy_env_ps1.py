@@ -153,15 +153,6 @@ def test_ps1_scripts_parse() -> None:
             assert p.returncode == 0, f"{name} via {engine}: {p.stdout}{p.stderr}"
 
 
-def test_mcp_deploy_attaches_cloud_management_metadata() -> None:
-    source = (ROOT / "scripts" / "deploy_mcp.ps1").read_text(encoding="utf-8")
-    assert "gcp-rag.dev/department-metadata" in source
-    assert "--update-labels=$managementLabels" in source
-    assert "--update-annotations=$managementAnnotation" in source
-    assert "$env:DEPLOYMENT_METADATA_B64" in source
-    assert "gcp-rag-schema=v2" in source
-
-
 def test_full_deploy_accepts_real_values() -> None:
     p = _run(VALID, "Require-FullDeployEnv")
     assert p.returncode == 0, p.stderr or p.stdout
@@ -191,71 +182,6 @@ def test_full_deploy_rejects_example_env() -> None:
     err = p.stderr + p.stdout
     assert "GCP_PROJECT_ID" in err
     assert "example value" in err
-
-
-def test_cs_staff_name_is_not_student() -> None:
-    p = _run(
-        {
-            "GCP_PROJECT_ID": "my-proj",
-            "RAG_CORPUS_NAME": VALID["RAG_CORPUS_NAME"],
-            "MCP_API_KEY": VALID["MCP_API_KEY"],
-            "MCP_SERVICE_NAME_STAFF": "rag-mcp-cs-staff",
-            "MCP_SERVICE_NAME_STUDENT": "rag-mcp-cs-student",
-        },
-        "Require-McpDeployEnv",
-    )
-    assert p.returncode == 0, p.stderr or p.stdout
-
-
-def test_student_mcp_deploy_requires_student_corpus() -> None:
-    p = _run(
-        {
-            "GCP_PROJECT_ID": "my-proj",
-            "RAG_CORPUS_NAME": VALID["RAG_CORPUS_NAME"],
-            "MCP_API_KEY": "a-long-random-student-secret",
-            "MCP_API_KEY_STAFF": VALID["MCP_API_KEY"],
-            "MCP_SERVICE_NAME_STUDENT": "rag-mcp-cs-student",
-            "MCP_AUDIENCE": "student",
-            "RAG_CORPUS_NAME_STUDENT": "",
-        },
-        "Require-McpDeployEnv",
-    )
-    assert p.returncode != 0
-    assert "RAG_CORPUS_NAME_STUDENT" in (p.stderr + p.stdout)
-
-
-def test_student_mcp_deploy_rejects_staff_corpus() -> None:
-    p = _run(
-        {
-            "GCP_PROJECT_ID": "my-proj",
-            "RAG_CORPUS_NAME": VALID["RAG_CORPUS_NAME"],
-            "MCP_API_KEY": "a-long-random-student-secret",
-            "MCP_API_KEY_STAFF": VALID["MCP_API_KEY"],
-            "MCP_SERVICE_NAME_STUDENT": "rag-mcp-cs-student",
-            "MCP_AUDIENCE": "student",
-            "RAG_CORPUS_NAME_STUDENT": "projects/my-proj/locations/asia-northeast3/ragCorpora/stu",
-        },
-        "Require-McpDeployEnv",
-    )
-    assert p.returncode != 0
-    assert "must use RAG_CORPUS_NAME_STUDENT" in (p.stderr + p.stdout)
-
-
-def test_student_mcp_deploy_accepts_swapped_corpus() -> None:
-    student = "projects/my-proj/locations/asia-northeast3/ragCorpora/stu"
-    p = _run(
-        {
-            "GCP_PROJECT_ID": "my-proj",
-            "RAG_CORPUS_NAME": student,
-            "MCP_API_KEY": "a-long-random-student-secret",
-            "MCP_API_KEY_STAFF": VALID["MCP_API_KEY"],
-            "MCP_SERVICE_NAME_STUDENT": "rag-mcp-cs-student",
-            "MCP_AUDIENCE": "student",
-            "RAG_CORPUS_NAME_STUDENT": student,
-        },
-        "Require-McpDeployEnv",
-    )
-    assert p.returncode == 0, p.stderr or p.stdout
 
 
 def test_student_split_requires_both() -> None:
@@ -295,45 +221,6 @@ def test_preflight_fallback_requires_processor() -> None:
     assert "DOCAI_PROCESSOR_ID" in (p.stderr + p.stdout)
 
 
-@pytest.mark.parametrize(
-    ("allow_unauth", "flag"),
-    [("true", "--allow-unauthenticated"), ("false", "--no-allow-unauthenticated")],
-)
-def test_mcp_auth_arg_splats_as_one_whole_flag(allow_unauth: str, flag: str) -> None:
-    lines = [
-        ln.strip()
-        for ln in (ROOT / "scripts" / "deploy_mcp.ps1").read_text(encoding="utf-8").splitlines()
-        if ln.strip().startswith("$authArgs") or ln.strip().startswith("if ($ALLOW_UNAUTH")
-    ]
-    assert lines, "deploy_mcp.ps1 에서 $authArgs 를 못 찾았다"
-    script = (
-        "$ErrorActionPreference = 'Stop'; "
-        f"$ALLOW_UNAUTH = '{allow_unauth}'; "
-        + "; ".join(lines)
-        + "; function Show-Args { $args -join '|' }; "
-        "Write-Output (Show-Args --region=x @authArgs --memory=1Gi)"
-    )
-    p = subprocess.run(
-        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        cwd=str(ROOT),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert p.returncode == 0, p.stderr or p.stdout
-    assert p.stdout.strip() == f"--region=x|{flag}|--memory=1Gi"
-
-
-def test_no_script_reads_dotenv() -> None:
-    for path in sorted((ROOT / "scripts").glob("*.ps1")):
-        text = path.read_text(encoding="utf-8")
-        assert "Load-Dotenv" not in text, path.name
-    for path in sorted((ROOT / "scripts").glob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        assert "load_dotenv" not in text, path.name
-    assert not (ROOT / ".env.example").exists(), ".env.example 이 남아 있다"
-
-
 def test_base_config_returns_a_real_department_code() -> None:
     script = (
         "$ErrorActionPreference = 'Stop'; "
@@ -355,39 +242,6 @@ def test_base_config_returns_a_real_department_code() -> None:
     assert p.returncode == 0, p.stderr or p.stdout
     assert p.stdout.strip().endswith("D1")
     assert p.stdout.strip().startswith("cs"), p.stdout
-
-
-def test_deploy_passes_switches_to_deploy_mcp_by_name() -> None:
-    text = (ROOT / "scripts" / "deploy.ps1").read_text(encoding="utf-8")
-    lines = [
-        ln.strip()
-        for ln in text.splitlines()
-        if "$mcpArgs" in ln and not ln.strip().startswith("&")
-    ]
-    assert lines, "deploy.ps1 에서 $mcpArgs 를 못 찾았다"
-
-    script = (
-        "$ErrorActionPreference = 'Stop'; "
-        "$ShowKeys = $true; "
-        + "; ".join(lines)
-        + "; "
-        "function Fake-DeployMcp { param("
-        "  [string]$Dept,"
-        "  [ValidateSet('staff','student')][string]$Audience = 'staff',"
-        "  [switch]$All, [switch]$SkipBuild, [switch]$ShowKeys"
-        ") Write-Output \"dept=[$Dept] aud=[$Audience] all=$All skip=$SkipBuild show=$ShowKeys\" }; "
-        "Fake-DeployMcp @mcpArgs"
-    )
-    p = subprocess.run(
-        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
-        cwd=str(ROOT),
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert p.returncode == 0, p.stderr or p.stdout
-    out = p.stdout.strip()
-    assert out == "dept=[] aud=[staff] all=True skip=True show=True", out
 
 
 def test_reuse_images_skips_build_only_for_existing_image() -> None:
@@ -562,71 +416,3 @@ def test_scheduler_sa_binding_is_retried_not_asserted_once() -> None:
     assert "Assert-LastExit" not in binding.split("if (-not $saBound)")[0]
 
 
-def _deploy_targets_script(call: str) -> str:
-    text = (ROOT / "scripts" / "deploy_mcp.ps1").read_text(encoding="utf-8")
-    start = text.index("function Get-DeployTargets {")
-    end = text.index("$targets = @(Get-DeployTargets", start)
-    return (
-        "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); "
-        "$ErrorActionPreference = 'Stop'; "
-        "function Get-DepartmentCodes { @('cs', 'ee') }; "
-        "function Get-DepartmentAudiences { param([string]$DeptCode) "
-        "  if ($DeptCode -eq 'cs') { @('staff', 'student') } else { @('staff') } }; "
-        + text[start:end]
-        + "; " + call
-    )
-
-
-def _run_targets(call: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", _deploy_targets_script(call)],
-        cwd=str(ROOT),
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        capture_output=True,
-        check=False,
-    )
-
-
-def test_dept_without_audience_deploys_every_configured_scope() -> None:
-    p = _run_targets(
-        "(Get-DeployTargets -Dept 'cs' -Audience 'staff' -All $false -AudienceExplicit $false)"
-        " | ForEach-Object { Write-Output \"T $($_.Dept)/$($_.Audience)\" }"
-    )
-    assert p.returncode == 0, p.stderr or p.stdout
-    assert [ln for ln in p.stdout.splitlines() if ln.startswith("T ")] == [
-        "T cs/staff",
-        "T cs/student",
-    ], p.stdout
-
-
-def test_explicit_audience_deploys_only_that_one() -> None:
-    p = _run_targets(
-        "(Get-DeployTargets -Dept 'cs' -Audience 'student' -All $false -AudienceExplicit $true)"
-        " | ForEach-Object { Write-Output \"T $($_.Dept)/$($_.Audience)\" }"
-    )
-    assert p.returncode == 0, p.stderr or p.stdout
-    assert [ln for ln in p.stdout.splitlines() if ln.startswith("T ")] == ["T cs/student"], p.stdout
-
-
-def test_all_covers_every_department_and_scope() -> None:
-    p = _run_targets(
-        "(Get-DeployTargets -Dept '' -Audience 'staff' -All $true -AudienceExplicit $false)"
-        " | ForEach-Object { Write-Output \"T $($_.Dept)/$($_.Audience)\" }"
-    )
-    assert p.returncode == 0, p.stderr or p.stdout
-    assert [ln for ln in p.stdout.splitlines() if ln.startswith("T ")] == [
-        "T cs/staff",
-        "T cs/student",
-        "T ee/staff",
-    ], p.stdout
-
-
-def test_no_target_argument_is_rejected() -> None:
-    p = _run_targets(
-        "try { Get-DeployTargets -Dept '' -Audience 'staff' -All $false -AudienceExplicit $false }"
-        " catch { Write-Output 'THROWN' }"
-    )
-    assert p.returncode == 0, p.stderr or p.stdout
-    assert "THROWN" in p.stdout, p.stdout

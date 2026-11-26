@@ -1,11 +1,10 @@
 # 문서 검색(RAG) 시스템 개발 명세
 
-- 최종 개정: 2026-11-13
+- 최종 개정: 2026-11-26
 - 대상: 한국공학대학교 학과별 문서 검색 파이프라인
 - 기준: 현재 저장소 코드와 운영 설정
 
-이 문서는 시스템이 **현재 어떻게 동작하는지**를 설명한다. 과거 실측값은 기준일을
-명시한 참고 자료이며, 현재 운영 건수나 성능 보장을 뜻하지 않는다.
+이 문서는 시스템이 **현재 어떻게 동작하는지**를 설명한다.
 
 ## 1. 목적과 범위
 
@@ -28,7 +27,6 @@ FactChat이 MCP를 통해 문서를 검색할 수 있게 한다.
 - 최종 답변 문장 생성: Fact Chat의 LLM을 사용, RAG서버만 운용.
 - 문서별 ACL: 현재 경계는 Drive 폴더 - 교직원·학생 코퍼스로 나뉨
 - ZIP 내부 문서 자동 해제
-- 스캔 문서 OCR (구글 DocAI Fallback 필요) 
 
 ## 2. 현재 아키텍처
 
@@ -46,17 +44,20 @@ flowchart LR
     QS --> SYNC
     SYNC --> RF[학과별 교직원 RAG 코퍼스]
     SYNC --> RS[학과별 학생 RAG 코퍼스]
-    RF --> MF["rag-mcp-{dept}-staff"]
-    RS --> MS["rag-mcp-{dept}-student"]
-    MF --> FC[FactChat]
-    MS --> FC
+    REG[(Firestore
+mcp_registry)] --> MCP["Cloud Run
+rag-mcp · 키별 범위"]
+    RF --> MCP
+    RS --> MCP
+    MCP --> FC[FactChat]
 ```
 
 구성 원칙:
 
 - `rag-sync`, `rag-parser`, Workflow, Scheduler, Firestore, metadata 버킷과
   Cloud Tasks 큐는 공용이다.
-- Drive 범위, GCS 버킷, RAG 코퍼스와 MCP 서비스는 학과별로 분리한다.
+- Drive 범위, GCS 버킷, RAG 코퍼스는 학과별로 분리한다. MCP는 공통 `rag-mcp` 하나이며
+  학과·대상별 API 키가 검색 범위를 정한다([MCP.md](MCP.md)).
 - `DEPARTMENTS_JSON`이 Drive ID를 학과 설정으로 라우팅한다. 등록되지 않은
   Drive를 기본 학과로 보내지 않고 실패시켜 자료 혼입을 막는다.
 - 교직원 코퍼스는 해당 학과의 동기화 대상 전체를 담는다.
@@ -70,7 +71,7 @@ flowchart LR
 |---|---|---|
 | `rag-sync` | 2 CPU, 2GiB, timeout 3600초, concurrency 4 | 변경 조회, 변환 조정, 상태 관리, 색인 작업 처리 |
 | `rag-parser` | 2 CPU, 2GiB, timeout 540초, concurrency 4, max instances 10 | HWP/HWPX → Markdown |
-| `rag-mcp-{dept}-{audience}` | 1 CPU, 1GiB, timeout 60초, concurrency 40 | 코퍼스 검색을 MCP로 제공 |
+| `rag-mcp` | 2 CPU, 1GiB, timeout 300초, concurrency 40, 최소 인스턴스 0 | 키별 코퍼스 검색을 MCP로 제공 |
 | faculty/student 큐 | 큐별 concurrency 1, 0.2 dispatch/s | 동일 코퍼스 요청 직렬화와 재시도 |
 
 모든 Cloud Tasks 요청은 OIDC로 `rag-sync`의 내부 worker를 호출한다. 두 큐는
@@ -220,6 +221,7 @@ pageToken 커밋을 막지 않는다. 그렇지 않으면 같은 변경 페이�
 | XLSX/XLSM | 셀을 Markdown 표로 변환 | Markdown |
 | PDF | 한도 이하면 원본, 초과 시 분할 가능 | PDF 또는 분할 PDF |
 | DOC/DOCX/PPTX/TXT/MD/HTML/CSV/RTF | Drive에서 GCS로 직접 복사 | 원본 형식 |
+| PNG/JPEG | 학과·대상 옵션이 켜져 있으면 Document AI OCR([DOCUMENT_AI.md](DOCUMENT_AI.md)) | Markdown |
 | ZIP, 구형 XLS | 원본은 색인하지 않고 경로 sidecar만 생성 | `.meta.md` |
 | 그 밖의 미지원 MIME | `SKIPPED` | 없음 |
 | Drive 폴더 | 처리·파일 내역 표시 대상에서 제외 | 없음 |
@@ -253,7 +255,27 @@ audience만 갱신한다. 이 경우 새 GCS URI를 색인 큐에 보내지 않�
 
 HWP 품질 게이트는 텍스트 밀도, 표 손실, 빈 본문을 검사한다. `QG_MODE`는
 `log`, `reject`, `fallback`을 지원하며 현재 `log`다. 빈 본문은 모드와 관계없이
-실패한다. Document AI fallback은 별도 설정을 켜야 한다.
+실패한다. Document AI fallback은 별도 설정을 켜야 한다([DOCUMENT_AI.md](DOCUMENT_AI.md)).
+
+### 5.4 게시글 metadata.json
+
+게시글의 본문·첨부와 같은 Drive 폴더에 UTF-8 `metadata.json`을 두면 그 폴더 파일의 검색 결과에
+게시글 제목·주소가 붙는다.
+
+```json
+{"source_url": "https://example.org/posts/153759", "title": "게시글 제목"}
+```
+
+- 직계 폴더의 파일 하나만 적용하며 상위 폴더에서 상속하지 않는다. `title`·`source_url`만 읽는다.
+  잘못된 JSON·주소, 중복 파일, 64 KiB 초과는 로그를 남기고 무시한다. `metadata.json` 자체는 색인하지 않는다.
+- Firestore에 `sourceTitle`·`websiteUrl`·`metadataFileId`를 저장하고 원본 name/path/Drive `sourceUri`는
+  보존한다. 정규화 텍스트와 경로 sidecar 머리말에도 제목·주소를 넣는다. 학생 키 응답은 게시글 주소를
+  출처 링크로 준다.
+- 파일이 생기거나 바뀌면 다음 변경분 동기화가 그 폴더의 갱신 작업을 Cloud Tasks에 넣고 5개씩 처리한다.
+  OCR 본문을 재사용하며, 이동·삭제되면 이전 폴더도 갱신한다. 원본 수정 시각이 바뀐 파일은 정상 동기화에
+  맡긴다. 전체 동기화에서 제목·주소가 바뀌면 `UNCHANGED`를 건너뛰고 재처리한다.
+- 한 파일이 계속 실패해 갱신 작업이 `FAILED`로 끝나면 같은 폴더의 다음 페이지 파일은 갱신되지 않는다.
+  실패 파일을 콘솔에서 재처리한 뒤 전체 동기화나 `metadata.json` 수정으로 다시 실행해야 한다.
 
 ## 6. 색인과 삭제
 
@@ -285,6 +307,14 @@ non-2xx를 반환하여 Cloud Tasks가 재시도하게 한다. 이미 `DONE`인 
 `POST /sync/index-gcs` 동기 API는 호환성과 수동 복구를 위해 유지하지만, 현재
 Workflow의 정상 변경분 경로는 비동기 API를 사용한다.
 
+문서별 결과는 `sync_jobs/{jobId}/parts/{part}/fileResults`와 `doc_state/{fileId}/index_results/{jobId}`에
+`DONE`·`FAILED`·`PENDING`과 문서·라우팅 버전으로 남는다. 반입은 원문 파일별로 하며 본문과 경로 sidecar를
+함께 확인한다. 같은 작업이 다시 전달돼도 완료된 파일은 다시 지우거나 반입하지 않는다. 한 파일의 실패가
+확정돼도 묶음의 나머지를 처리하고, 작업은 `DONE`(`result.partial`, `failedFileIds`)으로 끝난다. 실패 파일은
+`doc_state/{fileId}/index_failures/{jobId}`에 기록하고 `PARSED`에 둔다. Workflow는 성공·실패 URI 수를 서버
+기록과 대조한 뒤에만 토큰을 커밋하고 최종 `ok=false`를 반환한다. 통신 결과 불확실·시간 초과·문서 버전
+충돌은 이 부분 실패와 구분해 실행 오류와 잠금 보호를 유지한다.
+
 ### 6.2 삭제
 
 삭제 요청은 다음 순서로 처리한다.
@@ -300,8 +330,9 @@ Workflow의 정상 변경분 경로는 비동기 API를 사용한다.
 
 ## 7. 검색
 
-MCP 서비스 하나는 배포 시 정해진 코퍼스 하나만 조회한다. 요청자가 도구 인자로
-교직원·학생 코퍼스를 바꾸지 못한다.
+`rag-mcp`는 요청의 API 키로 학과·대상 범위를 정하고 그 코퍼스만 조회한다. 요청자가
+도구 인자로 학과나 교직원·학생 코퍼스를 바꾸지 못한다. 학생 키는 `audience=STUDENT`
+문서만 받는다.
 
 검색 순서:
 
@@ -312,13 +343,14 @@ MCP 서비스 하나는 배포 시 정해진 코퍼스 하나만 조회한다. �
 5. 삭제·제외·스킵 상태와 폴더 밖 정리 실패 문서를 제거하고, 요청된 drive_id를 적용한다.
 6. 파일별 최대 3청크, 전체 최대 15청크를 선택하되 청크 경계를 보존한다.
    top_k가 전체 청크 상한보다 크면 반환 문서 수도 그 상한 이하가 된다.
-7. 파일명, Drive 링크, 수정 시각과 함께 반환한다.
+7. 파일명, 출처 링크, 수정 시각과 함께 반환한다. 학생 키 응답은 게시글 주소가 있으면 그 주소를
+   출처 링크로 준다.
 
 RAG 청킹 기본값은 chunk size 1024, overlap 256이다. 검색 결과는 문서별 본문 청크와
 출처·citationId를 한 번에 반환한다. 공개 `answer` 도구와 답변 가능성처럼 읽히던
 키워드 `coverage`는 제거했다. 서버는 최종 LLM 답변을 생성하지 않는다.
 HTML은 수집 시 제목·표 관계를 보존하는 텍스트로 변환하며 기존 HTML 색인도 응답에서 정제한다.
-응답 계약과 배포 시 전환 절차는 [MCP_SEARCH_V2.md](MCP_SEARCH_V2.md)를 따른다.
+응답 계약은 [MCP.md](MCP.md#응답-계약)를 따른다.
 
 ## 8. API 계약
 
@@ -330,6 +362,7 @@ HTML은 수집 시 제목·표 관계를 보존하는 텍스트로 변환하며 
 | `POST /sync/bootstrap` | 최초 Drive token 기준점 생성 | 운영자 |
 | `POST /sync/backfill`, `/sync/backfill-run` | 전체 수집 준비·실행 | Workflow/운영자 |
 | `POST /sync/changes` | 변경 목록과 다음 token 후보 조회 | Workflow |
+| `POST /sync/metadata-refresh-task` | 게시글 metadata.json 갱신 페이지 처리 | Cloud Tasks |
 | `POST /sync/ingest` | 파일 변환·GCS 적재 | Workflow |
 | `POST /sync/delete` | RAG/GCS/상태 삭제 | Workflow |
 | `POST /sync/index-gcs-async` | 코퍼스별 색인 job/Task 생성 | Workflow |
@@ -342,6 +375,7 @@ HTML은 수집 시 제목·표 관계를 보존하는 텍스트로 변환하며 
 | `POST /sync/backfill-rag-mappings` | 기존 RagFile 매핑 생성 | 운영자 |
 | `GET /sync/jobs/{jobId}` | 장시간 작업 진행률 | UI/운영자 |
 | `POST /sync/index-gcs` | 동기 색인 호환 경로 | 운영자/구 경로 |
+| `POST /sync/reprocess-file` | 선택 문서 재처리 | 관리 콘솔 |
 | `POST /sync/process` | 파일 단건 통합 처리 | 운영 도구 |
 
 `rag-sync`와 `rag-parser`는 IAM 인증이 필요하다. 내부 endpoint를 공개하지 않는다.
@@ -403,7 +437,7 @@ Firestore `mcp_registry/current`에 저장된다. 학생 코퍼스와 학생 폴
 
 ```powershell
 .\scripts\deploy.ps1
-.\scripts\deploy_mcp.ps1 -All
+.\scripts\deploy_mcp.ps1
 ```
 
 `deploy.ps1`은 parser/sync 배포, Cloud Tasks 큐와 IAM, MCP 배포, Workflow,
@@ -412,23 +446,9 @@ Scheduler가 Workflow에 넘기는 `driveIds`도 갱신해야 한다.
 
 ## 10. 관리 콘솔과 관측성
 
-로컬 관리 콘솔:
-
-```powershell
-pip install -r requirements-gui.txt
-python scripts/dept_gui.py
-```
-
-- 주소는 `http://127.0.0.1:8765`이며 외부 인터페이스에 bind하지 않는다.
-- 학과 설정 생성·수정, GCP 리소스 상태, 최근 Workflow 실행을 확인한다.
-- `전체 상태 확인`과 학과별 다시 확인은 각 검사를 순서대로 수행하되, 완료된
-  검사 결과는 즉시 UI에 반영한다.
-- 상태 재확인 중에는 기존 “정상” 배지를 그대로 확정 상태처럼 두지 않고
-  “조회 중”으로 표시한다.
-- 실행 상세는 Workflow 실행 ID로 로그를 조회해 RAG 색인, 삭제, 정합성 검사 등의
-  경고·오류와 영향받은 파일을 보여준다.
-- 상태 조회는 읽기 전용이다. 설정 저장이나 배포 버튼을 누르기 전에는 GCP 리소스를
-  변경하지 않는다.
+로컬 관리 콘솔(`.
+un.cmd` 또는 `python scripts/dept_gui.py`, `http://127.0.0.1:8765`)로 학과 설정,
+리소스·배포·동기화 상태, 선택 문서 재처리, 해체를 한다. [CONSOLE.md](CONSOLE.md)를 따른다.
 
 운영 로그의 핵심 식별자는 Workflow execution ID, async index `jobId`, Drive
 `fileId`, Cloud Trace ID다. 지연 분석 시 Workflow 전체 시간과 큐 대기, Vertex
@@ -447,7 +467,7 @@ import 시간을 분리해서 본다.
 
 운영 전 개선이 필요한 항목:
 
-- MCP 키는 Secret Manager에 저장하고 키 원문이 런타임 환경변수에 들어가지 않는지 지속 검증
+- 예전 학과별 MCP 서비스(`rag-mcp-<학과>-<대상>`)는 의도적으로 남겨 두며 키 원문을 환경변수로 가진다
 - 기본 Compute 서비스 계정 대신 서비스별 전용 계정과 최소 권한 적용
 - Firestore PITR/삭제 보호와 학과별 GCS versioning 정책 검토
 - Cloud Monitoring 알림과 예산 정책의 실제 적용 확인
@@ -467,26 +487,7 @@ import 시간을 분리해서 본다.
 - 매핑 누락 시 fallback scan이 정확성을 보장하지만 코퍼스 크기에 비례한 지연이
   다시 발생한다. 매핑 coverage를 지속 관찰해야 한다.
 
-## 13. 기준일이 있는 품질·성능 참고값
-
-다음 수치는 **2026-07-28 단일 코퍼스** 기준이며 현재 건수나 SLO가 아니다.
-
-| 항목 | 실측값 |
-|---|---:|
-| 색인 문서 | 1,211건 |
-| 색인 객체 | 1,418건 |
-| MCP 검색 지연 중앙값 / 최대 | 1.14초 / 1.39초 |
-
-골든셋 100건, `top_k=5` 결과:
-
-| 기준 | Hit@1 | Hit@3 | Hit@5 | MRR |
-|---|---:|---:|---:|---:|
-| 정확한 파일 | 46% | 81% | 94% | 0.652 |
-| 같은 자료 묶음 허용 | 63% | 90% | 97% | 0.766 |
-
-운영 구조 변경 후에는 학과·audience별로 별도 기준선을 다시 측정해야 한다.
-
-## 14. 검증과 평가 재현
+## 13. 검증과 평가 재현
 
 ```powershell
 python -X utf8 -m pytest -q
@@ -494,15 +495,29 @@ cd gui
 npm test
 ```
 
-검색 평가:
+검색 평가는 MCP를 직접 호출한다. FactChat 경로를 거치지 않는다.
 
-```bash
-export MCP_URL=https://<service>/mcp
-export MCP_API_KEY=<key>
-python scripts/eval_golden.py tests/golden100.json
-python scripts/gen_eval_doc.py <result.json> docs/GOLDEN_EVAL.md
-python scripts/analyze_chunking.py <corpus-directory>
+```powershell
+$env:MCP_URL = "https://<service>/mcp"; $env:MCP_API_KEY = "<key>"
+python scripts/eval_golden.py tests/golden100.json --out <result.json>
+python scripts/gen_eval_doc.py <result.json> tests/_bench_out/golden_eval_report.md
+python scripts/eval_retrieval_channels.py --dept cs --split dev --top-k 20 --candidate-k 30
+python scripts/run_phase1_diagnosis.py --department cs --split dev
 ```
 
-골든셋 `tests/golden100.json`은 교직원 코퍼스 기준이다. 학생 MCP는 학생에게 실제로
-공개되는 문서만으로 별도 골든셋을 구성해 평가해야 한다.
+| 골든셋 | 용도 |
+|---|---|
+| `tests/golden100.json` | 교직원 코퍼스 기준 기본 셋. `eval_golden.py`로 Hit@1/3/5·MRR·Evidence Recall·지연 측정 |
+| `tests/frozen/golden200-2026-09-13/` | golden100에 취약 유형 100건을 더한 200건과 dev 150(튜닝) / holdout 50(최종 1회 판단) 고정 분할. 같은 자료묶음은 한쪽에만 둔다. 새 스냅샷은 `scripts/freeze_golden200.py` |
+
+- `eval_retrieval_channels.py`는 `/retrieval/*` 채널별 `rows.csv`·`summary.json`을 `tests/_bench_out/retrieval_channels/`에
+  남긴다. `run_phase1_diagnosis.py`는 Firestore·RAG·GCS를 읽기만 하며 gold 감사·후보 곡선·채널 합집합·
+  leave-one-out 결과를 `tests/_bench_out/phase1/`에 남긴다. Vertex `retrieveContexts`의 topK 상한은 100이다.
+- 문항 필드: `expected_file`(fileId, 동등 파일은 배열), `expected_bundle`, `expected_evidence`(검색 청크에 있어야
+  할 원문 구간, 변형은 배열로 묶음), `expected_answer`, `must_include`, `must_not_include`,
+  `expected_year_version`, `replaces_query`, `label_audit`, `also_accept`(본문이 같다고 확인한 사본).
+- 판정: 정확한 fileId가 상위 k건에 있으면 파일 적중, 같은 폴더의 다른 문서(공문↔붙임)면 자료묶음 적중.
+- 골든셋 문항은 색인 문서에서 시드 고정 무작위 추출한 뒤 본문을 읽고 사용자 말투로 작성한다. 제목 어휘를
+  베끼지 않고, 본문이 없는 문서는 제외한다.
+- `tests/golden100.json`은 교직원 코퍼스 기준이다. 학생 키 검색은 학생에게 공개되는 문서만으로 별도 골든셋이
+  필요하다.

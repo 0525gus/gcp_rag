@@ -40,7 +40,6 @@ def test_dropped_keys_are_not_sent_again() -> None:
     for script, var in (
         ("deploy.ps1", "parserEnv"),
         ("deploy.ps1", "syncEnv"),
-        ("deploy_mcp.ps1", "envVars"),
     ):
         sent |= _env_names_sent_by(script, var)
     revived = sorted(DROPPED_WITH_DOTENV & sent)

@@ -14,14 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts import dept_config
-from scripts.dept_config import _fmt, build_env, list_departments
-
-requires_dept_files = pytest.mark.skip(reason="requires live Cloud department registry")
-
-
-def _any_dept() -> str:
-    return list_departments()[0]
-
+from scripts.dept_config import _fmt, build_env
 
 def test_bool_is_lowercase():
     assert _fmt(True) == "true"
@@ -31,41 +24,6 @@ def test_bool_is_lowercase():
 def test_list_is_comma_joined():
     assert _fmt(["a", "b"]) == "a,b"
     assert _fmt(["a", "  ", "b"]) == "a,b"
-
-
-@requires_dept_files
-def test_audience_selects_corpus():
-    dept = _any_dept()
-    staff = build_env(dept, "staff")
-    student = build_env(dept, "student")
-
-    assert staff["RAG_CORPUS_NAME"] != student["RAG_CORPUS_NAME"]
-    assert student["RAG_CORPUS_NAME"] == student["RAG_CORPUS_NAME_STUDENT"]
-    assert staff["RAG_CORPUS_NAME_STUDENT"] == student["RAG_CORPUS_NAME"]
-    assert staff["RAG_CORPUS_NAME"] != staff["RAG_CORPUS_NAME_STUDENT"]
-
-
-@requires_dept_files
-def test_derived_names_follow_convention():
-    dept = _any_dept()
-    env = build_env(dept, "student")
-    assert env["MCP_SERVICE_NAME"] == f"rag-mcp-{dept}-student"
-    assert env["MCP_AUDIENCE"] == "student"
-    assert env["DEPT_CODE"] == dept
-
-
-@requires_dept_files
-def test_common_values_are_present():
-    env = build_env(_any_dept(), "staff")
-    for key in (
-        "GCP_PROJECT_ID",
-        "GCP_REGION",
-        "FIRESTORE_DATABASE",
-        "DOC_STATE_COLLECTION",
-        "TOP_K_DEFAULT",
-        "ALLOW_UNAUTH",
-    ):
-        assert env.get(key), f"{key} 가 비었다"
 
 
 def _write_dept(tmp_path: Path, monkeypatch, body: dict) -> None:
@@ -92,49 +50,6 @@ def test_missing_corpus_rejected(tmp_path, monkeypatch):
         build_env("x", "staff")
 
 
-@requires_dept_files
-def test_unknown_audience_rejected():
-    with pytest.raises(SystemExit):
-        build_env(_any_dept(), "faculty")
-
-
-@requires_dept_files
-def test_every_department_builds():
-    for code in list_departments():
-        for audience in dept_config.configured_audiences(code):
-            env = build_env(code, audience)
-            assert env["MCP_SERVICE_NAME"] == f"rag-mcp-{code}-{audience}"
-
-
-@requires_dept_files
-def test_all_departments_use_distinct_corpora():
-    seen: dict[str, str] = {}
-    for code in list_departments():
-        for audience in dept_config.configured_audiences(code):
-            corpus = build_env(code, audience)["RAG_CORPUS_NAME"]
-            owner = f"{code}/{audience}"
-            assert corpus not in seen, f"코퍼스 중복: {owner} 와 {seen[corpus]}"
-            seen[corpus] = owner
-
-
-def test_local_department_ignore_rule_is_gone():
-    rules = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
-    assert not any("departments" in rule for rule in rules)
-
-
-def test_local_department_cloud_build_rule_is_gone():
-    rules = (ROOT / ".gcloudignore").read_text(encoding="utf-8").splitlines()
-    assert not any("departments" in rule for rule in rules)
-
-
-@requires_dept_files
-def test_department_buckets_override_common():
-    env = build_env(_any_dept(), "staff")
-    assert env["GCS_HWP_ORIGINAL_BUCKET"]
-    assert env["GCS_SOURCE_BUCKET"]
-    assert env["GCS_HWP_ORIGINAL_BUCKET"] != env["GCS_SOURCE_BUCKET"]
-
-
 def test_half_configured_buckets_rejected(tmp_path, monkeypatch):
     _write_dept(
         tmp_path,
@@ -155,10 +70,6 @@ def test_omitted_buckets_inherit_common(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     assert build_env("x", "staff")["GCS_SOURCE_BUCKET"] == "shared-src"
-
-
-def test_local_department_directory_is_gone():
-    assert not list((ROOT / "config" / "departments").glob("*"))
 
 
 def test_placeholder_key_is_rejected(tmp_path, monkeypatch):
@@ -201,17 +112,6 @@ def test_weak_key_warns_on_stderr(tmp_path, monkeypatch, capsys):
     assert env["MCP_API_KEY"] == "TEST_STAFF"
     assert "약하다" in captured.err
     assert "약하다" not in captured.out
-
-
-@requires_dept_files
-def test_all_departments_use_distinct_keys():
-    seen: dict[str, str] = {}
-    for code in list_departments():
-        for audience in dept_config.configured_audiences(code):
-            key = build_env(code, audience)["MCP_API_KEY"]
-            owner = f"{code}/{audience}"
-            assert key not in seen, f"키 중복: {owner} 와 {seen[key]}"
-            seen[key] = owner
 
 
 from shared.config import Settings, _departments_from_json
@@ -334,11 +234,6 @@ def test_every_department_shape_emits_the_same_keys(tmp_path, monkeypatch):
             f"{name}: 키 집합이 학과마다 다르면 Set-DeptConfig 가 앞 학과 값을 남긴다. "
             f"빠짐 {sorted(reference - keys)}, 추가 {sorted(keys - reference)}"
         )
-
-
-def test_powershell_applies_dept_config_output_without_a_key_list():
-    ps = (ROOT / "scripts" / "_load_env.ps1").read_text(encoding="utf-8")
-    assert "$ConfigKeys" not in ps, "키 목록을 따로 두면 dept_config 출력과 갈라진다"
 
 
 def test_load_config_env_leaves_empty_values_unset(tmp_path, monkeypatch):

@@ -1,5 +1,4 @@
 from dataclasses import replace
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException

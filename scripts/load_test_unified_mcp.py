@@ -57,7 +57,7 @@ async def main():
     _, record, configs = admin.read()
     url = record["serviceUrl"].rstrip("/") + "/mcp"
     run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    out = ROOT / "docs/verification" / f"unified-load-{run_id}.json"
+    out = ROOT / "tests" / "_bench_out" / f"unified-load-{run_id}.json"
     report = {"runId": run_id, "url": url, "startedAt": datetime.now(UTC).isoformat(),
               "userAgent": f"gcp-rag-loadtest/{run_id}", "stages": [],
               "method": f"Closed-loop concurrent workers, {args.requests_per_worker} searches each; alternating CS staff/student. "

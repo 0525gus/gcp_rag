@@ -174,7 +174,6 @@ class WorkflowNotFoundError(RuntimeError):
     pass
 
 
-
 def _read_yaml(path: Path) -> dict[str, Any]:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
@@ -4301,55 +4300,6 @@ def _append_mcp_deploy_log(run_id: str, line: str, secrets_to_redact: list[str])
             if step["key"] == "deploy" and step["status"] == "RUNNING":
                 step["detail"] = clean[:300]
                 break
-
-
-def _run_mcp_deploy_script(
-    code: str,
-    *,
-    skip_build: bool,
-    on_line: Any,
-) -> int:
-    executable = shutil.which("pwsh.exe") or shutil.which("pwsh")
-    if not executable:
-        raise RuntimeError("PowerShell 7(pwsh)을 찾을 수 없습니다.")
-    args = [
-        executable,
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(ROOT / "scripts" / "deploy_mcp.ps1"),
-        "-Dept",
-        code,
-    ]
-    if skip_build:
-        args.append("-SkipBuild")
-    env = os.environ.copy()
-    env.update(
-        {
-            "PYTHONUTF8": "1",
-            "PYTHONIOENCODING": "utf-8",
-            "CLOUDSDK_CORE_DISABLE_PROMPTS": "1",
-        }
-    )
-    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    process = subprocess.Popen(
-        args,
-        cwd=ROOT,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        shell=False,
-        creationflags=flags,
-    )
-    if process.stdout:
-        for line in process.stdout:
-            on_line(line)
-    return process.wait()
 
 
 def _gcloud_env_argument(values: dict[str, Any]) -> str:

@@ -73,8 +73,10 @@ def _write_json(path: Path, value: Any) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='Create a deterministic bundle-grouped Golden200 dev/holdout snapshot.')
-    parser.add_argument("--golden", type=Path, default=ROOT / "tests/golden200.json")
-    parser.add_argument("--sources", type=Path, default=ROOT / "tests/_bench_out/golden200_sources.json")
+    parser.add_argument("--golden", type=Path, default=ROOT / "tests/frozen/golden200-2026-09-13/golden200.json")
+    parser.add_argument(
+        "--sources", type=Path, default=ROOT / "tests/frozen/golden200-2026-09-13/golden200_sources.json"
+    )
     parser.add_argument("--out-dir", type=Path, default=ROOT / "tests/frozen/golden200-2026-09-13")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()

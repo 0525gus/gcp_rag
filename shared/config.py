@@ -198,8 +198,8 @@ class Settings:
     qg_min_text_length: int = 20
 
     qg_mode: str = "log"
-    # top_k_default 와 search_fetch_multiplier 는 Golden 200 평가로 고정한 Arm 2 값이다
-    # (docs/verification/golden200-normalized-boundary-audit-2026-09-15.md).
+    # top_k_default 와 search_fetch_multiplier 는 Golden 200 평가(2026-09-15)로 고정한
+    # Arm 2 값이다.
     top_k_default: int = 7
 
     # 검색 여유분 — retrieve 는 청크 단위인데 postprocess 가 '파일당 1청크' 로
