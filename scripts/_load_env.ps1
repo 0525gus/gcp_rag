@@ -43,12 +43,6 @@ function Get-DepartmentCodes {
   return $codes
 }
 
-function Get-DepartmentAudiences {
-  param([string]$DeptCode)
-  $audiences = @(Invoke-DeptConfig --dept $DeptCode --audiences | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-  if (-not $audiences) { throw "$DeptCode : 배포할 MCP 범위를 찾지 못했다" }
-  return $audiences
-}
 
 function Get-DepartmentsJson {
   $json = (Invoke-DeptConfig --departments-json) -join ""
@@ -86,32 +80,9 @@ function Get-EnvOr {
   return $v
 }
 
-function Get-McpStaffServiceName {
-  return Get-EnvOr MCP_SERVICE_NAME_STAFF "rag-mcp-cs-staff"
-}
 
-function Get-McpStudentServiceName {
-  return Get-EnvOr MCP_SERVICE_NAME_STUDENT "rag-mcp-cs-student"
-}
 
-function Get-McpDeployServiceName {
-  if (-not [string]::IsNullOrWhiteSpace($env:MCP_SERVICE_NAME)) {
-    return $env:MCP_SERVICE_NAME
-  }
-  if ($env:MCP_AUDIENCE -like "*student*") {
-    return Get-McpStudentServiceName
-  }
-  return Get-McpStaffServiceName
-}
 
-function Test-McpStudentTarget {
-  param([string]$Service)
-  if ($env:MCP_AUDIENCE -like "*student*") { return $true }
-  $student = Get-McpStudentServiceName
-  if ($Service -eq $student) { return $true }
-  if ($Service -like "*student*") { return $true }
-  return $false
-}
 
 function Test-PlaceholderValue {
   param([string]$Value)
@@ -177,27 +148,6 @@ function Require-FullDeployEnv {
   }
   if ($env:MCP_API_KEY_STUDENT -and $env:MCP_API_KEY -and $env:MCP_API_KEY_STUDENT -eq $env:MCP_API_KEY) {
     $errs.Add("MCP_API_KEY_STUDENT: must differ from keys.staff")
-  }
-  Assert-EnvErrors $errs
-}
-
-function Require-McpDeployEnv {
-  $errs = [System.Collections.Generic.List[string]]::new()
-  Add-RequiredEnv $errs GCP_PROJECT_ID
-  Add-RequiredEnv $errs RAG_CORPUS_NAME "Vertex RAG corpus path"
-  Add-RequiredEnv $errs MCP_API_KEY "Cloud 학과 등록부 keys.<audience>"
-
-  $service = Get-McpDeployServiceName
-  if (Test-McpStudentTarget $service) {
-    if ($env:MCP_API_KEY_STAFF -and $env:MCP_API_KEY -eq $env:MCP_API_KEY_STAFF) {
-      $errs.Add("MCP_API_KEY: student service must not reuse MCP_API_KEY_STAFF")
-    }
-    Add-RequiredEnv $errs RAG_CORPUS_NAME_STUDENT "student deploy needs its own corpus"
-    if ($env:RAG_CORPUS_NAME -ne $env:RAG_CORPUS_NAME_STUDENT) {
-      $errs.Add("RAG_CORPUS_NAME: student deploy must use RAG_CORPUS_NAME_STUDENT")
-    }
-  } elseif ($env:RAG_CORPUS_NAME_STUDENT -and $env:RAG_CORPUS_NAME -eq $env:RAG_CORPUS_NAME_STUDENT) {
-    $errs.Add("MCP_AUDIENCE: student corpus on staff service $service - set MCP_AUDIENCE=student")
   }
   Assert-EnvErrors $errs
 }

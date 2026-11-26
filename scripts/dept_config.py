@@ -366,7 +366,6 @@ def main() -> int:
         action="store_true",
         help="rag-sync 용 DEPARTMENTS_JSON 값(한 줄)",
     )
-    ap.add_argument("--audiences", action="store_true", help="학과에 설정된 MCP 범위")
     ap.add_argument("--dept")
     ap.add_argument("--audience", default="staff", choices=AUDIENCES)
     args = ap.parse_args()
@@ -378,13 +377,6 @@ def main() -> int:
 
     if args.departments_json:
         print(departments_json())
-        return 0
-
-    if args.audiences:
-        if not args.dept:
-            ap.error("--audiences 에는 --dept 가 필요하다")
-        for audience in configured_audiences(args.dept):
-            print(audience)
         return 0
 
     if not args.dept:

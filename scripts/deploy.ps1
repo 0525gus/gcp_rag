@@ -1,7 +1,6 @@
 ﻿[CmdletBinding()]
 param(
   [switch]$SkipMcp,
-  [switch]$ShowKeys,
   [switch]$ReuseExisting,
   [switch]$EnvOnly
 )
@@ -215,16 +214,7 @@ if (-not (Test-SkipService -Name "rag-sync")) {
 if (-not $SkipMcp) {
   Write-Host ""
   Write-Host "== 공통 MCP 배포 (deploy_mcp.ps1) =="
-  # **해시테이블 splat 이어야 한다.** 배열 splat 은 요소를 이름이 아니라
-  # 위치 인자로 넘긴다 — @("-All","-SkipBuild") 는 $Dept="-All",
-  # $Audience="-SkipBuild" 로 박혀 ValidateSet 에서 죽었다(실측, 실배포 중단).
-  # gcloud 쪽 @authArgs 는 배열이 맞다 — 네이티브 명령은 위치 인자를 받는다.
-  $mcpArgs = @{ All = $true; SkipBuild = $true }
-  if ($ShowKeys) { $mcpArgs["ShowKeys"] = $true }
-  # 자식이 실패하면 throw 가 그대로 올라온다($ErrorActionPreference=Stop, 그리고
-  # deploy_mcp.ps1 은 gcloud 마다 Assert-LastExit 를 건다). $LASTEXITCODE 는
-  # 자식이 마지막에 부른 gcloud 것이라 여기서 성패 판정에 쓸 수 없다.
-  & (Join-Path $PSScriptRoot "deploy_mcp.ps1") @mcpArgs
+  & (Join-Path $PSScriptRoot "deploy_mcp.ps1") -SkipBuild
   Set-BaseDeployConfig | Out-Null
 }
 

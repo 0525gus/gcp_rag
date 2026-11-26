@@ -10,7 +10,7 @@
 
 **통합 MCP 운영:** 공통 `rag-mcp` URI 하나에 기존 학과·교직원·학생 키를 연결한다.
 Cloud 레지스트리 설정, 범위 격리, 배포와 CPU 비교는
-[`docs/unified-mcp.md`](docs/unified-mcp.md)를 참고한다.
+[`docs/MCP.md`](docs/MCP.md)를 참고한다.
 
 ```mermaid
 flowchart TB
@@ -25,8 +25,7 @@ flowchart TB
   GCS["GCS hwp + source"]
   StaffRAG[RAG 교직원]
   StudentRAG[RAG 학생]
-  McpStaff[rag-mcp-cs-staff]
-  McpStudent[rag-mcp-cs-student]
+  Mcp["rag-mcp · 키별 범위"]
 
   Scheduler --> Workflow
   Workflow --> Sync
@@ -38,16 +37,16 @@ flowchart TB
   Sync --> StudentQueue --> Sync
   Sync --> StaffRAG
   Sync --> StudentRAG
-  McpStaff --> StaffRAG
-  McpStudent --> StudentRAG
+  Firestore --> Mcp
+  Mcp --> StaffRAG
+  Mcp --> StudentRAG
 ```
 
 | 서비스 | 역할 | 공개 |
 |---|---|---|
 | `rag-parser` | HWP/HWPX → MD | IAM |
 | `rag-sync` | Drive 변경 감지, GCS 적재, RAG 작업 생성·처리 | IAM |
-| `MCP_SERVICE_NAME_STAFF` | 교직원 `search` | URL + 키 |
-| `MCP_SERVICE_NAME_STUDENT` | 학생 (분리 켠 뒤) | URL + 키 |
+| `rag-mcp` | 학과·교직원·학생 `search`. 키가 검색 범위를 정한다 | URL + 키 |
 
 변경분 처리 순서:
 
@@ -173,12 +172,13 @@ Drive 권한은 GCP IAM 과 **별개 체계**다. 프로젝트 소유자여도 �
 
 - GUI의 `단일 코퍼스`를 선택하면 `corpora.student`, `drive.studentFolderIds`, `keys.student`를 만들지 않는다
 - 학생 분리는 위 세 값을 모두 설정하며, `studentFolderIds` 는 `syncFolderIds` 의 부분집합이어야 한다
-- `minInstances` 는 학과당 상주 인스턴스 수. `1` 은 24시간 과금이다
-- `QG_MODE`는 기본값 `log` 유지. `fallback` 은 parser 이미지에 LibreOffice 가 없어 런타임에 실패한다
+- `minInstances` 는 예전 학과별 MCP 서비스용 값이다. 통합 `rag-mcp`는 최소 인스턴스 0으로 배포하므로 쓰이지 않는다
+- `QG_MODE`는 기본값 `log` 유지. `fallback` 은 Document AI Layout Parser 설정이 필요하다
+  ([DOCUMENT_AI.md](docs/DOCUMENT_AI.md))
 
-MCP 키는 GUI가 생성하며 브라우저 응답이나 Cloud Run 환경변수에 싣지 않는다.
-검색 런타임은 Firestore의 키 해시 라우팅만 읽고, 관리 도구만 Secret Manager의
-원본 설정을 읽는다.
+MCP 키는 GUI가 생성한다. 통합 `rag-mcp`의 Cloud Run 환경변수에는 싣지 않으며, 콘솔의
+키 복사 버튼을 눌렀을 때만 로컬 세션 응답으로 돌려준다. 검색 런타임은 Firestore의 키 해시
+라우팅만 읽고, 관리 도구만 Secret Manager의 원본 설정을 읽는다.
 
 ### 4. preflight
 
@@ -217,7 +217,8 @@ MCP 키는 GUI가 생성하며 브라우저 응답이나 Cloud Run 환경변수�
 - 로컬 관리 GUI에서도 공통 MCP를 재배포할 수 있다. 기존 Artifact Registry 이미지를
   우선 재사용하고 단계별 상태를 표시한다
 - 학생 분리는 공통 `rag-mcp` 내부의 해시 라우팅으로 처리한다
-- `deploy_mcp.ps1` 은 **MCP 만 재배포**할 때 쓴다 (검색 파라미터·키 교체 등)
+- `deploy_mcp.ps1` 은 **MCP 만 재배포**할 때 쓴다 (검색 파라미터·코드 변경). 키 교체는 관리 GUI가
+  레지스트리에 게시하므로 재배포가 필요 없다
 - `ALLOW_UNAUTH=false` 로 두면 IAM 전용이 되고 FactChat 은 붙지 못한다
 - **공개 MCP 의 경계는 API 키뿐이다.** 키가 새면 그 코퍼스 전량이 열린다 — 교직원 키는 특히 주의
 - 학과 설정과 API 키의 원본은 Secret Manager의 `rag-mcp-departments`, 활성 revision은
@@ -237,11 +238,11 @@ MCP 키는 GUI가 생성하며 브라우저 응답이나 Cloud Run 환경변수�
 - **`-Dept` 인자는 없다.** Cloud 등록부의 학과 목록이 배포 대상이다
 - 올라가는 것: `rag-parser` 1개 · `rag-sync` 1개 · 공통 `rag-mcp` 1개 · Workflows · Scheduler
 - 끝나면 `PARSER_URL`, `SYNC_URL`, 공통 MCP URL을 출력한다
-- `-SkipMcp` 로 parser/sync 만, `-ShowKeys` 로 요약표에 키 노출
+- `-SkipMcp` 로 parser/sync 만 배포한다
 
 ### 2) MCP 만 재배포 (필요할 때)
 
-검색 파라미터·키만 바꿨으면 이미지 하나만 다시 빌드한다.
+검색 파라미터나 MCP 코드만 바꿨으면 이미지 하나만 다시 빌드한다.
 
 학과 설정과 키는 Cloud 등록부에서 읽으며 MCP 런타임은 하나다:
 
@@ -357,9 +358,10 @@ gcloud workflows executions list --workflow=rag-daily-sync --location=$R --proje
 1. 관리 GUI에서 두 값을 설정하고 `rag-sync` 라우팅 갱신
 2. 기존 INDEXED 문서의 `audience` 일괄 기록
    - `audience` 는 ingest 시점에만 기록된다
-   - 이미 INDEXED 인 문서는 ingest 초입에서 UNCHANGED 로 빠져 그 코드에 도달하지 못한다
+   - 이미 INDEXED 인 문서는 ingest 초입에서 UNCHANGED 로 빠져 그 코드에 도달하지 못한다.
+     `refreshContent: true` 로 다시 ingest 해야 기록된다. 일괄 도구는 없다
    - **건너뛰면 학생 코퍼스가 빈 채로 동작한다**
 3. 학생 코퍼스 적재
-4. 학생 MCP 배포
+4. 학생 키를 통합 `rag-mcp` 레지스트리에 게시 (관리 GUI)
 
 4를 먼저 하면 학생에게 빈 검색을 준다.

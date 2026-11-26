@@ -61,7 +61,6 @@ def unified(tmp_path, monkeypatch):
         Thread=lambda **kwargs: SimpleNamespace(start=lambda: None)))
     monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *a, **kw: pytest.fail("Unexpected live gcloud read"))
     monkeypatch.setattr(dept_gui, "_run_command", lambda *a, **kw: pytest.fail("Unexpected live shell mutation"))
-    monkeypatch.setattr(dept_gui, "_run_mcp_deploy_script", lambda *a, **kw: pytest.fail("Must not deploy per-department services"))
     monkeypatch.setattr(dept_gui, "_deployed_sync_department_map", dict)
     dept_gui._LATEST.clear()
     dept_gui._MCP_DEPLOY_RUNS.clear()

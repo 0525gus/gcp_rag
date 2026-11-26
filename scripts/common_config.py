@@ -18,7 +18,7 @@ DEPLOY_DEFAULTS: dict[str, Any] = {
     "PARSER_MAX_INSTANCES": 10,
     "SYNC_CONCURRENCY": 4,
     "MCP_CONCURRENCY": 40,
-    # FactChat 동시 40 검증으로 정한 값(docs/verification/factchat-cpu2-summary.md).
+    # 2026-09-11 FactChat 동시 40 대화 검증에서 MCP 오류 0건으로 정한 값.
     "MCP_CPU": 2,
     # FactChat 커넥터는 정적 헤더만 보내므로 Cloud Run IAM 을 열어야 한다.
     # 경계는 MCP_API_KEY 뿐이다 — 키가 새면 코퍼스 전량이 열린다.
