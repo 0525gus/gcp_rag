@@ -16,7 +16,7 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.dept_gui import _common, _provision_access_token
+from scripts import common_config, gcp_cli
 
 
 def summary(rows, field):
@@ -26,8 +26,8 @@ def summary(rows, field):
 
 
 def backend_audit(marker):
-    common = _common()
-    with httpx.Client(headers={"Authorization": f"Bearer {_provision_access_token()}"}, timeout=30) as client:
+    common = common_config.load_common(ROOT / "config")
+    with httpx.Client(headers={"Authorization": f"Bearer {gcp_cli.access_token()}"}, timeout=30) as client:
         payload = {
             "resourceNames": [f"projects/{common['GCP_PROJECT_ID']}"], "pageSize": 1000,
             "filter": f'resource.type="cloud_run_revision" AND resource.labels.service_name:"rag-mcp" AND '

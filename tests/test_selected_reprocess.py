@@ -10,7 +10,8 @@ from starlette.exceptions import HTTPException
 from fastapi.testclient import TestClient
 
 from fake_firestore import MemoryDb
-from scripts import common_config, dept_gui
+from scripts import common_config, dept_gui, gcp_cli
+from scripts.console import core, drive_lookup, issue_routes, sync_history
 from services.sync import main as sync
 from shared.firestore_state import DocStateStore
 from shared.models import DocState, DocStatus
@@ -109,17 +110,17 @@ def test_interrupted_ingestion_is_not_automatically_reissued(runtime):
 @pytest.fixture
 def gui(monkeypatch):
     db = Db({"docs/file": {"driveId": "drive", "status": "FAILED"}})
-    monkeypatch.setattr(dept_gui, "_sync_department_targets", lambda: ({"cs": {"driveIds": ["drive"], "name": "컴공"}}, {"drive": "cs"}))
-    monkeypatch.setattr(dept_gui, "_common", lambda: {"GCP_PROJECT_ID": "project", "GCP_REGION": "region"})
-    monkeypatch.setattr(dept_gui, "_firestore_client", lambda *args: db)
-    monkeypatch.setattr(dept_gui, "_firestore_collection_names", lambda: {"docState": "docs"})
-    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *args, **kwargs: (True, {"sourceContents": "reprocess_document:"}))
-    monkeypatch.setattr(dept_gui, "_list_sync_execution_rows", lambda *args, **kwargs: [])
-    monkeypatch.setattr(dept_gui, "_sync_access_token", lambda: "test-token")
-    monkeypatch.setattr(dept_gui, "_drive_service_account_status", lambda *args: {"status": "OK"})
-    monkeypatch.setattr(dept_gui, "_cloud_run_sync_urls", lambda *args: ("https://sync", "https://parser"))
+    monkeypatch.setattr(sync_history, "_sync_department_targets", lambda: ({"cs": {"driveIds": ["drive"], "name": "컴공"}}, {"drive": "cs"}))
+    monkeypatch.setattr(core, "_common", lambda: {"GCP_PROJECT_ID": "project", "GCP_REGION": "region"})
+    monkeypatch.setattr(core, "_firestore_client", lambda *args: db)
+    monkeypatch.setattr(core, "_firestore_collection_names", lambda: {"docState": "docs"})
+    monkeypatch.setattr(gcp_cli, "gcloud_json", lambda *args, **kwargs: (True, {"sourceContents": "reprocess_document:"}))
+    monkeypatch.setattr(sync_history, "_list_sync_execution_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(gcp_cli, "access_token", lambda: "test-token")
+    monkeypatch.setattr(drive_lookup, "_drive_service_account_status", lambda *args: {"status": "OK"})
+    monkeypatch.setattr(sync_history, "_cloud_run_sync_urls", lambda *args: ("https://sync", "https://parser"))
     post = MagicMock(return_value=(201, {"state": "ACTIVE", "name": "executions/id"}, 0))
-    monkeypatch.setattr(dept_gui, "_http_post_json", post)
+    monkeypatch.setattr(gcp_cli, "http_post_json", post)
     return db, post
 
 
@@ -129,7 +130,7 @@ def test_gui_starts_only_one_selected_document_and_authenticates_mutation(gui):
     url = "/api/v1/departments/cs/index-issues/file/reprocess"
     assert client.post(url, json={"requestId": "a" * 32}).status_code == 403
     assert not post.called
-    response = client.post(url, json={"requestId": "a" * 32}, headers={"x-local-session": dept_gui._SESSION_NONCE})
+    response = client.post(url, json={"requestId": "a" * 32}, headers={"x-local-session": core._SESSION_NONCE})
     assert response.status_code == 202
     args = json.loads(post.call_args.args[1]["argument"])
     assert args["reprocessFile"] == {"fileId": "file", "driveId": "drive"}
@@ -141,39 +142,39 @@ def test_gui_rejects_foreign_document_and_old_workflow(gui, monkeypatch):
     db, post = gui
     db.rows["docs/file"]["driveId"] = "foreign"
     with pytest.raises(FileNotFoundError):
-        dept_gui._start_manual_sync("cs", "reprocess", file_id="file", request_id="a" * 32)
+        sync_history._start_manual_sync("cs", "reprocess", file_id="file", request_id="a" * 32)
     db.rows["docs/file"]["driveId"] = "drive"
-    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *args, **kwargs: (True, {"sourceContents": "old workflow"}))
+    monkeypatch.setattr(gcp_cli, "gcloud_json", lambda *args, **kwargs: (True, {"sourceContents": "old workflow"}))
     with pytest.raises(ValueError, match="배포"):
-        dept_gui._start_manual_sync("cs", "reprocess", file_id="file", request_id="a" * 32)
+        sync_history._start_manual_sync("cs", "reprocess", file_id="file", request_id="a" * 32)
     post.assert_not_called()
 
 
 def test_gui_rejects_overlapping_sync(gui, monkeypatch):
-    monkeypatch.setattr(dept_gui, "_list_sync_execution_rows", lambda *args, **kwargs: [
+    monkeypatch.setattr(sync_history, "_list_sync_execution_rows", lambda *args, **kwargs: [
         {"state": "ACTIVE", "argument": json.dumps({"driveIds": ["drive"]})}])
     with pytest.raises(FileExistsError):
-        dept_gui._start_manual_sync("cs", "reprocess", file_id="file", request_id="a" * 32)
+        sync_history._start_manual_sync("cs", "reprocess", file_id="file", request_id="a" * 32)
     gui[1].assert_not_called()
 
 
 def test_reprocess_history_only_returns_the_selected_departments_document(gui, monkeypatch):
-    monkeypatch.setattr(dept_gui, "_index_issue_context", lambda code: (
+    monkeypatch.setattr(issue_routes, "_index_issue_context", lambda code: (
         {"name": "컴공"}, ["drive"], common_config.resolve({"GCP_PROJECT_ID": "project"}),
         {"docState": "docs"}))
     def execution(drive, file_id, state):
         return {"state": state, "name": "executions/id", "labels": {"department": "cs", "mode": "reprocess"},
                 "argument": json.dumps({"reprocessFile": {"driveId": drive, "fileId": file_id}})}
-    monkeypatch.setattr(dept_gui, "_http_json", lambda *args, **kwargs: (200, {
+    monkeypatch.setattr(gcp_cli, "http_json", lambda *args, **kwargs: (200, {
         "executions": [execution("drive", "file", "ACTIVE"), execution("foreign", "file", "FAILED"),
                        execution("drive", "other", "SUCCEEDED")], "nextPageToken": "next"}, 0))
-    response = dept_gui.index_issue_reprocess_history("cs", "file")
+    response = issue_routes.index_issue_reprocess_history("cs", "file")
     body = json.loads(response.body)
     assert len(body["runs"]) == 1 and body["runs"][0]["state"] == "ACTIVE"
     assert body["limited"] is True
     gui[0].rows["docs/file"]["driveId"] = "foreign"
     with pytest.raises(HTTPException) as exc:
-        dept_gui.index_issue_reprocess_history("cs", "file")
+        issue_routes.index_issue_reprocess_history("cs", "file")
     assert exc.value.status_code == 404
 
 

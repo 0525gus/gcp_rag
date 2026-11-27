@@ -145,7 +145,8 @@ def _gcloud_access_credentials() -> tuple[Any, str]:
 
 
 def _common_settings() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
-    from scripts.dept_gui import _common, _mcp_registry_read
+    from scripts.console.cloud_registry import _mcp_registry_read
+    from scripts.console.core import _common
 
     _record, configs = _mcp_registry_read()
     return _common(), configs

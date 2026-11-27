@@ -12,8 +12,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts import common_config
-from scripts.dept_gui import _provision_access_token
+from scripts import common_config, gcp_cli
 from scripts.mcp_registry import RegistryAdmin
 
 
@@ -74,7 +73,7 @@ def main():
     gcloud = shutil.which("gcloud")
     if not gcloud:
         parser.error("gcloud is required")
-    admin = RegistryAdmin(project, region, common["FIRESTORE_DATABASE"], _provision_access_token())
+    admin = RegistryAdmin(project, region, common["FIRESTORE_DATABASE"], gcp_cli.access_token())
     _, record, _ = admin.read()
     if not record:
         parser.error("Initialize the Cloud MCP registry before deploying the shared runtime")
@@ -198,7 +197,7 @@ def main():
             f"--region={region}", "--format=json",
         ], check=True, capture_output=True, text=True).stdout)
         url = service["status"]["url"]
-        admin = RegistryAdmin(project, region, common["FIRESTORE_DATABASE"], _provision_access_token())
+        admin = RegistryAdmin(project, region, common["FIRESTORE_DATABASE"], gcp_cli.access_token())
         _, current, configs = admin.read()
         if current.get("serviceUrl") != url:
             admin.write(configs, service_url=url, expected_revision=current["revision"])

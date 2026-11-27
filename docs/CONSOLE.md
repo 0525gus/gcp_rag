@@ -1,7 +1,8 @@
 # 관리 콘솔
 
 학과 설정(Cloud 등록부) 관리, 리소스·배포·동기화 상태 확인, 선택 문서 재처리, 해체를 하는 로컬 웹
-콘솔이다. 백엔드는 `scripts/dept_gui.py`, 화면은 `gui/public/console/`이다.
+콘솔이다. 진입점은 `scripts/dept_gui.py`, 영역별 백엔드는 `scripts/console/`, 화면은
+`gui/public/console/`이다. gcloud·HTTP 호출은 모두 `scripts/gcp_cli.py`를 거친다.
 
 ## 실행
 
@@ -57,15 +58,15 @@ python scripts/dept_gui.py         # 직접 실행
 | 대상 | 계획 키 |
 |---|---|
 | MCP 접근 중지 (통합 `rag-mcp`에서 학과·대상 키 경로만 끔, 서비스는 유지) | `mcp-{audience}` |
+| 이 학과 동기화 중지 (등록부에 중지 표시, rag-sync `DEPARTMENTS_JSON`을 남은 학과로 갱신) | `sync-env` |
 | Vertex RAG 코퍼스 | `corpus-{audience}` |
 | 학과 GCS 버킷 (`hwpOriginal`, `source`) | `bucket-{slot}` |
 | Firestore `doc_state`(driveId 기준)·하위 `rag_files`·`sync_tokens`·`doc_dlq`·`doc_split_queue` | `firestore-state` |
 | 공용 메타데이터 버킷의 `import-results/{corpusId}/` | `metadata-{audience}` |
 | Cloud 등록부의 학과 설정 (MCP 키 포함) | `registry-config` |
-| rag-sync `DEPARTMENTS_JSON` 갱신 | `sync-env` |
 
-- 실행 순서는 위 표 순서다. 등록부 설정은 앞 단계가 실패해도 다시 찾을 수 있게 뒤에, `sync-env`는 남은
-  학과만으로 맵을 만들도록 맨 뒤에 둔다. 공통 런타임은 Scheduler → Workflow → rag-sync → rag-parser 순이다.
+- 실행 순서는 위 표 순서다. 접근과 동기화를 먼저 멈춘 뒤 리소스를 지우고, 등록부 설정은 앞 단계가
+  실패해도 다시 찾을 수 있게 맨 뒤에 둔다. 공통 런타임은 Scheduler → Workflow → rag-sync → rag-parser 순이다.
 - 각 줄을 끌 수 있고, 끈 줄은 “선택하지 않아 남깁니다”로 남는다. 위험한 조합에는 경고가 붙는다.
   - `firestore-state`를 남기면 같은 드라이브를 다시 등록해도 `HASH_UNCHANGED`로 건너뛰어 새 코퍼스가 빈다.
   - `sync-env`를 끄면 없어진 버킷으로 계속 동기화해 업로드가 404 → DLQ로 간다.

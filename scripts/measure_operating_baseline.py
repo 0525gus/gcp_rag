@@ -57,7 +57,7 @@ def resolve_target_set(target_set: str) -> str:
 
 
 def _registry_scope(department: str, audience: str) -> tuple[str, str]:
-    from scripts.dept_gui import _mcp_registry_read
+    from scripts.console.cloud_registry import _mcp_registry_read
 
     record, configs = _mcp_registry_read()
     config = configs.get(department) or {}

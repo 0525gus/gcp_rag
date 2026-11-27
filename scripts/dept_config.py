@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import shutil
@@ -94,53 +93,6 @@ def list_departments() -> list[str]:
     return sorted(registry_configs())
 
 
-def _id_list(value: object) -> list[str]:
-    if isinstance(value, str):
-        values = value.replace("\r", "\n").replace(",", "\n").split("\n")
-    elif isinstance(value, (list, tuple)):
-        values = value
-    else:
-        values = []
-    return list(dict.fromkeys(str(item).strip() for item in values if str(item).strip()))
-
-
-def _deployment_metadata_b64(
-    dept: str,
-    audience: str,
-    dept_cfg: dict,
-    env: dict[str, str],
-    *,
-    staff_corpus: str,
-    student_corpus: str,
-) -> str:
-    drive = dept_cfg.get("drive") or {}
-    metadata = {
-        "schemaVersion": 2,
-        "managedBy": "gcp-rag",
-        "code": dept,
-        "name": str(dept_cfg.get("name") or dept),
-        "audience": audience,
-        "corpusMode": "split" if student_corpus else "single",
-        "yaml": dept_cfg,
-        "corpora": {"staff": staff_corpus, "student": student_corpus},
-        "buckets": {
-            "hwpOriginal": env.get("GCS_HWP_ORIGINAL_BUCKET", ""),
-            "source": env.get("GCS_SOURCE_BUCKET", ""),
-        },
-        "drive": {
-            "driveIds": _id_list(drive.get("driveIds")),
-            "syncFolderIds": _id_list(drive.get("syncFolderIds")),
-            "studentFolderIds": _id_list(drive.get("studentFolderIds")),
-        },
-        "minInstances": {
-            key: int((dept_cfg.get("minInstances") or {}).get(key, 0) or 0)
-            for key in AUDIENCES
-        },
-    }
-    raw = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
-
-
 def build_env(dept: str, audience: str) -> dict[str, str]:
     configs = registry_configs()
     if dept not in configs:
@@ -201,9 +153,6 @@ def build_env_from_config(dept: str, audience: str, dept_cfg: dict) -> dict[str,
         if drive.get(yaml_key):
             env[env_key] = _fmt(drive[yaml_key])
 
-    min_instances = dept_cfg.get("minInstances") or {}
-    env["MCP_MIN_INSTANCES"] = _fmt(min_instances.get(audience, 0))
-
     key = str(keys.get(audience) or "").strip()
     if not key:
         raise SystemExit(f"{dept}: keys.{audience} 가 비었다")
@@ -218,27 +167,13 @@ def build_env_from_config(dept: str, audience: str, dept_cfg: dict) -> dict[str,
             env[f"MCP_API_KEY_{other.upper()}"] = other_key
     _warn_if_weak(dept, audience, key)
 
-    env["MCP_SERVICE_NAME"] = f"rag-mcp-{dept}-{audience}"
-    env["MCP_AUDIENCE"] = audience
-    env["DEPT_CODE"] = dept
-    if dept_cfg.get("name"):
-        env["DEPT_NAME"] = _fmt(dept_cfg["name"])
-    env["DEPLOYMENT_METADATA_B64"] = _deployment_metadata_b64(
-        dept,
-        audience,
-        dept_cfg,
-        env,
-        staff_corpus=staff_corpus,
-        student_corpus=student_corpus,
-    )
-
     for key in (*PER_DEPLOYMENT_ENV, *_OPTIONAL_DEPT_ENV):
         env.setdefault(key, "")
 
     return env
 
 
-_OPTIONAL_DEPT_ENV = ("MCP_API_KEY_STAFF", "MCP_API_KEY_STUDENT", "DEPT_NAME")
+_OPTIONAL_DEPT_ENV = ("MCP_API_KEY_STAFF", "MCP_API_KEY_STUDENT")
 
 
 _MAP_FIELDS: tuple[tuple[str, str, bool], ...] = (
@@ -357,7 +292,7 @@ def configured_audiences(dept: str) -> tuple[str, ...]:
 
 
 def main() -> int:
-    # 한국어 Windows 콘솔은 cp949 라 학과명(DEPT_NAME)이 깨진 채 넘어간다.
+    # 한국어 Windows 콘솔은 cp949 라 학과명이 깨진 채 넘어간다.
     force_utf8_stdout()
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", action="store_true", help="학과 코드 목록")

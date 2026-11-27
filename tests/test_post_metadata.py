@@ -152,7 +152,7 @@ def test_metadata_file_never_enters_initial_listing_or_ingest(monkeypatch):
 
 
 def test_gui_enriches_every_chunk_with_the_same_post_and_preserves_drive_link(monkeypatch):
-    from scripts import dept_gui
+    from scripts.console import core, corpus_chat
 
     fid = "1fAIvFNOKtIIoy3RdP-Vrc9XEGV3nzyoa"
     snap = MagicMock()
@@ -167,14 +167,14 @@ def test_gui_enriches_every_chunk_with_the_same_post_and_preserves_drive_link(mo
     }
     db = MagicMock()
     db.get_all.return_value = [snap]
-    monkeypatch.setattr(dept_gui, "_firestore_client", lambda _: db)
+    monkeypatch.setattr(core, "_firestore_client", lambda _: db)
     config = {"buckets": {"source": "source"}, "drive": {"driveIds": ["drive"]}}
     raw = [{"sourceUri": f"gs://source/{fid}.md"}, {"sourceUri": f"gs://source/{fid}.meta.md"}]
-    result = dept_gui._corpus_post_metadata(raw, config, {"GCP_PROJECT_ID": "project"}, "student")
+    result = corpus_chat._corpus_post_metadata(raw, config, {"GCP_PROJECT_ID": "project"}, "student")
     assert result[fid]["websiteUrl"] == "https://example.org/post"
     assert result[fid]["driveUri"].startswith("https://drive.google.com/")
     assert len(db.get_all.call_args.args[0]) == 1
     snap.to_dict.return_value["audience"] = "STAFF"
     assert (
-        dept_gui._corpus_post_metadata(raw, config, {"GCP_PROJECT_ID": "project"}, "student") == {}
+        corpus_chat._corpus_post_metadata(raw, config, {"GCP_PROJECT_ID": "project"}, "student") == {}
     )

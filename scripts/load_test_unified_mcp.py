@@ -15,7 +15,7 @@ from google.oauth2.credentials import Credentials
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.dept_gui import _common, _provision_access_token
+from scripts import common_config, gcp_cli
 from scripts.mcp_registry import RegistryAdmin
 from shared.search_response import response_documents
 
@@ -50,8 +50,8 @@ async def main():
     args = parser.parse_args()
     if any(not 1 <= n <= 40 for n in args.concurrency) or not 1 <= args.requests_per_worker <= 10:
         parser.error("Use 1..40 concurrent workers and 1..10 requests per worker")
-    common = _common()
-    token = _provision_access_token()
+    common = common_config.load_common(ROOT / "config")
+    token = gcp_cli.access_token()
     admin = RegistryAdmin(common["GCP_PROJECT_ID"], common["GCP_REGION"],
                           common["FIRESTORE_DATABASE"], token)
     _, record, configs = admin.read()
