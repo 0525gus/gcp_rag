@@ -7,7 +7,8 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from scripts import common_config, dept_config, dept_gui
+from scripts import common_config, dept_config, dept_gui, gcp_cli
+from scripts.console import cloud_registry, core, dept_forms, environment_setup, provisioning, runtime_deploy, sa_repair, status_checks, sync_history, teardown_flow
 
 
 @pytest.fixture
@@ -16,10 +17,10 @@ def unified(tmp_path, monkeypatch):
     config_dir.mkdir(parents=True)
     common = {"GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3",
               "DOCAI_PROCESSOR_ID": "layout", "DOCAI_LOCATION": "us",
-              "MCP_UNIFIED_ENABLED": True, "GCS_HWP_ORIGINAL_BUCKET": "common-hwp",
+              "GCS_HWP_ORIGINAL_BUCKET": "common-hwp",
               "GCS_SOURCE_BUCKET": "common-source", "GCS_METADATA_BUCKET": "shared-metadata"}
     (config_dir / "common.yaml").write_text(yaml.safe_dump(common), encoding="utf-8")
-    for module in (dept_config, dept_gui):
+    for module in (dept_config, core):
         monkeypatch.setattr(module, "CONFIG_DIR", config_dir)
     departments = {code: {
         "name": f"Cloud {code}",
@@ -51,41 +52,40 @@ def unified(tmp_path, monkeypatch):
             departments.pop(code)
 
     monkeypatch.setattr(
-        dept_gui,
+        cloud_registry,
         "_mcp_registry_read",
         lambda **_kwargs: (copy.deepcopy(record), copy.deepcopy(departments)),
     )
-    monkeypatch.setattr(dept_gui, "_mcp_registry_mutate", mutate)
-    monkeypatch.setattr(dept_gui, "_unified_mcp_service", lambda: service)
-    monkeypatch.setattr(dept_gui, "threading", SimpleNamespace(
-        Thread=lambda **kwargs: SimpleNamespace(start=lambda: None)))
-    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *a, **kw: pytest.fail("Unexpected live gcloud read"))
-    monkeypatch.setattr(dept_gui, "_run_command", lambda *a, **kw: pytest.fail("Unexpected live shell mutation"))
-    monkeypatch.setattr(dept_gui, "_deployed_sync_department_map", dict)
-    dept_gui._LATEST.clear()
-    dept_gui._MCP_DEPLOY_RUNS.clear()
-    dept_gui._MCP_DEPLOY_CONFIGS.clear()
-    dept_gui._TEARDOWN_RUNS.clear()
+    monkeypatch.setattr(cloud_registry, "_mcp_registry_mutate", mutate)
+    monkeypatch.setattr(cloud_registry, "_unified_mcp_service", lambda: service)
+    deferred = SimpleNamespace(Thread=lambda **kwargs: SimpleNamespace(start=lambda: None))
+    for module in (environment_setup, provisioning, runtime_deploy, sa_repair, status_checks, teardown_flow):
+        monkeypatch.setattr(module, "threading", deferred)
+    monkeypatch.setattr(gcp_cli, "gcloud_json", lambda *a, **kw: pytest.fail("Unexpected live gcloud read"))
+    monkeypatch.setattr(gcp_cli, "run_command", lambda *a, **kw: pytest.fail("Unexpected live shell mutation"))
+    monkeypatch.setattr(sync_history, "_deployed_sync_department_map", dict)
+    core._LATEST.clear()
+    for store in (runtime_deploy._MCP_DEPLOYS, teardown_flow._TEARDOWNS):
+        store.clear()
     yield SimpleNamespace(configs=departments, record=record, service=service,
                           mutations=mutations)
-    dept_gui._LATEST.clear()
-    dept_gui._MCP_DEPLOY_RUNS.clear()
-    dept_gui._MCP_DEPLOY_CONFIGS.clear()
-    dept_gui._TEARDOWN_RUNS.clear()
+    core._LATEST.clear()
+    for store in (runtime_deploy._MCP_DEPLOYS, teardown_flow._TEARDOWNS):
+        store.clear()
 
 
 def test_registry_inventory_public_config_and_keys(unified):
-    records = dept_gui.cloud_mcp_department_records()
+    records = cloud_registry.cloud_mcp_department_records()
     assert {r["code"] for r in records} == {"cs", "ee"}
     assert all(r["cloudOnly"] and r["cloudEditable"] and r["unifiedMcp"] for r in records)
-    config = dept_gui.department_public_config_any("cs")
+    config = cloud_registry.department_public_config_any("cs")
     assert config["name"] == "Cloud cs"
     assert config["source"] == "cloud" and config["unifiedMcp"]
     assert "keys" not in config
-    assert dept_gui.department_mcp_key("cs", "student") == unified.configs["cs"]["keys"]["student"]
+    assert cloud_registry.department_mcp_key("cs", "student") == unified.configs["cs"]["keys"]["student"]
     public = json.dumps(records)
     assert all(key not in public for cfg in unified.configs.values() for key in cfg["keys"].values())
-    assert not dept_gui.department_code_availability("ee")["available"]
+    assert not dept_forms.department_code_availability("ee")["available"]
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -94,11 +94,11 @@ def test_docai_choice_is_saved_by_update_and_returned_to_editor(unified, monkeyp
 
     unified.configs["cs"]["enableDocaiFallback"] = not enabled
     unified.configs["cs"]["drive"]["syncFolderIds"].append("student-cs")
-    monkeypatch.setattr(dept_gui, "_merge_live_resource_validation", lambda *a: None)
-    monkeypatch.setattr(dept_gui, "_http_json", lambda *a, **kw: (200, {"status": "ok"}, 1))
+    monkeypatch.setattr(dept_forms, "_merge_live_resource_validation", lambda *a: None)
+    monkeypatch.setattr(gcp_cli, "http_json", lambda *a, **kw: (200, {"status": "ok"}, 1))
     maps = []
-    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw:
-                        maps.append(json.loads(dept_gui.cloud_departments_json())) or "cs")
+    monkeypatch.setattr(cloud_registry, "update_sync_department_map", lambda **kw:
+                        maps.append(json.loads(cloud_registry.cloud_departments_json())) or "cs")
     client = TestClient(dept_gui.app)
     headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"],
                "Origin": "http://testserver"}
@@ -110,7 +110,7 @@ def test_docai_choice_is_saved_by_update_and_returned_to_editor(unified, monkeyp
     assert yaml.safe_load(preview.json()["yamlPreview"])["enableDocaiFallback"] is enabled
     response = client.put("/api/v1/departments/cs", headers=headers, json=payload)
     assert response.status_code == 202, response.text
-    dept_gui._execute_mcp_deployment(response.json()["deployment"]["runId"])
+    runtime_deploy._execute_mcp_deployment(response.json()["deployment"]["runId"])
     assert client.get("/api/v1/departments/cs/config").json()["enableDocaiFallback"] is enabled
     assert maps[-1]["cs"]["enableDocaiFallback"] is enabled
     assert maps[-1]["ee"]["enableDocaiFallback"] is False
@@ -118,8 +118,8 @@ def test_docai_choice_is_saved_by_update_and_returned_to_editor(unified, monkeyp
 
 @pytest.mark.parametrize("value", ["false", 1, None, {}])
 def test_docai_choice_rejects_non_boolean_values(unified, value):
-    payload = {**dept_gui.department_public_config_any("cs"), "enableDocaiFallback": value}
-    _, validation = dept_gui.validate_candidate(payload, check_existing=False)
+    payload = {**cloud_registry.department_public_config_any("cs"), "enableDocaiFallback": value}
+    _, validation = dept_forms.validate_candidate(payload, check_existing=False)
     assert "enableDocaiFallback" in validation["fieldErrors"]
 
 
@@ -129,18 +129,18 @@ def test_docai_choice_rejects_non_boolean_values(unified, value):
 def test_image_ocr_option_save_is_independent_and_reaches_sync_map(unified, monkeypatch, enabled, fallback, endpoint):
     from fastapi.testclient import TestClient
 
-    common = dept_gui._common()
+    common = core._common()
     common.update(DOCAI_OCR_PROCESSOR_ID="ocr", DOCAI_OCR_LOCATION="us")
-    monkeypatch.setattr(dept_gui, "_common", lambda: common)
-    monkeypatch.setattr(dept_gui, "_http_json", lambda *a, **kw: (200, {"status": "ok"}, 1))
+    monkeypatch.setattr(core, "_common", lambda: common)
+    monkeypatch.setattr(gcp_cli, "http_json", lambda *a, **kw: (200, {"status": "ok"}, 1))
     maps = []
-    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw:
-                        maps.append(json.loads(dept_gui.cloud_departments_json())) or "cs")
+    monkeypatch.setattr(cloud_registry, "update_sync_department_map", lambda **kw:
+                        maps.append(json.loads(cloud_registry.cloud_departments_json())) or "cs")
     unified.configs["cs"]["enableDocaiFallback"] = fallback
     original = copy.deepcopy(unified.configs["cs"])
     client = TestClient(dept_gui.app)
     headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"], "Origin": "http://testserver"}
-    config = dept_gui.department_public_config_any("cs")
+    config = cloud_registry.department_public_config_any("cs")
     payload = {
         "enableImageOcr": enabled,
         "configRevision": config["configRevision"],
@@ -149,8 +149,8 @@ def test_image_ocr_option_save_is_independent_and_reaches_sync_map(unified, monk
         payload["enableDocaiFallback"] = fallback
     response = client.put(f"/api/v1/departments/cs/{endpoint}", headers=headers, json=payload)
     assert response.status_code == 202, response.text
-    dept_gui._execute_mcp_deployment(response.json()["deployment"]["runId"])
-    public = dept_gui.department_public_config_any("cs")
+    runtime_deploy._execute_mcp_deployment(response.json()["deployment"]["runId"])
+    public = cloud_registry.department_public_config_any("cs")
     assert public["enableImageOcr"] is enabled and public["enableDocaiFallback"] is fallback
     assert unified.configs["cs"] == {**original, "enableImageOcr": enabled}
     assert maps[-1]["cs"]["enableImageOcr"] is enabled
@@ -161,8 +161,8 @@ def test_image_ocr_option_save_is_independent_and_reaches_sync_map(unified, monk
 def test_image_ocr_enable_requires_explicit_processor_and_location(unified, endpoint):
     from fastapi.testclient import TestClient
 
-    config = dept_gui.department_public_config_any("cs")
-    _, validation = dept_gui.validate_candidate({**config, "enableImageOcr": True}, check_existing=False)
+    config = cloud_registry.department_public_config_any("cs")
+    _, validation = dept_forms.validate_candidate({**config, "enableImageOcr": True}, check_existing=False)
     assert "enableImageOcr" in validation["fieldErrors"]
     client = TestClient(dept_gui.app)
     headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"], "Origin": "http://testserver"}
@@ -171,7 +171,7 @@ def test_image_ocr_enable_requires_explicit_processor_and_location(unified, endp
         payload["enableDocaiFallback"] = False
     response = client.put(f"/api/v1/departments/cs/{endpoint}", headers=headers, json=payload)
     assert response.status_code == 422
-    assert not dept_gui._MCP_DEPLOY_RUNS
+    assert not runtime_deploy._MCP_DEPLOYS.runs
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -180,10 +180,10 @@ def test_drawer_docai_save_preserves_other_settings(unified, monkeypatch, enable
 
     unified.configs["cs"]["enableImageOcr"] = True
     original = copy.deepcopy(unified.configs["cs"])
-    monkeypatch.setattr(dept_gui, "_http_json", lambda *a, **kw: (200, {"status": "ok"}, 1))
+    monkeypatch.setattr(gcp_cli, "http_json", lambda *a, **kw: (200, {"status": "ok"}, 1))
     maps = []
-    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw:
-                        maps.append(json.loads(dept_gui.cloud_departments_json())) or "cs")
+    monkeypatch.setattr(cloud_registry, "update_sync_department_map", lambda **kw:
+                        maps.append(json.loads(cloud_registry.cloud_departments_json())) or "cs")
     client = TestClient(dept_gui.app)
     headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"],
                "Origin": "http://testserver"}
@@ -192,7 +192,7 @@ def test_drawer_docai_save_preserves_other_settings(unified, monkeypatch, enable
         "enableDocaiFallback": enabled, "configRevision": config["configRevision"],
     })
     assert response.status_code == 202, response.text
-    dept_gui._execute_mcp_deployment(response.json()["deployment"]["runId"])
+    runtime_deploy._execute_mcp_deployment(response.json()["deployment"]["runId"])
     assert unified.configs["cs"] == {**original, "enableDocaiFallback": enabled}
     assert maps[-1]["cs"]["enableDocaiFallback"] is enabled
     assert maps[-1]["ee"]["enableDocaiFallback"] is False
@@ -212,7 +212,7 @@ def test_drawer_docai_save_rejects_invalid_or_stale_requests(unified, case, stat
     headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"],
                "Origin": "http://testserver"}
     payload = {key: True,
-               "configRevision": dept_gui.department_public_config_any("cs")["configRevision"]}
+               "configRevision": cloud_registry.department_public_config_any("cs")["configRevision"]}
     if case == "no-session":
         headers = {}
     elif case == "stale":
@@ -225,7 +225,7 @@ def test_drawer_docai_save_rejects_invalid_or_stale_requests(unified, case, stat
         payload[other] = True
     response = client.put(f"/api/v1/departments/cs/{endpoint}", headers=headers, json=payload)
     assert response.status_code == status, response.text
-    assert not dept_gui._MCP_DEPLOY_RUNS
+    assert not runtime_deploy._MCP_DEPLOYS.runs
     assert not unified.mutations
 
 
@@ -244,7 +244,7 @@ def test_new_department_is_created_directly_in_cloud_registry(unified):
     }
     candidate["buckets"] = {"hwpOriginal": "ai-hwp", "source": "ai-source"}
 
-    created = dept_gui.create_department("ai", candidate)
+    created = dept_forms.create_department("ai", candidate)
 
     assert set(created["keys"]) == {"staff", "student"}
     assert all(len(value) >= 24 for value in created["keys"].values())
@@ -255,21 +255,21 @@ def test_new_department_is_created_directly_in_cloud_registry(unified):
 def test_all_departments_and_audiences_share_uri_with_distinct_disabled_status(unified):
     unified.configs["cs"]["mcpDisabledAudiences"] = ["student"]
     servers = [server for code in unified.configs
-               for server in dept_gui.department_mcp_servers(code)["servers"]]
+               for server in cloud_registry.department_mcp_servers(code)["servers"]]
     assert len(servers) == 4
     assert {server["serviceName"] for server in servers} == {"rag-mcp"}
     assert {server["mcpUrl"] for server in servers} == {"https://shared-mcp.example/mcp"}
     assert [server["status"] for server in servers].count("DISABLED") == 1
     with pytest.raises(ValueError, match="중지"):
-        dept_gui.department_mcp_key("cs", "student")
+        cloud_registry.department_mcp_key("cs", "student")
 
 
 def test_cloud_registry_failure_does_not_fall_back_to_old_local_config(unified, monkeypatch):
     def offline():
         raise RuntimeError("Registry offline")
-    monkeypatch.setattr(dept_gui, "_mcp_registry_read", offline)
+    monkeypatch.setattr(cloud_registry, "_mcp_registry_read", offline)
     with pytest.raises(RuntimeError):
-        dept_gui.department_public_config_any("cs")
+        cloud_registry.department_public_config_any("cs")
 
 
 def test_delayed_config_edit_cannot_undo_new_scope_or_sync_revocation(unified):
@@ -278,13 +278,13 @@ def test_delayed_config_edit_cannot_undo_new_scope_or_sync_revocation(unified):
     stale_editor["syncDisabled"] = False
     unified.configs["cs"]["mcpDisabledAudiences"] = ["student"]
     unified.configs["cs"]["syncDisabled"] = True
-    dept_gui._update_cloud_department_config("cs", stale_editor)
+    cloud_registry._update_cloud_department_config("cs", stale_editor)
     assert unified.configs["cs"]["mcpDisabledAudiences"] == ["student"]
     assert unified.configs["cs"]["syncDisabled"] is True
 
 
 def test_teardown_plan_stops_routes_and_sync_before_data_and_never_deletes_common_mcp(unified):
-    plan = dept_gui.department_teardown_plan("cs")
+    plan = teardown_flow.department_teardown_plan("cs")
     targets = plan["targets"]
     assert plan["unifiedMcp"]
     assert [target["kind"] for target in targets[:3]] == ["mcpRoute", "mcpRoute", "syncEnv"]
@@ -298,13 +298,13 @@ def test_teardown_plan_stops_routes_and_sync_before_data_and_never_deletes_commo
                                        ["mcp-staff", "sync-env", "corpus-staff"]])
 def test_data_or_registry_removal_rejects_incomplete_access_stop_selection(unified, selection):
     with pytest.raises(ValueError):
-        dept_gui.apply_teardown_selection(dept_gui.department_teardown_plan("cs"), selection)
+        teardown_flow.apply_teardown_selection(teardown_flow.department_teardown_plan("cs"), selection)
 
 
 def test_partial_cleanup_preserves_registry_and_shared_resources(unified):
     unified.configs["ee"]["buckets"]["source"] = unified.configs["cs"]["buckets"]["source"]
-    plan = dept_gui.department_teardown_plan("cs")
-    selected = dept_gui.apply_teardown_selection(plan, ["mcp-staff", "mcp-student", "sync-env", "corpus-staff", "bucket-source"])
+    plan = teardown_flow.department_teardown_plan("cs")
+    selected = teardown_flow.apply_teardown_selection(plan, ["mcp-staff", "mcp-student", "sync-env", "corpus-staff", "bucket-source"])
     rows = {row["key"]: row for row in selected["targets"]}
     assert rows["registry-config"]["skipped"]
     assert rows["bucket-source"]["skipped"] and not rows["bucket-source"]["selectable"]
@@ -312,18 +312,18 @@ def test_partial_cleanup_preserves_registry_and_shared_resources(unified):
 
 def test_teardown_does_not_rewrite_an_already_disabled_mcp_route(unified, monkeypatch):
     unified.configs["cs"]["mcpDisabledAudiences"] = ["student"]
-    plan = dept_gui.department_teardown_plan("cs")
+    plan = teardown_flow.department_teardown_plan("cs")
     student = next(row for row in plan["targets"] if row["key"] == "mcp-student")
     assert student["meta"]["alreadyDisabled"] is True
     monkeypatch.setattr(
-        dept_gui,
+        cloud_registry,
         "_mcp_registry_mutate",
         lambda *args: pytest.fail("already disabled route must not be rewritten"),
     )
 
-    run = dept_gui.start_teardown_run(plan, "cs", ["mcp-student"])
-    dept_gui._execute_teardown_run(run["runId"])
-    result = dept_gui._TEARDOWN_RUNS[run["runId"]]
+    run = teardown_flow.start_teardown_run(plan, "cs", ["mcp-student"])
+    teardown_flow._execute_teardown_run(run["runId"])
+    result = teardown_flow._TEARDOWNS.runs[run["runId"]]
     student = next(row for row in result["targets"] if row["key"] == "mcp-student")
 
     assert result["status"] == "COMPLETED"
@@ -333,16 +333,16 @@ def test_teardown_does_not_rewrite_an_already_disabled_mcp_route(unified, monkey
 
 def test_sync_stop_persists_and_stale_local_or_deployed_map_cannot_reactivate(unified, monkeypatch):
     expected_maps = []
-    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw: expected_maps.append(json.loads(kw["expected"])) or "ee")
-    dept_gui._refresh_cloud_teardown_routing("cs")
+    monkeypatch.setattr(cloud_registry, "update_sync_department_map", lambda **kw: expected_maps.append(json.loads(kw["expected"])) or "ee")
+    teardown_flow._refresh_cloud_teardown_routing("cs")
     assert unified.configs["cs"]["syncDisabled"] is True
     assert set(expected_maps[0]) == {"ee"}
-    assert set(json.loads(dept_gui.cloud_departments_json())) == {"ee"}
-    monkeypatch.setattr(dept_gui, "_deployed_sync_department_map", lambda: {
+    assert set(json.loads(cloud_registry.cloud_departments_json())) == {"ee"}
+    monkeypatch.setattr(sync_history, "_deployed_sync_department_map", lambda: {
         "cs": {"driveIds": ["drive-cs"]}, "ee": {"driveIds": ["drive-ee"]},
         "zz": {"driveIds": ["unregistered"]},
     })
-    targets, owners = dept_gui._sync_department_targets()
+    targets, owners = sync_history._sync_department_targets()
     assert set(targets) == {"ee"}
     assert owners == {"drive-ee": "ee"}
 
@@ -351,22 +351,22 @@ def test_last_active_sync_department_requires_removed_runtime_even_if_other_conf
     unified.configs["ee"]["syncDisabled"] = True
     def runtime_present():
         raise ValueError("Sync runtime still exists")
-    monkeypatch.setattr(dept_gui, "_require_sync_removed", runtime_present)
+    monkeypatch.setattr(teardown_flow, "_require_sync_removed", runtime_present)
     with pytest.raises(ValueError, match="Sync"):
-        dept_gui.start_teardown_run(dept_gui.department_teardown_plan("cs"), "cs", ["sync-env"])
+        teardown_flow.start_teardown_run(teardown_flow.department_teardown_plan("cs"), "cs", ["sync-env"])
     assert unified.mutations == []
 
 
 def test_failed_scope_stop_skips_all_resource_deletion_and_retains_registry(unified, monkeypatch):
-    plan = dept_gui.department_teardown_plan("cs")
+    plan = teardown_flow.department_teardown_plan("cs")
     calls = []
     def fail_scope(method, *args):
         calls.append(method)
         raise RuntimeError("Registry update failure")
-    monkeypatch.setattr(dept_gui, "_mcp_registry_mutate", fail_scope)
-    run = dept_gui.start_teardown_run(plan, "cs")
-    dept_gui._execute_teardown_run(run["runId"])
-    result = dept_gui._TEARDOWN_RUNS[run["runId"]]
+    monkeypatch.setattr(cloud_registry, "_mcp_registry_mutate", fail_scope)
+    run = teardown_flow.start_teardown_run(plan, "cs")
+    teardown_flow._execute_teardown_run(run["runId"])
+    result = teardown_flow._TEARDOWNS.runs[run["runId"]]
     assert result["status"] == "FAILED"
     assert set(calls) == {"disable_audience"}
     assert all(row["status"] == "SKIPPED" for row in result["targets"] if row["kind"] != "mcpRoute")
@@ -374,20 +374,20 @@ def test_failed_scope_stop_skips_all_resource_deletion_and_retains_registry(unif
 
 
 def test_shared_service_guard_blocks_even_a_malformed_department_plan(unified, monkeypatch):
-    plan = dept_gui.department_teardown_plan("cs")
-    plan["targets"] = [dept_gui._teardown_target("common", "cloudRun", "Bad target", "rag-mcp", [])]
-    monkeypatch.setattr(dept_gui, "_delete_cloud_run_service", lambda *args: pytest.fail("Shared MCP deletion attempted"))
-    run = dept_gui.start_teardown_run(plan, "cs")
-    dept_gui._execute_teardown_run(run["runId"])
-    assert dept_gui._TEARDOWN_RUNS[run["runId"]]["status"] == "FAILED"
+    plan = teardown_flow.department_teardown_plan("cs")
+    plan["targets"] = [teardown_flow._teardown_target("common", "cloudRun", "Bad target", "rag-mcp", [])]
+    monkeypatch.setattr(teardown_flow, "_delete_cloud_run_service", lambda *args: pytest.fail("Shared MCP deletion attempted"))
+    run = teardown_flow.start_teardown_run(plan, "cs")
+    teardown_flow._execute_teardown_run(run["runId"])
+    assert teardown_flow._TEARDOWNS.runs[run["runId"]]["status"] == "FAILED"
 
 
 def test_unexpected_sdk_error_marks_teardown_failed_instead_of_leaving_running(
     unified, monkeypatch
 ):
-    plan = dept_gui.department_teardown_plan("cs")
+    plan = teardown_flow.department_teardown_plan("cs")
     selected = ["mcp-staff", "mcp-student", "sync-env", "firestore-state"]
-    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw: "ee")
+    monkeypatch.setattr(cloud_registry, "update_sync_department_map", lambda **kw: "ee")
 
     class PermissionDeniedLike(Exception):
         pass
@@ -395,10 +395,10 @@ def test_unexpected_sdk_error_marks_teardown_failed_instead_of_leaving_running(
     def fail_firestore(*args, **kwargs):
         raise PermissionDeniedLike("403 Missing or insufficient permissions")
 
-    monkeypatch.setattr(dept_gui, "_delete_department_firestore_state", fail_firestore)
-    run = dept_gui.start_teardown_run(plan, "cs", selected)
-    dept_gui._execute_teardown_run(run["runId"])
-    result = dept_gui._TEARDOWN_RUNS[run["runId"]]
+    monkeypatch.setattr(teardown_flow, "_delete_department_firestore_state", fail_firestore)
+    run = teardown_flow.start_teardown_run(plan, "cs", selected)
+    teardown_flow._execute_teardown_run(run["runId"])
+    result = teardown_flow._TEARDOWNS.runs[run["runId"]]
     firestore = next(row for row in result["targets"] if row["key"] == "firestore-state")
 
     assert result["status"] == "PARTIAL"
@@ -408,7 +408,7 @@ def test_unexpected_sdk_error_marks_teardown_failed_instead_of_leaving_running(
 
 def test_full_cleanup_disables_access_and_sync_before_data_and_removes_config_last(unified, monkeypatch):
     events = []
-    original_mutate = dept_gui._mcp_registry_mutate
+    original_mutate = cloud_registry._mcp_registry_mutate
 
     def mutate(method, *args):
         events.append(method)
@@ -420,15 +420,15 @@ def test_full_cleanup_disables_access_and_sync_before_data_and_removes_config_la
         assert set(unified.configs["cs"]["mcpDisabledAudiences"]) == {"staff", "student"}
         return "deleted"
 
-    monkeypatch.setattr(dept_gui, "_mcp_registry_mutate", mutate)
-    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw: events.append("sync-map") or "ee")
-    monkeypatch.setattr(dept_gui, "_provision_access_token", lambda: "fake-token")
+    monkeypatch.setattr(cloud_registry, "_mcp_registry_mutate", mutate)
+    monkeypatch.setattr(cloud_registry, "update_sync_department_map", lambda **kw: events.append("sync-map") or "ee")
+    monkeypatch.setattr(gcp_cli, "access_token", lambda: "fake-token")
     for helper in ("_delete_rag_corpus", "_delete_bucket_resource", "_delete_department_firestore_state", "_delete_gcs_prefix"):
-        monkeypatch.setattr(dept_gui, helper, delete)
-    monkeypatch.setattr(dept_gui, "_delete_cloud_run_service", lambda *args: pytest.fail("Shared MCP deletion attempted"))
-    run = dept_gui.start_teardown_run(dept_gui.department_teardown_plan("cs"), "cs")
-    dept_gui._execute_teardown_run(run["runId"])
-    assert dept_gui._TEARDOWN_RUNS[run["runId"]]["status"] == "COMPLETED"
+        monkeypatch.setattr(teardown_flow, helper, delete)
+    monkeypatch.setattr(teardown_flow, "_delete_cloud_run_service", lambda *args: pytest.fail("Shared MCP deletion attempted"))
+    run = teardown_flow.start_teardown_run(teardown_flow.department_teardown_plan("cs"), "cs")
+    teardown_flow._execute_teardown_run(run["runId"])
+    assert teardown_flow._TEARDOWNS.runs[run["runId"]]["status"] == "COMPLETED"
     assert events[:4] == ["disable_audience", "disable_audience", "update_department", "sync-map"]
     assert "delete-data" in events[4:-1]
     assert events[-1] == "remove_department"
@@ -446,14 +446,14 @@ def test_deployment_registers_cloud_routes_without_building_or_deploying_departm
         unified.configs["cs"]["mcpDisabledAudiences"] = ["staff", "student"]
         unified.configs["cs"]["syncDisabled"] = True
     health_calls, maps = [], []
-    monkeypatch.setattr(dept_gui, "_http_json", lambda url, **kw: health_calls.append(url) or (200, {"status": "ok"}, 1))
-    monkeypatch.setattr(dept_gui, "update_sync_department_map", lambda **kw: maps.append(json.loads(dept_gui.cloud_departments_json())) or "ee")
-    run = dept_gui.start_mcp_deployment(
+    monkeypatch.setattr(gcp_cli, "http_json", lambda url, **kw: health_calls.append(url) or (200, {"status": "ok"}, 1))
+    monkeypatch.setattr(cloud_registry, "update_sync_department_map", lambda **kw: maps.append(json.loads(cloud_registry.cloud_departments_json())) or "ee")
+    run = runtime_deploy.start_mcp_deployment(
         "cs", cloud_config=config if new_department else None
     )
     assert run["serviceNames"] == ["rag-mcp"] and run["unifiedMcp"]
-    dept_gui._execute_mcp_deployment(run["runId"])
-    result = dept_gui._MCP_DEPLOY_RUNS[run["runId"]]
+    runtime_deploy._execute_mcp_deployment(run["runId"])
+    result = runtime_deploy._MCP_DEPLOYS.runs[run["runId"]]
     assert result["status"] == "COMPLETED", result
     assert [method for method, *_ in unified.mutations] == ["update_department"]
     assert health_calls == ["https://shared-mcp.example/health"]
@@ -466,15 +466,15 @@ def test_scoped_parser_save_only_updates_selected_audience(unified,monkeypatch,b
     from fastapi.testclient import TestClient
     unified.configs["cs"][base+"Student"]=True
     original=copy.deepcopy(unified.configs["cs"])
-    monkeypatch.setattr(dept_gui,"_http_json",lambda *a,**kw:(200,{"status":"ok"},1))
+    monkeypatch.setattr(gcp_cli,"http_json",lambda *a,**kw:(200,{"status":"ok"},1))
     maps=[]
-    monkeypatch.setattr(dept_gui,"update_sync_department_map",lambda **kw:maps.append(json.loads(dept_gui.cloud_departments_json())) or "cs")
+    monkeypatch.setattr(cloud_registry,"update_sync_department_map",lambda **kw:maps.append(json.loads(cloud_registry.cloud_departments_json())) or "cs")
     client=TestClient(dept_gui.app)
     headers={"X-Local-Session":client.get("/api/v1/session").json()["nonce"],"Origin":"http://testserver"}
     config=client.get("/api/v1/departments/cs/config").json()
     response=client.put(f"/api/v1/departments/cs/{endpoint}",headers=headers,json={base+"Staff":False,"configRevision":config["configRevision"]})
     assert response.status_code==202,response.text
-    dept_gui._execute_mcp_deployment(response.json()["deployment"]["runId"])
+    runtime_deploy._execute_mcp_deployment(response.json()["deployment"]["runId"])
     assert unified.configs["cs"]=={**original,base+"Staff":False}
     assert maps[-1]["cs"][base+"Student"] is True
     assert maps[-1]["cs"][base+"Staff"] is False
@@ -482,14 +482,14 @@ def test_scoped_parser_save_only_updates_selected_audience(unified,monkeypatch,b
 
 def test_scoped_options_roundtrip_in_full_editor(unified,monkeypatch):
     unified.configs["cs"]["drive"]["syncFolderIds"].append("student-cs")
-    monkeypatch.setattr(dept_gui,"_common",lambda:{**common_config.load_common(dept_config.CONFIG_DIR),"DOCAI_OCR_PROCESSOR_ID":"ocr","DOCAI_OCR_LOCATION":"us"})
-    public=dept_gui.department_public_config_any("cs")
+    monkeypatch.setattr(core,"_common",lambda:{**common_config.load_common(dept_config.CONFIG_DIR),"DOCAI_OCR_PROCESSOR_ID":"ocr","DOCAI_OCR_LOCATION":"us"})
+    public=cloud_registry.department_public_config_any("cs")
     public.update(enableDocaiFallbackStaff=False,enableDocaiFallbackStudent=True,
                   enableImageOcrStaff=False,enableImageOcrStudent=True)
-    candidate,validation=dept_gui.validate_candidate(public,check_existing=False)
+    candidate,validation=dept_forms.validate_candidate(public,check_existing=False)
     assert validation["valid"],validation
     for key in ["enableDocaiFallbackStaff","enableDocaiFallbackStudent","enableImageOcrStaff","enableImageOcrStudent"]:
         assert candidate[key] is public[key]
     public["enableImageOcrStaff"]="false"
-    _,validation=dept_gui.validate_candidate(public,check_existing=False)
+    _,validation=dept_forms.validate_candidate(public,check_existing=False)
     assert "enableImageOcrStaff" in validation["fieldErrors"]

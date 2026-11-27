@@ -8,18 +8,18 @@ import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.dept_gui import _common, _provision_access_token
+from scripts import common_config, gcp_cli
 
 
 def main():
     path = Path(sys.argv[1])
     report = json.loads(path.read_text(encoding="utf-8"))
-    common = _common()
+    common = common_config.load_common(ROOT / "config")
     project = common["GCP_PROJECT_ID"]
     start = report["startedAt"]
     end = report["finishedAt"]
     entries = []
-    with httpx.Client(headers={"Authorization": f"Bearer {_provision_access_token()}"}, timeout=45) as client:
+    with httpx.Client(headers={"Authorization": f"Bearer {gcp_cli.access_token()}"}, timeout=45) as client:
         payload = {"resourceNames": [f"projects/{project}"], "pageSize": 1000,
                    "filter": f'resource.type="cloud_run_revision" AND resource.labels.service_name="rag-mcp" '
                              f'AND httpRequest.userAgent="{report["userAgent"]}" '

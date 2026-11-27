@@ -1,10 +1,12 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import urllib.request
 import pytest
 from fastapi.testclient import TestClient
 
-from scripts import dept_gui, index_issues
+from scripts import dept_gui, gcp_cli, index_issues
+from scripts.console import issue_routes
 
 
 class Db:
@@ -108,7 +110,7 @@ def test_recovered_document_does_not_show_old_dlq_error():
 
 
 def test_api_failure_is_not_an_empty_success(monkeypatch):
-    monkeypatch.setattr(dept_gui, "_index_issue_context", MagicMock(side_effect=RuntimeError("permission denied")))
+    monkeypatch.setattr(issue_routes, "_index_issue_context", MagicMock(side_effect=RuntimeError("permission denied")))
     response = TestClient(dept_gui.app).get("/api/v1/departments/cs/index-issues")
     assert response.status_code == 503
     assert "permission denied" in response.json()["error"]["message"]
@@ -116,8 +118,8 @@ def test_api_failure_is_not_an_empty_success(monkeypatch):
 
 def test_file_evidence_filters_other_documents_and_departments(monkeypatch):
     uri = "gs://meta-bucket/import-results/123/abcd.ndjson"
-    monkeypatch.setattr(dept_gui, "_provision_access_token", lambda: "token")
-    monkeypatch.setattr(dept_gui, "_http_post_json", lambda *a, **kw: (200, {"entries": [
+    monkeypatch.setattr(gcp_cli, "access_token", lambda: "token")
+    monkeypatch.setattr(gcp_cli, "http_post_json", lambda *a, **kw: (200, {"entries": [
         {"textPayload": f"RAG import result sink read sink={uri}", "timestamp": "2026-10-06T00:01:00Z"},
         {"textPayload": "sink=gs://foreign-bucket/import-results/456/abcd.ndjson"},
     ]}, 0))
@@ -128,9 +130,9 @@ def test_file_evidence_filters_other_documents_and_departments(monkeypatch):
         b'{"Filename":"gs://foreign-bucket/file1.docx","Status":"INVALID_ARGUMENT"}',
     ])
     get = MagicMock(return_value=response)
-    monkeypatch.setattr(dept_gui.urllib.request, "urlopen", get)
+    monkeypatch.setattr(urllib.request, "urlopen", get)
     detail = {"jobs": [{"createdAt": "2026-10-06T00:00:00Z", "deadlineAt": "2026-10-06T00:15:00Z"}], "notices": []}
-    result = dept_gui._index_issue_evidence("file1", {"buckets": {"source": "source-bucket"}, "corpora": {"staff": "projects/p/locations/r/ragCorpora/123"}},
+    result = issue_routes._index_issue_evidence("file1", {"buckets": {"source": "source-bucket"}, "corpora": {"staff": "projects/p/locations/r/ragCorpora/123"}},
                                           {"GCP_PROJECT_ID": "p", "RAG_METADATA_BUCKET": "meta-bucket"}, detail)
     assert len(result) == 1 and result[0]["error"] == "File is empty"
     assert get.call_count == 1

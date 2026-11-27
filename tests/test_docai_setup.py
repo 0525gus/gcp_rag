@@ -4,7 +4,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from scripts import common_config, dept_gui, docai_setup
+from scripts import common_config, dept_gui, docai_setup, gcp_cli
+from scripts.console import core, docai_routes, environment_setup, runtime_deploy
 
 
 @pytest.fixture
@@ -104,12 +105,12 @@ def test_invalid_location_never_calls_google(setup, location):
 
 @pytest.fixture
 def gui(tmp_path, monkeypatch):
-    monkeypatch.setattr(dept_gui, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(core, "CONFIG_DIR", tmp_path)
     path = tmp_path / "common.yaml"
     path.write_text(yaml.safe_dump({"GCP_PROJECT_ID": "project-test", "CUSTOM_VALUE": "preserve-me",
                                     "DOCAI_PROCESSOR_ID": "layout", "DOCAI_LOCATION": "us"}), encoding="utf-8")
     verify = MagicMock()
-    monkeypatch.setattr(dept_gui._DOCAI_SETUP, "verify", verify)
+    monkeypatch.setattr(docai_routes._DOCAI_SETUP, "verify", verify)
     client = TestClient(dept_gui.app)
     headers = {"X-Local-Session": client.get("/api/v1/session").json()["nonce"], "Origin": "http://testserver"}
     return client, headers, path, verify
@@ -148,9 +149,9 @@ def test_setup_actions_require_local_session(gui, endpoint):
 
 def test_initial_setup_keeps_both_processors_optional_and_independent():
     payload = {"projectId": "project-test", "region": "asia-northeast3"}
-    candidate, result = dept_gui.validate_common_candidate(payload)
+    candidate, result = environment_setup.validate_common_candidate(payload)
     assert result["valid"] and "DOCAI_OCR_PROCESSOR_ID" not in candidate
-    candidate, result = dept_gui.validate_common_candidate({**payload, "docai": {
+    candidate, result = environment_setup.validate_common_candidate({**payload, "docai": {
         "ocr": {"processorId": "ocr", "location": "us"},
         "fallback": {"processorId": "", "location": ""},
     }})
@@ -159,18 +160,18 @@ def test_initial_setup_keeps_both_processors_optional_and_independent():
 
 
 def test_runtime_drift_detects_cleared_processor_and_deploy_location_default(monkeypatch):
-    monkeypatch.setattr(dept_gui, "_common", lambda: common_config.resolve({
+    monkeypatch.setattr(core, "_common", lambda: common_config.resolve({
         "GCP_PROJECT_ID": "project-test", "GCP_REGION": "asia-northeast3",
         "DOCAI_PROCESSOR_ID": "", "DOCAI_LOCATION": "", "DOCAI_OCR_PROCESSOR_ID": "new-ocr",
     }))
-    monkeypatch.setattr(dept_gui, "_expected_runtime_env", lambda: ("cs", {}, "{}"))
+    monkeypatch.setattr(runtime_deploy, "_expected_runtime_env", lambda: ("cs", {}, "{}"))
     deployed = {"DOCAI_PROCESSOR_ID": "old-layout", "DOCAI_LOCATION": "asia-northeast3",
                 "DOCAI_OCR_PROCESSOR_ID": "old-ocr", "DEPARTMENTS_JSON": "{}"}
-    monkeypatch.setattr(dept_gui, "_gcloud_json", lambda *a, **kw: (True, {
+    monkeypatch.setattr(gcp_cli, "gcloud_json", lambda *a, **kw: (True, {
         "spec": {"template": {"spec": {"containers": [{"env": [
             {"name": key, "value": value} for key, value in deployed.items()
         ]}]}}},
     }))
-    result = dept_gui.runtime_env_drift()
+    result = runtime_deploy.runtime_env_drift()
     parser = next(row for row in result["services"] if row["serviceName"] == "rag-parser")
     assert {row["key"] for row in parser["staleKeys"]} == {"DOCAI_PROCESSOR_ID", "DOCAI_OCR_PROCESSOR_ID"}

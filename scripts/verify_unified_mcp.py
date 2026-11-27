@@ -16,7 +16,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from scripts.dept_gui import _common, _provision_access_token
+from scripts import common_config, gcp_cli
 from scripts.mcp_registry import RegistryAdmin
 from shared.search_response import response_documents
 
@@ -53,8 +53,8 @@ def summarize(values):
 
 
 async def run(args):
-    common = _common()
-    token = _provision_access_token()
+    common = common_config.load_common(ROOT / "config")
+    token = gcp_cli.access_token()
     admin = RegistryAdmin(common["GCP_PROJECT_ID"], common["GCP_REGION"], common["FIRESTORE_DATABASE"], token)
     _, registry, configs = admin.read()
     targets = dict(pair.split("=", 1) for pair in args.target)

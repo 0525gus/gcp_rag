@@ -2,15 +2,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import urllib.request
+import threading
+import tempfile
+import subprocess
+import shutil
+import os
 import pytest
 from fastapi.testclient import TestClient
 
-from scripts import dept_gui
+from scripts import dept_gui, gcp_cli
+from scripts.console import environment_setup
 
 
 @pytest.fixture(autouse=True)
 def reset_install_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dept_gui, "_GCLOUD_INSTALL", {"status": "IDLE"})
+    monkeypatch.setattr(environment_setup, "_GCLOUD_INSTALL", {"status": "IDLE"})
 
 
 def _client() -> tuple[TestClient, dict[str, str]]:
@@ -23,10 +30,10 @@ def test_executable_found_in_default_install_dir_without_path(tmp_path: Path, mo
     gcloud = tmp_path / "Google" / "Cloud SDK" / "google-cloud-sdk" / "bin" / "gcloud.cmd"
     gcloud.parent.mkdir(parents=True)
     gcloud.write_text("@echo off")
-    monkeypatch.setattr(dept_gui.os, "name", "nt")
-    monkeypatch.setattr(dept_gui.shutil, "which", lambda name: None)
-    monkeypatch.setattr(dept_gui, "_gcloud_install_locations", lambda: [tmp_path / "missing.cmd", gcloud])
-    assert dept_gui._gcloud_executable() == str(gcloud)
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(gcp_cli, "gcloud_install_locations", lambda: [tmp_path / "missing.cmd", gcloud])
+    assert gcp_cli.gcloud_executable() == str(gcloud)
 
 
 def test_install_requires_local_session() -> None:
@@ -35,9 +42,9 @@ def test_install_requires_local_session() -> None:
 
 
 def test_install_is_noop_when_gcloud_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud.cmd")
+    monkeypatch.setattr(gcp_cli, "gcloud_executable", lambda: "gcloud.cmd")
     started: list[object] = []
-    monkeypatch.setattr(dept_gui.threading, "Thread", lambda **kw: started.append(kw))
+    monkeypatch.setattr(threading, "Thread", lambda **kw: started.append(kw))
     client, headers = _client()
     response = client.post("/api/v1/gcloud-install", headers=headers)
     assert response.status_code == 200
@@ -46,8 +53,8 @@ def test_install_is_noop_when_gcloud_present(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_install_rejected_outside_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: None)
-    monkeypatch.setattr(dept_gui.os, "name", "posix")
+    monkeypatch.setattr(gcp_cli, "gcloud_executable", lambda: None)
+    monkeypatch.setattr(os, "name", "posix")
     client, headers = _client()
     response = client.post("/api/v1/gcloud-install", headers=headers)
     assert response.status_code == 501
@@ -55,8 +62,8 @@ def test_install_rejected_outside_windows(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_double_click_starts_one_install(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: None)
-    monkeypatch.setattr(dept_gui.os, "name", "nt")
+    monkeypatch.setattr(gcp_cli, "gcloud_executable", lambda: None)
+    monkeypatch.setattr(os, "name", "nt")
     threads: list[dict] = []
 
     class FakeThread:
@@ -66,7 +73,7 @@ def test_double_click_starts_one_install(monkeypatch: pytest.MonkeyPatch) -> Non
         def start(self) -> None:
             return None
 
-    monkeypatch.setattr(dept_gui.threading, "Thread", FakeThread)
+    monkeypatch.setattr(threading, "Thread", FakeThread)
     client, headers = _client()
     first = client.post("/api/v1/gcloud-install", headers=headers)
     second = client.post("/api/v1/gcloud-install", headers=headers)
@@ -78,8 +85,8 @@ def test_double_click_starts_one_install(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_status_reports_done_once_gcloud_appears(monkeypatch: pytest.MonkeyPatch) -> None:
-    dept_gui._GCLOUD_INSTALL.update(status="INSTALLER_OPEN", message="창에서 설치")
-    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "C:/sdk/gcloud.cmd")
+    environment_setup._GCLOUD_INSTALL.update(status="INSTALLER_OPEN", message="창에서 설치")
+    monkeypatch.setattr(gcp_cli, "gcloud_executable", lambda: "C:/sdk/gcloud.cmd")
     client, _ = _client()
     body = client.get("/api/v1/gcloud-install").json()
     assert body["installed"] is True
@@ -87,9 +94,9 @@ def test_status_reports_done_once_gcloud_appears(monkeypatch: pytest.MonkeyPatch
 
 
 def test_unsigned_installer_is_deleted_and_never_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(dept_gui.shutil, "which", lambda name: None)
-    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: None)
-    monkeypatch.setattr(dept_gui.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(gcp_cli, "gcloud_executable", lambda: None)
+    monkeypatch.setattr(tempfile, "mkdtemp", lambda prefix: str(tmp_path))
 
     class FakeResponse:
         def __enter__(self):
@@ -102,34 +109,34 @@ def test_unsigned_installer_is_deleted_and_never_run(tmp_path: Path, monkeypatch
             data, self._data = getattr(self, "_data", b"MZ fake"), b""
             return data
 
-    monkeypatch.setattr(dept_gui.urllib.request, "urlopen", lambda url, timeout: FakeResponse())
-    monkeypatch.setattr(dept_gui, "_installer_signed_by_google", lambda path: False)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout: FakeResponse())
+    monkeypatch.setattr(environment_setup, "_installer_signed_by_google", lambda path: False)
     launched: list[object] = []
-    monkeypatch.setattr(dept_gui.subprocess, "Popen", lambda *a, **kw: launched.append(a))
-    monkeypatch.setattr(dept_gui.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: launched.append(a))
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0, raising=False)
 
-    dept_gui._run_gcloud_install()
+    environment_setup._run_gcloud_install()
 
     assert launched == []
     assert not (tmp_path / "GoogleCloudSDKInstaller.exe").exists()
-    assert dept_gui._GCLOUD_INSTALL["status"] == "FAILED"
+    assert environment_setup._GCLOUD_INSTALL["status"] == "FAILED"
 
 
 def test_winget_success_skips_installer_download(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[list[str]] = []
     present = {"value": False}
-    monkeypatch.setattr(dept_gui.shutil, "which", lambda name: "C:/winget.exe" if name.startswith("winget") else None)
-    monkeypatch.setattr(dept_gui, "_gcloud_executable", lambda: "gcloud.cmd" if present["value"] else None)
+    monkeypatch.setattr(shutil, "which", lambda name: "C:/winget.exe" if name.startswith("winget") else None)
+    monkeypatch.setattr(gcp_cli, "gcloud_executable", lambda: "gcloud.cmd" if present["value"] else None)
 
     def fake_run(args, **kwargs):
         calls.append(args)
         present["value"] = True
 
-    monkeypatch.setattr(dept_gui.subprocess, "run", fake_run)
-    monkeypatch.setattr(dept_gui.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
-    monkeypatch.setattr(dept_gui.urllib.request, "urlopen", lambda *a, **kw: pytest.fail("installer should not download"))
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **kw: pytest.fail("installer should not download"))
 
-    dept_gui._run_gcloud_install()
+    environment_setup._run_gcloud_install()
 
     assert calls[0][:4] == ["C:/winget.exe", "install", "--id", "Google.CloudSDK"]
-    assert dept_gui._GCLOUD_INSTALL["status"] == "DONE"
+    assert environment_setup._GCLOUD_INSTALL["status"] == "DONE"
